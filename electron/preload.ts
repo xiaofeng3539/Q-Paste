@@ -4,7 +4,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Database
   getItems: (params: { limit: number; offset: number }) =>
     ipcRenderer.invoke('db:get-items', params),
-  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number }) =>
+  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string }) =>
     ipcRenderer.invoke('db:insert-item', item),
   deleteItem: (id: number) =>
     ipcRenderer.invoke('db:delete-item', id),

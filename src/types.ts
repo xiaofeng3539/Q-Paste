@@ -12,7 +12,7 @@ export interface ClipboardItem {
 
 export interface ElectronAPI {
   getItems: (params: { limit: number; offset: number }) => Promise<ClipboardItem[]>
-  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number }) => Promise<number>
+  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string }) => Promise<number>
   deleteItem: (id: number) => Promise<boolean>
   forceClearData: (type: 'images' | 'all') => Promise<{ success: boolean; error?: string }>
   updateItem: (params: { id: number; content: string; preview: string; charCount: number; storageSize: number }) => Promise<boolean>
@@ -40,6 +40,7 @@ export interface ClipboardChangedData {
   preview: string
   charCount?: number
   storageSize?: number
+  createdAt: string
 }
 
 declare global {

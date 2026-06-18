@@ -98,6 +98,13 @@ async function initDatabase(): Promise<void> {
   saveDb()
 }
 
+/** 返回本地时间字符串 YYYY-MM-DD HH:mm:ss */
+function nowLocal(): string {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
 // ══════════════════════════════════════════════════════════════
 // Clipboard monitor — high-frequency polling + format sniffing
 // ══════════════════════════════════════════════════════════════
@@ -144,11 +151,13 @@ function checkClipboard(): void {
 
     const dataUrl = image.toDataURL()
     const size = image.getSize()
+    const createdAt = nowLocal()
     mainWindow.webContents.send('clipboard-changed', {
       type: 'image',
       content: dataUrl,
       preview: `图片 ${size.width}×${size.height}`,
       storageSize: buf.length,
+      createdAt,
     })
     return
   }
@@ -160,6 +169,7 @@ function checkClipboard(): void {
 
   const isUrl = /^https?:\/\/\S+/i.test(text)
   const preview = text.length > 100 ? text.slice(0, 100) + '...' : text
+  const createdAt = nowLocal()
 
   mainWindow.webContents.send('clipboard-changed', {
     type: isUrl ? 'url' : 'text',
@@ -167,6 +177,7 @@ function checkClipboard(): void {
     preview,
     charCount: text.length,
     storageSize: Buffer.byteLength(text, 'utf8'),
+    createdAt,
   })
 }
 
@@ -340,17 +351,18 @@ ipcMain.handle('db:get-items', (_event, { limit, offset }: { limit: number; offs
   return items
 })
 
-ipcMain.handle('db:insert-item', (_event, item: { type: string; content: string; preview: string; charCount: number; storageSize: number }) => {
+ipcMain.handle('db:insert-item', (_event, item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string }) => {
   if (!db) return null
   db.run(
-    `INSERT INTO items (type, content, preview, char_count, storage_size)
-     VALUES (:type, :content, :preview, :charCount, :storageSize)`,
+    `INSERT INTO items (type, content, preview, char_count, storage_size, created_at)
+     VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt)`,
     {
       ':type': item.type,
       ':content': item.content,
       ':preview': item.preview,
       ':charCount': item.charCount,
       ':storageSize': item.storageSize,
+      ':createdAt': item.createdAt,
     }
   )
   const res = db.exec('SELECT last_insert_rowid()')

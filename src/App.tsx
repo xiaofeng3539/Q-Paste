@@ -134,8 +134,8 @@ export default function App() {
         preview: data.preview,
         charCount: data.charCount ?? 0,
         storageSize: data.storageSize ?? 0,
+        createdAt: data.createdAt,
       })
-      const now = new Date().toISOString().replace('T', ' ').slice(0, 19)
       const newItem: ClipboardItem = {
         id,
         type: data.type,
@@ -143,7 +143,7 @@ export default function App() {
         preview: data.preview,
         char_count: data.charCount ?? 0,
         storage_size: data.storageSize ?? 0,
-        created_at: now,
+        created_at: data.createdAt,
       }
       setItems((prev) => [newItem, ...prev])
       setSelectedId(id)
