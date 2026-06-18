@@ -24,9 +24,11 @@ let isQuitting = false
 interface AppConfig {
   toggleShortcut: string
   storagePath?: string
+  autoStart?: boolean
+  startMinimized?: boolean
 }
 
-const defaultConfig: AppConfig = { toggleShortcut: 'Alt+Space' }
+const defaultConfig: AppConfig = { toggleShortcut: 'Alt+Space', autoStart: true, startMinimized: true }
 let config: AppConfig = { ...defaultConfig }
 
 function loadConfig(): void {
@@ -190,8 +192,22 @@ function getIconPath(): string {
 }
 
 function createTray(): void {
+  let icon: Electron.NativeImage
+
   const iconPath = getIconPath()
-  const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 })
+  if (fs.existsSync(iconPath)) {
+    icon = nativeImage.createFromPath(iconPath)
+  } else {
+    // 图标文件缺失，创建纯色占位图标（16x16 RGBA）
+    console.warn(`[Q-Paste] 托盘图标未找到: ${iconPath}，使用占位图标`)
+    const buf = Buffer.alloc(16 * 16 * 4)
+    for (let i = 0; i < buf.length; i += 4) {
+      buf[i] = 59; buf[i + 1] = 130; buf[i + 2] = 246; buf[i + 3] = 255 // 蓝色 #3b82f6
+    }
+    icon = nativeImage.createFromBuffer(buf, { width: 16, height: 16 })
+  }
+
+  // 不强制 resize，让系统根据 DPI 自动缩放
   tray = new Tray(icon)
   tray.setToolTip('Q-Paste')
 
@@ -271,6 +287,7 @@ function updateGlobalShortcut(newShortcut: string): boolean {
 // ── Window ──
 
 function createWindow(): void {
+  const hideOnStart = config.autoStart && config.startMinimized
   mainWindow = new BrowserWindow({
     width: 960,
     height: 640,
@@ -280,6 +297,7 @@ function createWindow(): void {
     title: 'Q-Paste',
     titleBarStyle: 'hiddenInset',
     frame: process.platform === 'darwin' ? false : true,
+    show: !hideOnStart,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -434,6 +452,26 @@ ipcMain.handle('window:close', () => {
   mainWindow?.hide()
 })
 
+// ── Auto-start ──
+ipcMain.handle('autostart:get', () => {
+  return {
+    autoStart: config.autoStart ?? true,
+    startMinimized: config.startMinimized ?? true,
+  }
+})
+
+ipcMain.handle('autostart:set', (_event, settings: { autoStart?: boolean; startMinimized?: boolean }) => {
+  if (typeof settings.autoStart === 'boolean') {
+    config.autoStart = settings.autoStart
+    app.setLoginItemSettings({ openAtLogin: settings.autoStart })
+  }
+  if (typeof settings.startMinimized === 'boolean') {
+    config.startMinimized = settings.startMinimized
+  }
+  saveConfig()
+  return { success: true }
+})
+
 ipcMain.handle('shortcut:get', () => {
   return config.toggleShortcut
 })
@@ -489,33 +527,48 @@ ipcMain.handle('storage:change-path', async (_event, newPath: string) => {
   app.exit(0)
 })
 
-// ── App lifecycle ──
+// ── Single instance lock ──
+const gotTheLock = app.requestSingleInstanceLock()
 
-// Hide default menu bar (File, Edit, View...)
-Menu.setApplicationMenu(null)
+if (!gotTheLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    showWindow()
+  })
 
-app.whenReady().then(async () => {
-  await initDatabase()
-  createWindow()
-  createTray()
-  registerGlobalShortcut()
-  startClipboardMonitor()
-})
+  // ── App lifecycle ──
 
-app.on('window-all-closed', () => {
-  // Don't quit — keep running in tray
-})
+  // Hide default menu bar (File, Edit, View...)
+  Menu.setApplicationMenu(null)
 
-app.on('activate', () => {
-  // macOS: re-create window when dock icon clicked
-  if (BrowserWindow.getAllWindows().length === 0) {
+  app.whenReady().then(async () => {
+    await initDatabase()
+
+    // 应用自启设置（Windows 注册表）
+    app.setLoginItemSettings({ openAtLogin: config.autoStart ?? true })
+
     createWindow()
-  }
-})
+    createTray()
+    registerGlobalShortcut()
+    startClipboardMonitor()
+  })
 
-app.on('before-quit', () => {
-  isQuitting = true
-  stopClipboardMonitor()
-  globalShortcut.unregisterAll()
-  if (db) { saveDb(); db.close() }
-})
+  app.on('window-all-closed', () => {
+    // Don't quit — keep running in tray
+  })
+
+  app.on('activate', () => {
+    // macOS: re-create window when dock icon clicked
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow()
+    }
+  })
+
+  app.on('before-quit', () => {
+    isQuitting = true
+    stopClipboardMonitor()
+    globalShortcut.unregisterAll()
+    if (db) { saveDb(); db.close() }
+  })
+}

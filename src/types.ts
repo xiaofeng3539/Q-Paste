@@ -24,6 +24,8 @@ export interface ElectronAPI {
   minimizeWindow: () => void
   maximizeWindow: () => void
   closeWindow: () => void
+  getAutoStart: () => Promise<{ autoStart: boolean; startMinimized: boolean }>
+  setAutoStart: (settings: { autoStart?: boolean; startMinimized?: boolean }) => Promise<{ success: boolean }>
   getShortcut: () => Promise<string>
   updateShortcut: (newShortcut: string) => Promise<{ success: boolean; shortcut: string }>
   selectDirectory: () => Promise<{ canceled: boolean; path: string | null }>

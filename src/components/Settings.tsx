@@ -41,6 +41,29 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
   const [autoStart, setAutoStart] = useState(true)
   const [minToTray, setMinToTray] = useState(true)
 
+  // 从主进程加载自启配置
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.electronAPI) return
+    window.electronAPI.getAutoStart().then((s) => {
+      setAutoStart(s.autoStart)
+      setMinToTray(s.startMinimized)
+    })
+  }, [])
+
+  function handleToggleAutoStart(v: boolean) {
+    setAutoStart(v)
+    if (typeof window !== 'undefined' && window.electronAPI) {
+      window.electronAPI.setAutoStart({ autoStart: v })
+    }
+  }
+
+  function handleToggleMinToTray(v: boolean) {
+    setMinToTray(v)
+    if (typeof window !== 'undefined' && window.electronAPI) {
+      window.electronAPI.setAutoStart({ startMinimized: v })
+    }
+  }
+
   // Storage management state
   const [storagePath, setStoragePath] = useState('')
 
@@ -234,7 +257,7 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                     type="button"
                     role="switch"
                     aria-checked={autoStart}
-                    onClick={() => setAutoStart(!autoStart)}
+                    onClick={() => handleToggleAutoStart(!autoStart)}
                     className={cn(
                       'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200',
                       autoStart ? 'bg-[var(--accent)]' : 'bg-zinc-300 dark:bg-zinc-600'
@@ -259,7 +282,7 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                     type="button"
                     role="switch"
                     aria-checked={minToTray}
-                    onClick={() => setMinToTray(!minToTray)}
+                    onClick={() => handleToggleMinToTray(!minToTray)}
                     className={cn(
                       'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200',
                       minToTray ? 'bg-[var(--accent)]' : 'bg-zinc-300 dark:bg-zinc-600'

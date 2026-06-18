@@ -35,6 +35,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
 
+  // Auto-start
+  getAutoStart: () =>
+    ipcRenderer.invoke('autostart:get') as Promise<{ autoStart: boolean; startMinimized: boolean }>,
+  setAutoStart: (settings: { autoStart?: boolean; startMinimized?: boolean }) =>
+    ipcRenderer.invoke('autostart:set', settings) as Promise<{ success: boolean }>,
+
   // Shortcut
   getShortcut: () => ipcRenderer.invoke('shortcut:get'),
   updateShortcut: (newShortcut: string) =>
