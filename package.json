@@ -2,6 +2,7 @@
   "name": "q-paste",
   "version": "1.0.0",
   "description": "Q-Paste - 跨平台剪贴板管理工具",
+  "license": "MIT",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
