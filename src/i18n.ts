@@ -97,6 +97,8 @@ const zh: Record<string, string> = {
   'storage.clearAll': '清空所有历史记录',
   'storage.clearAllHint': '此操作不可逆，将清空数据库',
   'storage.clearAllBtn': '清空全部',
+  'storage.clearImagesConfirm': '确定要清除所有图片缓存吗？此操作不可逆。',
+  'storage.clearAllConfirm': '确定要清空全部历史记录吗？此操作不可逆，所有数据将被永久删除。',
 
   // Settings - Shortcuts
   'shortcuts.copyItem': '复制选中内容',
@@ -211,6 +213,8 @@ const en: Record<string, string> = {
   'storage.clearAll': 'Clear all history',
   'storage.clearAllHint': 'This action is irreversible and will clear the database',
   'storage.clearAllBtn': 'Clear All',
+  'storage.clearImagesConfirm': 'Are you sure you want to clear all image cache? This action is irreversible.',
+  'storage.clearAllConfirm': 'Are you sure you want to clear all history? This action is irreversible and all data will be permanently deleted.',
 
   'shortcuts.copyItem': 'Copy selected',
   'shortcuts.deleteItem': 'Delete selected',

@@ -18,6 +18,7 @@ interface SettingsProps {
   useMonospace: boolean
   onMonospaceChange: (v: boolean) => void
   onBack: () => void
+  onClearData: (type: 'images' | 'all') => Promise<void>
 }
 
 type MenuKey = 'general' | 'appearance' | 'storage' | 'shortcuts' | 'about'
@@ -32,7 +33,7 @@ function useMenuItems(): { key: MenuKey; label: string; icon: React.ReactNode }[
   ]
 }
 
-export default function Settings({ theme, onThemeChange, language, onLanguageChange, accentColor, onAccentChange, listDensity, onDensityChange, useMonospace, onMonospaceChange, onBack }: SettingsProps) {
+export default function Settings({ theme, onThemeChange, language, onLanguageChange, accentColor, onAccentChange, listDensity, onDensityChange, useMonospace, onMonospaceChange, onBack, onClearData }: SettingsProps) {
   const [activeMenu, setActiveMenu] = useState<MenuKey>('general')
   const menuItems = useMenuItems()
 
@@ -41,9 +42,28 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
   const [minToTray, setMinToTray] = useState(true)
 
   // Storage management state
-  const [storagePath, setStoragePath] = useState(
-    'C:\\Users\\Admin\\AppData\\Roaming\\Q-Paste\\Data'
-  )
+  const [storagePath, setStoragePath] = useState('')
+
+  // Fetch real storage path from main process on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.electronAPI) {
+      window.electronAPI.getConfigPath().then((p) => {
+        if (p) setStoragePath(p)
+      })
+    } else {
+      setStoragePath('C:\\Users\\Admin\\AppData\\Roaming\\Q-Paste\\Data')
+    }
+  }, [])
+  const [storageUsage, setStorageUsage] = useState<{ textBytes: number; imageBytes: number; totalBytes: number } | null>(null)
+
+  // Fetch real storage stats when entering storage section
+  useEffect(() => {
+    if (activeMenu !== 'storage') return
+    if (typeof window !== 'undefined' && window.electronAPI) {
+      window.electronAPI.getStorageUsage().then(setStorageUsage)
+    }
+  }, [activeMenu])
+
   const [retentionDays, setRetentionDays] = useState('forever')
   const [maxRecords, setMaxRecords] = useState(500)
 
@@ -61,7 +81,7 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
 
   // ── Storage path handlers ──
 
-  /** 禁止写入的系统目录（无写入权限或写入会导致系统不稳定） */
+  /** 禁止写入的系统目录 */
   const FORBIDDEN_DIRS = [
     'C:\\Windows',
     'C:\\Windows\\System32',
@@ -80,88 +100,25 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
   }
 
   async function handleChangeDir() {
-    /*
-     * ═══════════════════════════════════════════════════════════
-     * 完整的"更改数据存储目录"流程（原子操作 + 权限校验）
-     * ═══════════════════════════════════════════════════════════
-     *
-     * ── Step 1: 调起系统原生"选择文件夹"对话框 ──
-     *
-     *   // 通过 IPC 调用主进程：
-     *   const result = await window.electronAPI.selectDirectory()
-     *   if (result.canceled || !result.path) return  // 用户取消了
-     *   const newPath = result.path
-     *
-     *   // 主进程 main.ts 对应的 IPC handler：
-     *   // ipcMain.handle('dialog:select-directory', async () => {
-     *   //   const result = await dialog.showOpenDialog(mainWindow!, {
-     *   //     title: '选择数据存储目录',
-     *   //     properties: ['openDirectory', 'createDirectory'],
-     *   //   })
-     *   //   return { canceled: result.canceled, path: result.filePaths[0] ?? null }
-     *   // })
-     *
-     * ── Step 2: 权限校验（拦截非法系统目录） ──
-     *
-     *   if (isForbiddenPath(newPath)) {
-     *     // 弹窗提示用户：该目录为系统保护目录，无法写入数据，请选择其他位置。
-     *     return
-     *   }
-     *
-     * ── Step 3: 原子迁移（先拷贝 → 校验 → 再删除旧数据） ──
-     *
-     *   ★ 核心原则：绝对不能直接剪切 / rename，中途断电会导致数据丢失 ★
-     *
-     *   // 3a. 停止剪贴板监听，暂停所有数据库写入
-     *   await window.electronAPI.stopClipboardMonitor()
-     *
-     *   // 3b. 关闭当前数据库连接，确保文件句柄释放
-     *   await window.electronAPI.closeDatabase()
-     *
-     *   // 3c. 在新目录下创建子目录结构（如 Q-Paste/Data/）
-     *   await window.electronAPI.ensureDir(newPath + '\\Data')
-     *
-     *   // 3d. 逐文件拷贝（rsync 语义）：
-     *   //     遍历旧目录下所有文件 → fs.copyFileSync(src, dst) → 记录拷贝清单
-     *   const copyResult = await window.electronAPI.copyDataFiles(oldPath, newPath + '\\Data')
-     *
-     *   // 3e. ★ 完整性校验：逐文件比对 size + checksum，确保新文件完好 ★
-     *   const verified = await window.electronAPI.verifyCopy(oldPath, newPath + '\\Data')
-     *   if (!verified) {
-     *     // 校验失败 → 清理新目录中已拷贝的不完整文件 → 恢复监听 → 提示用户重试
-     *     await window.electronAPI.cleanFailedCopy(newPath + '\\Data')
-     *     await window.electronAPI.startClipboardMonitor()
-     *     return
-     *   }
-     *
-     *   // 3f. 确认新目录完整写入后，再删除旧目录
-     *   await window.electronAPI.removeDirectory(oldPath)
-     *
-     *   // 3g. 更新配置文件中的 storagePath
-     *   await window.electronAPI.updateConfig({ storagePath: newPath + '\\Data' })
-     *
-     * ── Step 4: 重启应用 ──
-     *
-     *   // 新路径已写入配置，重启后 initDatabase() 会从新路径加载
-     *   app.relaunch()
-     *   app.exit(0)
-     */
+    if (typeof window === 'undefined' || !window.electronAPI) {
+      setStoragePath('选择目录功能需要在 Electron 环境中运行')
+      return
+    }
+    const result = await window.electronAPI.selectDirectory()
+    if (result.canceled || !result.path) return
 
-    // 如果 electronAPI 不可用（浏览器开发模式），直接更新本地状态
-    setStoragePath('选择目录功能需要在 Electron 环境中运行')
+    if (isForbiddenPath(result.path)) {
+      alert('该目录为系统保护目录，无法写入数据，请选择其他位置。')
+      return
+    }
+
+    // 保存新路径 → 迁移数据 → 强制重启
+    await window.electronAPI.changeStoragePath(result.path)
   }
 
   async function handleOpenFolder() {
-    /*
-     * Electron 打开系统文件管理器并定位到指定目录：
-     *
-     *   await window.electronAPI.openFolder(storagePath)
-     *
-     *   // 主进程 main.ts 对应的 IPC handler：
-     *   // ipcMain.handle('shell:open-folder', (_event, dirPath: string) => {
-     *   //   shell.openPath(dirPath)
-     *   // })
-     */
+    if (typeof window === 'undefined' || !window.electronAPI) return
+    await window.electronAPI.openFolder(storagePath)
   }
 
   // ── Shortcut recording listener ──
@@ -524,45 +481,43 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
           {activeMenu === 'storage' && (
             <div className="space-y-8">
               {/* ── Database status card ── */}
+              {(() => {
+                const textBytes = storageUsage?.textBytes ?? 0
+                const imageBytes = storageUsage?.imageBytes ?? 0
+                const totalBytes = storageUsage?.totalBytes ?? 0
+                const fmt = (b: number) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(1)} MB`
+                const usedBytes = textBytes + imageBytes
+                const textPct = usedBytes > 0 ? (textBytes / usedBytes) * 100 : 0
+                const imagePct = usedBytes > 0 ? (imageBytes / usedBytes) * 100 : 0
+
+                return (
               <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl p-5 border border-zinc-200 dark:border-zinc-800">
                 <div className="flex items-start justify-between gap-6">
                   <div>
                     <p className="text-[13px] text-zinc-500 dark:text-zinc-500 mb-1">{tr('storage.dbUsage')}</p>
-                    <p className="text-2xl font-semibold text-zinc-800 dark:text-zinc-200">156 MB</p>
-                    <p className="text-[12px] text-zinc-400 dark:text-zinc-600 mt-1">{tr('storage.totalSpace')} 500 MB {tr('storage.availableSpace')}</p>
+                    <p className="text-2xl font-semibold text-zinc-800 dark:text-zinc-200">{fmt(usedBytes)}</p>
+                    <p className="text-[12px] text-zinc-400 dark:text-zinc-600 mt-1">{tr('storage.textData')} {fmt(textBytes)} · {tr('storage.imageData')} {fmt(imageBytes)}</p>
                   </div>
                   <div className="flex-1 max-w-[280px] pt-2">
-                    {/* Storage bar */}
                     <div className="flex h-5 rounded-full overflow-hidden bg-zinc-200 dark:bg-zinc-800">
-                      <div
-                        className="bg-blue-500/70 transition-all"
-                        style={{ width: '24%' }}
-                        title="文本 120 MB"
-                      />
-                      <div
-                        className="bg-green-500/70 transition-all"
-                        style={{ width: '7.2%' }}
-                        title="图片 36 MB"
-                      />
-                      <div className="flex-1" title="可用 344 MB" />
+                      {textPct > 0 && <div className="bg-blue-500/70 transition-all" style={{ width: `${textPct}%` }} title={`${tr('storage.textData')} ${fmt(textBytes)}`} />}
+                      {imagePct > 0 && <div className="bg-green-500/70 transition-all" style={{ width: `${imagePct}%` }} title={`${tr('storage.imageData')} ${fmt(imageBytes)}`} />}
                     </div>
                     <div className="flex items-center gap-4 mt-2 text-[11px]">
                       <div className="flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-blue-500/70" />
-                        <span className="text-zinc-500 dark:text-zinc-500">{tr('storage.textData')} 120 MB</span>
+                        <span className="text-zinc-500 dark:text-zinc-500">{tr('storage.textData')} {fmt(textBytes)}</span>
                       </div>
                       <div className="flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-green-500/70" />
-                        <span className="text-zinc-500 dark:text-zinc-500">{tr('storage.imageData')} 36 MB</span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-zinc-300 dark:bg-zinc-700" />
-                        <span className="text-zinc-400 dark:text-zinc-600">{tr('storage.available')} 344 MB</span>
+                        <span className="text-zinc-500 dark:text-zinc-500">{tr('storage.imageData')} {fmt(imageBytes)}</span>
                       </div>
                     </div>
                   </div>
                 </div>
               </div>
+                )
+              })()}
 
               {/* ── Storage path ── */}
               <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl p-5 border border-zinc-200 dark:border-zinc-800">
@@ -648,24 +603,58 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
               <div>
                 <SectionHeader className="mb-4 !text-red-500/80 dark:!text-red-500/70">{tr('storage.dangerZone')}</SectionHeader>
                 <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-red-500/15 dark:border-red-500/10 p-5 space-y-5">
-                  {/* Clear image cache */}
+                  {/* Clear image cache — 原生 button */}
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-[13px] text-zinc-700 dark:text-zinc-300">{tr('storage.clearImages')}</p>
                       <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">{tr('storage.clearImagesHint')}</p>
                     </div>
-                    <button className="flex-shrink-0 h-7 px-3 rounded-md border border-zinc-300 dark:border-zinc-700 text-xs text-zinc-600 dark:text-zinc-400 hover:border-red-400 hover:text-red-500 dark:hover:border-red-500 dark:hover:text-red-400 transition-colors">
+                    <button
+                      style={{ fontSize: 12, padding: '6px 12px', borderRadius: 6, border: '1px solid #d1d5db', background: 'transparent', color: '#52525b', cursor: 'pointer' }}
+                      onClick={async () => {
+                        if (!window.confirm(tr('storage.clearImagesConfirm'))) return
+                        try {
+                          const res = await window.electronAPI.forceClearData('images')
+                          if (res.success) {
+                            alert('图片缓存已清除！')
+                            window.electronAPI.getStorageUsage().then(setStorageUsage)
+                            onClearData('images')
+                          } else {
+                            alert('底层清理失败，原因：' + (res.error || '未知'))
+                          }
+                        } catch (e: any) {
+                          alert('IPC 异常：' + (e?.message ?? String(e)))
+                        }
+                      }}
+                    >
                       {tr('storage.clear')}
                     </button>
                   </div>
 
-                  {/* Clear all */}
+                  {/* Clear all — 原生 button */}
                   <div className="flex items-center justify-between pt-4 border-t border-zinc-200 dark:border-zinc-800/50">
                     <div>
                       <p className="text-[13px] text-zinc-700 dark:text-zinc-300">{tr('storage.clearAll')}</p>
                       <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">{tr('storage.clearAllHint')}</p>
                     </div>
-                    <button className="flex-shrink-0 h-7 px-4 rounded-md bg-red-600 hover:bg-red-500 text-xs text-white transition-colors">
+                    <button
+                      style={{ fontSize: 12, padding: '6px 16px', borderRadius: 6, border: 'none', background: '#dc2626', color: '#fff', cursor: 'pointer' }}
+                      onClick={async () => {
+                        if (!window.confirm(tr('storage.clearAllConfirm'))) return
+                        try {
+                          const res = await window.electronAPI.forceClearData('all')
+                          if (res.success) {
+                            alert('物理清理成功！')
+                            window.electronAPI.getStorageUsage().then(setStorageUsage)
+                            onClearData('all')
+                          } else {
+                            alert('底层清理失败，原因：' + (res.error || '未知'))
+                          }
+                        } catch (e: any) {
+                          alert('IPC 异常：' + (e?.message ?? String(e)))
+                        }
+                      }}
+                    >
                       {tr('storage.clearAllBtn')}
                     </button>
                   </div>
@@ -686,7 +675,7 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
               </div>
               <div className="flex items-center justify-between py-2 border-b border-zinc-200 dark:border-zinc-800/50">
                 <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{tr('shortcuts.switchItem')}</span>
-                <kbd className="text-[11px] text-zinc-400 dark:text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded font-mono">↑ ↓</kbd>
+                <kbd className="text-[11px] text-zinc-400 dark:text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded font-mono">W S</kbd>
               </div>
               <div className="flex items-center justify-between py-2 border-b border-zinc-200 dark:border-zinc-800/50">
                 <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{tr('shortcuts.clearSearch')}</span>

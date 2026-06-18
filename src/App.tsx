@@ -266,13 +266,13 @@ export default function App() {
         handleDelete(selectedItem.id)
       }
 
-      // ↑↓ — navigate
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      // W/S — navigate
+      if ((e.key === 'w' || e.key === 's') && !e.metaKey && !e.ctrlKey && !e.altKey && !inInput) {
         e.preventDefault()
         const idx = filteredItems.findIndex((it) => it.id === selectedId)
         if (idx === -1) return
         const next =
-          e.key === 'ArrowDown'
+          e.key === 's'
             ? Math.min(idx + 1, filteredItems.length - 1)
             : Math.max(idx - 1, 0)
         setSelectedId(filteredItems[next].id)
@@ -285,7 +285,19 @@ export default function App() {
 
   // ── Settings view (fullscreen) ──
   if (showSettings) {
-    return <Settings theme={theme} onThemeChange={handleSetTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} onBack={() => setShowSettings(false)} />
+    return <Settings theme={theme} onThemeChange={handleSetTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} onBack={() => setShowSettings(false)} onClearData={async (type: 'images' | 'all') => {
+            if (type === 'all') {
+              setItems([])
+              setSelectedId(null)
+            } else {
+              setItems(prev => prev.filter(it => it.type !== 'image'))
+              setSelectedId(prev => {
+                if (prev === null) return null
+                const item = items.find(it => it.id === prev)
+                return item && item.type !== 'image' ? prev : null
+              })
+            }
+          }} />
   }
 
   // ── Main 3-column view ──

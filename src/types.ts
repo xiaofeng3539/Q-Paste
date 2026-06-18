@@ -14,8 +14,10 @@ export interface ElectronAPI {
   getItems: (params: { limit: number; offset: number }) => Promise<ClipboardItem[]>
   insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number }) => Promise<number>
   deleteItem: (id: number) => Promise<boolean>
+  forceClearData: (type: 'images' | 'all') => Promise<{ success: boolean; error?: string }>
   updateItem: (params: { id: number; content: string; preview: string; charCount: number; storageSize: number }) => Promise<boolean>
   getItemCount: () => Promise<number>
+  getStorageUsage: () => Promise<{ textBytes: number; imageBytes: number; totalBytes: number }>
   writeText: (text: string) => Promise<boolean>
   writeImage: (dataUrl: string) => Promise<boolean>
   onClipboardChanged: (callback: (data: ClipboardChangedData) => void) => () => void
@@ -24,6 +26,10 @@ export interface ElectronAPI {
   closeWindow: () => void
   getShortcut: () => Promise<string>
   updateShortcut: (newShortcut: string) => Promise<{ success: boolean; shortcut: string }>
+  selectDirectory: () => Promise<{ canceled: boolean; path: string | null }>
+  openFolder: (dirPath: string) => Promise<void>
+  changeStoragePath: (newPath: string) => Promise<void>
+  getConfigPath: () => Promise<string>
 }
 
 export interface ClipboardChangedData {

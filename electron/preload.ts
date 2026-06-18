@@ -8,10 +8,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('db:insert-item', item),
   deleteItem: (id: number) =>
     ipcRenderer.invoke('db:delete-item', id),
+  forceClearData: (type: string) =>
+    ipcRenderer.invoke('force-clear-data', type) as Promise<{ success: boolean; error?: string }>,
   updateItem: (params: { id: number; content: string; preview: string; charCount: number; storageSize: number }) =>
     ipcRenderer.invoke('db:update-item', params),
   getItemCount: () =>
     ipcRenderer.invoke('db:get-item-count'),
+  getStorageUsage: () =>
+    ipcRenderer.invoke('db:get-storage-usage') as Promise<{ textBytes: number; imageBytes: number; totalBytes: number }>,
 
   // Clipboard
   writeText: (text: string) =>
@@ -35,4 +39,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getShortcut: () => ipcRenderer.invoke('shortcut:get'),
   updateShortcut: (newShortcut: string) =>
     ipcRenderer.invoke('shortcut:update', newShortcut),
+
+  // Dialog & Shell
+  selectDirectory: () =>
+    ipcRenderer.invoke('dialog:select-directory') as Promise<{ canceled: boolean; path: string | null }>,
+  openFolder: (dirPath: string) =>
+    ipcRenderer.invoke('shell:open-folder', dirPath),
+  changeStoragePath: (newPath: string) =>
+    ipcRenderer.invoke('storage:change-path', newPath),
+  getConfigPath: () =>
+    ipcRenderer.invoke('config:get-path') as Promise<string>,
 })

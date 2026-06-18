@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, clipboard, nativeImage } from 'electron'
+import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, clipboard, nativeImage, dialog, shell } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import initSqlJs, { Database as SqlJsDatabase } from 'sql.js'
@@ -23,6 +23,7 @@ let isQuitting = false
 
 interface AppConfig {
   toggleShortcut: string
+  storagePath?: string
 }
 
 const defaultConfig: AppConfig = { toggleShortcut: 'Alt+Space' }
@@ -52,10 +53,25 @@ function saveDb(): void {
 
 async function initDatabase(): Promise<void> {
   const userDataPath = app.getPath('userData')
-  dbPath = path.join(userDataPath, 'q-paste.db')
   configPath = path.join(userDataPath, 'q-paste-config.json')
   loadConfig()
-  const SQL = await initSqlJs()
+
+  // Use custom storage path if set, otherwise fallback to default
+  const dataDir = config.storagePath || userDataPath
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true })
+  }
+  dbPath = path.join(dataDir, 'q-paste.db')
+  const SQL = await initSqlJs({
+    locateFile: (file: string) => {
+      // Production: WASM copied to resources/ by electron-builder extraResources
+      // Development: WASM inside node_modules/sql.js/dist/
+      if (app.isPackaged) {
+        return path.join(process.resourcesPath, file)
+      }
+      return path.join(__dirname, '../../node_modules/sql.js/dist', file)
+    },
+  })
 
   if (fs.existsSync(dbPath)) {
     const buf = fs.readFileSync(dbPath)
@@ -64,9 +80,9 @@ async function initDatabase(): Promise<void> {
     db = new SQL.Database()
   }
 
-  db.run('PRAGMA journal_mode = WAL')
+  db!.run('PRAGMA journal_mode = WAL')
 
-  db.run(`
+  db!.run(`
     CREATE TABLE IF NOT EXISTS items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       type TEXT NOT NULL,
@@ -166,30 +182,17 @@ function stopClipboardMonitor(): void {
 
 // ── Tray ──
 
-function createTrayIcon(): Electron.NativeImage {
-  // 16x16 tray icon — simple clipboard shape drawn programmatically
-  const size = 16
-  const canvas = Buffer.alloc(size * size * 4, 0) // RGBA
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const i = (y * size + x) * 4
-      // Clipboard body: rounded rect from (2,1) to (13,14)
-      const inBody = x >= 2 && x <= 13 && y >= 1 && y <= 14 && !(x < 4 && y < 3) && !(x > 11 && y < 3) && !(x < 4 && y > 12) && !(x > 11 && y > 12)
-      // Clip at top center
-      const inClip = y >= 0 && y <= 2 && x >= 5 && x <= 10
-      if (inBody || inClip) {
-        canvas[i] = 180     // R
-        canvas[i + 1] = 180 // G
-        canvas[i + 2] = 180 // B
-        canvas[i + 3] = 255 // A
-      }
-    }
+function getIconPath(): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'icon.png')
   }
-  return nativeImage.createFromBuffer(canvas, { width: size, height: size })
+  return path.join(__dirname, '../../build/icon.png')
 }
 
 function createTray(): void {
-  tray = new Tray(createTrayIcon())
+  const iconPath = getIconPath()
+  const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 })
+  tray = new Tray(icon)
   tray.setToolTip('Q-Paste')
 
   const contextMenu = Menu.buildFromTemplate([
@@ -365,6 +368,45 @@ ipcMain.handle('db:get-item-count', () => {
   return count
 })
 
+ipcMain.handle('db:get-storage-usage', () => {
+  if (!db) return { textBytes: 0, imageBytes: 0, totalBytes: 0 }
+  const stmt = db.prepare(
+    "SELECT type, SUM(storage_size) AS size FROM items GROUP BY type"
+  )
+  let textBytes = 0
+  let imageBytes = 0
+  while (stmt.step()) {
+    const row = stmt.getAsObject()
+    if (row.type === 'image') imageBytes += (row.size as number) || 0
+    else textBytes += (row.size as number) || 0
+  }
+  stmt.free()
+  // Also count the db file overhead
+  const dbFileBytes = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0
+  return { textBytes, imageBytes, totalBytes: dbFileBytes }
+})
+
+// ── 空间释放：force-clear-data（'images' | 'all'）──
+ipcMain.handle('force-clear-data', async (_event, type: string) => {
+  try {
+    if (!db) throw new Error('数据库未就绪')
+
+    if (type === 'images') {
+      db.run("DELETE FROM items WHERE type = 'image'")
+    } else if (type === 'all') {
+      db.run('DELETE FROM items')
+      clipboard.clear()
+    } else {
+      throw new Error('无效的清理类型：' + type)
+    }
+
+    saveDb()
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err?.message ?? String(err) }
+  }
+})
+
 ipcMain.handle('clipboard:write-text', (_event, text: string) => {
   clipboard.writeText(text)
   return true
@@ -399,6 +441,52 @@ ipcMain.handle('shortcut:get', () => {
 ipcMain.handle('shortcut:update', (_event, newShortcut: string) => {
   const success = updateGlobalShortcut(newShortcut)
   return { success, shortcut: success ? newShortcut : config.toggleShortcut }
+})
+
+ipcMain.handle('config:get-path', () => {
+  return config.storagePath || app.getPath('userData')
+})
+
+ipcMain.handle('dialog:select-directory', async () => {
+  if (!mainWindow) return { canceled: true, path: null }
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '选择数据存储目录',
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  return { canceled: result.canceled, path: result.filePaths[0] ?? null }
+})
+
+ipcMain.handle('shell:open-folder', (_event, dirPath: string) => {
+  shell.openPath(dirPath)
+})
+
+ipcMain.handle('storage:change-path', async (_event, newPath: string) => {
+  // 1. 保存新路径到配置文件，确保下次启动生效
+  config.storagePath = newPath
+  saveConfig()
+
+  // 2. 迁移数据：关闭当前数据库，将文件拷贝到新目录
+  stopClipboardMonitor()
+  if (db) { saveDb(); db.close(); db = null }
+
+  const newDir = path.join(newPath, 'Q-Paste-Data')
+  if (!fs.existsSync(newDir)) {
+    fs.mkdirSync(newDir, { recursive: true })
+  }
+
+  // 拷贝数据库和配置文件到新目录
+  const filesToCopy = ['q-paste.db', 'q-paste-config.json']
+  for (const file of filesToCopy) {
+    const src = path.join(app.getPath('userData'), file)
+    const dst = path.join(newDir, file)
+    if (fs.existsSync(src)) {
+      fs.copyFileSync(src, dst)
+    }
+  }
+
+  // 3. 强制重启
+  app.relaunch()
+  app.exit(0)
 })
 
 // ── App lifecycle ──
