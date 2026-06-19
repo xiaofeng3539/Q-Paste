@@ -197,9 +197,9 @@ function stopClipboardMonitor(): void {
 
 function getIconPath(): string {
   if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'tray-icon.png')
+    return path.join(process.resourcesPath, 'tray-icon.ico')
   }
-  return path.join(__dirname, '../../build/tray-icon.png')
+  return path.join(__dirname, '../../build/tray-icon.ico')
 }
 
 function createTray(): void {
