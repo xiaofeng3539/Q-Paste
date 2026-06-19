@@ -535,6 +535,7 @@ ipcMain.handle('storage:change-path', async (_event, newPath: string) => {
   }
 
   // 3. 强制重启
+  isQuitting = true
   app.relaunch()
   app.exit(0)
 })
