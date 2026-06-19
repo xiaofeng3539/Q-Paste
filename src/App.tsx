@@ -56,26 +56,21 @@ export default function App() {
   })
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Sync accent color CSS variable
   useEffect(() => {
     document.documentElement.style.setProperty('--accent', ACCENT_MAP[accentColor])
     try { localStorage.setItem('q-paste-accent', accentColor) } catch {}
   }, [accentColor])
 
-  // Sync density to localStorage
   useEffect(() => {
     try { localStorage.setItem('q-paste-density', listDensity) } catch {}
   }, [listDensity])
 
-  // Sync monospace to localStorage
   useEffect(() => {
     try { localStorage.setItem('q-paste-monospace', String(useMonospace)) } catch {}
   }, [useMonospace])
 
-  // Sync language to i18n module
   useEffect(() => { setLang(language) }, [language])
 
-  // Sync theme to <html> class
   useEffect(() => {
     const root = document.documentElement
     const resolved = resolveTheme(theme)
@@ -103,17 +98,12 @@ export default function App() {
     return () => mq.removeEventListener('change', onChange)
   }, [theme])
 
-  function handleSetTheme(t: Theme) {
-    setTheme(t)
-  }
-
   function showToast(msg: string) {
     setToast(msg)
     if (toastTimer.current) clearTimeout(toastTimer.current)
     toastTimer.current = setTimeout(() => setToast(null), 1500)
   }
 
-  // Load items from store on mount
   useEffect(() => {
     if (!isElectron) return
     window.electronAPI.getItems({ limit: 500, offset: 0 }).then((loaded) => {
@@ -124,7 +114,6 @@ export default function App() {
     })
   }, [])
 
-  // Listen for clipboard changes
   useEffect(() => {
     if (!isElectron) return
     const cleanup = window.electronAPI.onClipboardChanged(async (data: ClipboardChangedData) => {
@@ -285,7 +274,7 @@ export default function App() {
 
   // ── Settings view (fullscreen) ──
   if (showSettings) {
-    return <Settings theme={theme} onThemeChange={handleSetTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} onBack={() => setShowSettings(false)} onClearData={async (type: 'images' | 'all') => {
+    return <Settings theme={theme} onThemeChange={setTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} onBack={() => setShowSettings(false)} onClearData={async (type: 'images' | 'all') => {
             if (type === 'all') {
               setItems([])
               setSelectedId(null)

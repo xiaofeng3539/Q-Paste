@@ -239,26 +239,11 @@ const en: Record<string, string> = {
 
 const translations: Record<Lang, Record<string, string>> = { 'zh-CN': zh, en }
 
-export function t(lang: Lang, key: string, params?: Record<string, string | number>): string {
-  const dict = translations[lang] ?? zh
-  let text = dict[key] ?? translations['zh-CN'][key] ?? key
-  if (params) {
-    for (const [k, v] of Object.entries(params)) {
-      text = text.replace(`{${k}}`, String(v))
-    }
-  }
-  return text
-}
-
 let currentLang: Lang = 'zh-CN'
 
 export function setLang(lang: Lang) {
   currentLang = lang
   try { localStorage.setItem('q-paste-language', lang) } catch {}
-}
-
-export function getLang(): Lang {
-  return currentLang
 }
 
 export function loadLang(): Lang {
@@ -280,26 +265,3 @@ export function tr(key: string, params?: Record<string, string | number>): strin
   return text
 }
 
-import { useSyncExternalStore } from 'react'
-
-let listeners: (() => void)[] = []
-
-function subscribe(cb: () => void) {
-  listeners.push(cb)
-  return () => { listeners = listeners.filter((l) => l !== cb) }
-}
-
-function getSnapshot() {
-  return currentLang
-}
-
-export function notifyLangChange() {
-  for (const cb of listeners) cb()
-}
-
-export function useT() {
-  return {
-    t: tr,
-    lang: useSyncExternalStore(subscribe, getSnapshot),
-  }
-}

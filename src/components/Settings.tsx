@@ -41,7 +41,6 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
   const [autoStart, setAutoStart] = useState(true)
   const [minToTray, setMinToTray] = useState(true)
 
-  // 从主进程加载自启配置
   useEffect(() => {
     if (typeof window === 'undefined' || !window.electronAPI) return
     window.electronAPI.getAutoStart().then((s) => {
@@ -64,10 +63,7 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
     }
   }
 
-  // Storage management state
   const [storagePath, setStoragePath] = useState('')
-
-  // Fetch real storage path from main process on mount
   useEffect(() => {
     if (typeof window !== 'undefined' && window.electronAPI) {
       window.electronAPI.getConfigPath().then((p) => {
@@ -90,11 +86,8 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
   const [retentionDays, setRetentionDays] = useState('forever')
   const [maxRecords, setMaxRecords] = useState(500)
 
-  // Shortcut recording
   const [shortcutRecording, setShortcutRecording] = useState(false)
   const [toggleShortcut, setToggleShortcut] = useState('Alt+Space')
-
-  // Load shortcut from main process on mount
   useEffect(() => {
     if (typeof window === 'undefined' || !window.electronAPI) return
     window.electronAPI.getShortcut().then((sc) => {
