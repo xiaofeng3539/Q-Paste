@@ -8,14 +8,31 @@ export interface ClipboardItem {
   char_count: number
   storage_size: number
   created_at: string
+  /** 是否收藏/常驻 */
+  is_pinned: boolean
+  /** 自定义别名 */
+  alias: string
+  /** 分类标签 */
+  tags: string[]
+  /** 是否为敏感数据 */
+  is_sensitive: boolean
+}
+
+export interface UpdateMetaParams {
+  id: number
+  isPinned?: boolean
+  alias?: string
+  tags?: string
+  isSensitive?: boolean
 }
 
 export interface ElectronAPI {
   getItems: (params: { limit: number; offset: number }) => Promise<ClipboardItem[]>
-  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string }) => Promise<number>
+  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) => Promise<number>
   deleteItem: (id: number) => Promise<boolean>
   forceClearData: (type: 'images' | 'all') => Promise<{ success: boolean; error?: string }>
   updateItem: (params: { id: number; content: string; preview: string; charCount: number; storageSize: number }) => Promise<boolean>
+  updateItemMeta: (params: UpdateMetaParams) => Promise<boolean>
   getItemCount: () => Promise<number>
   getStorageUsage: () => Promise<{ textBytes: number; imageBytes: number; totalBytes: number }>
   writeText: (text: string) => Promise<boolean>

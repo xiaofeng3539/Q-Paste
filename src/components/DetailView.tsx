@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { ClipboardItem } from '../types'
-import { formatStorageSize, getTypeLabel } from '../lib/utils'
-import { FileText, Link, Image, Copy, Trash2, Monitor, X, ZoomIn, RotateCcw } from 'lucide-react'
+import { formatStorageSize, getTypeLabel, maskSensitive } from '../lib/utils'
+import { FileText, Link, Image, Copy, Trash2, Monitor, X, ZoomIn, RotateCcw, Pin, Eye, EyeOff, Shield, Plus } from 'lucide-react'
 import { tr } from '../i18n'
 
 interface DetailViewProps {
@@ -9,6 +9,10 @@ interface DetailViewProps {
   onCopy: (item: ClipboardItem) => void
   onDelete: (id: number) => void
   onUpdate: (id: number, content: string) => void
+  onTogglePin: (id: number) => void
+  onUpdateAlias: (id: number, alias: string) => void
+  onUpdateTags: (id: number, tags: string[]) => void
+  onToggleSensitive: (id: number) => void
   monospace: boolean
 }
 
@@ -27,7 +31,17 @@ const MIN_SCALE = 0.1
 const MAX_SCALE = 10
 const ZOOM_STEP = 0.1
 
-export default function DetailView({ item, onCopy, onDelete, onUpdate, monospace }: DetailViewProps) {
+export default function DetailView({
+  item,
+  onCopy,
+  onDelete,
+  onUpdate,
+  onTogglePin,
+  onUpdateAlias,
+  onUpdateTags,
+  onToggleSensitive,
+  monospace,
+}: DetailViewProps) {
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const monoClass = monospace ? 'font-mono' : 'font-sans'
   const [scale, setScale] = useState(1)
@@ -40,8 +54,26 @@ export default function DetailView({ item, onCopy, onDelete, onUpdate, monospace
   const [editContent, setEditContent] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // Reset edit mode when item changes
-  useEffect(() => { setIsEditing(false) }, [item?.id])
+  // Alias editing
+  const [isEditingAlias, setIsEditingAlias] = useState(false)
+  const [aliasDraft, setAliasDraft] = useState('')
+  const aliasInputRef = useRef<HTMLInputElement>(null)
+
+  // Tag input
+  const [showTagInput, setShowTagInput] = useState(false)
+  const [tagDraft, setTagDraft] = useState('')
+  const tagInputRef = useRef<HTMLInputElement>(null)
+
+  // Sensitive visibility
+  const [showSensitive, setShowSensitive] = useState(false)
+
+  // Reset edit modes when item changes
+  useEffect(() => {
+    setIsEditing(false)
+    setIsEditingAlias(false)
+    setShowTagInput(false)
+    setShowSensitive(false)
+  }, [item?.id])
 
   // Auto-focus textarea when entering edit mode
   useEffect(() => {
@@ -50,6 +82,21 @@ export default function DetailView({ item, onCopy, onDelete, onUpdate, monospace
       textareaRef.current.select()
     }
   }, [isEditing])
+
+  // Auto-focus alias input
+  useEffect(() => {
+    if (isEditingAlias && aliasInputRef.current) {
+      aliasInputRef.current.focus()
+      aliasInputRef.current.select()
+    }
+  }, [isEditingAlias])
+
+  // Auto-focus tag input
+  useEffect(() => {
+    if (showTagInput && tagInputRef.current) {
+      tagInputRef.current.focus()
+    }
+  }, [showTagInput])
 
   function enterEditMode() {
     if (!item || item.type === 'image') return
@@ -68,6 +115,40 @@ export default function DetailView({ item, onCopy, onDelete, onUpdate, monospace
 
   function cancelEdit() {
     setIsEditing(false)
+  }
+
+  function startEditAlias() {
+    if (!item) return
+    setAliasDraft(item.alias || '')
+    setIsEditingAlias(true)
+  }
+
+  function saveAlias() {
+    if (!item) return
+    const trimmed = aliasDraft.trim()
+    if (trimmed !== (item.alias || '')) {
+      onUpdateAlias(item.id, trimmed)
+    }
+    setIsEditingAlias(false)
+  }
+
+  function cancelAlias() {
+    setIsEditingAlias(false)
+  }
+
+  function handleAddTag() {
+    if (!item || !tagDraft.trim()) return
+    const tag = tagDraft.trim()
+    if (!item.tags.includes(tag)) {
+      onUpdateTags(item.id, [...item.tags, tag])
+    }
+    setTagDraft('')
+    setShowTagInput(false)
+  }
+
+  function handleRemoveTag(tag: string) {
+    if (!item) return
+    onUpdateTags(item.id, item.tags.filter((t) => t !== tag))
   }
 
   const openLightbox = useCallback(() => {
@@ -139,6 +220,7 @@ export default function DetailView({ item, onCopy, onDelete, onUpdate, monospace
     setPos({ x: 0, y: 0 })
   }
 
+  // ── 空状态 ──
   if (!item) {
     return (
       <div className="h-full flex items-center justify-center bg-transparent">
@@ -151,6 +233,7 @@ export default function DetailView({ item, onCopy, onDelete, onUpdate, monospace
             <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">↑↓</kbd> {tr('detail.switch')}</span>
             <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">C</kbd> {tr('detail.copy')}</span>
             <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">D</kbd> {tr('detail.delete')}</span>
+            <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">Ctrl+P</kbd> {tr('detail.pin')}</span>
           </div>
         </div>
       </div>
@@ -158,6 +241,9 @@ export default function DetailView({ item, onCopy, onDelete, onUpdate, monospace
   }
 
   const isImage = item.type === 'image'
+  const isSensitive = item.is_sensitive
+  const displayContent = isSensitive && !showSensitive ? maskSensitive(item.content) : item.content
+  const presetTags = tr('detail.presetTags').split(',').map((t) => t.trim())
 
   return (
     <div className="h-full flex flex-col bg-transparent">
@@ -167,6 +253,10 @@ export default function DetailView({ item, onCopy, onDelete, onUpdate, monospace
           {typeIcon(item.type)}
           <span className="text-xs text-zinc-600 dark:text-zinc-400">{getTypeLabel(item.type)}</span>
         </div>
+
+        {item.is_pinned && (
+          <Pin className="w-3 h-3 text-amber-500 flex-shrink-0" />
+        )}
 
         {!isImage && item.char_count > 0 && (
           <>
@@ -184,6 +274,84 @@ export default function DetailView({ item, onCopy, onDelete, onUpdate, monospace
           <span className="text-xs text-zinc-500 dark:text-zinc-500">{tr('detail.source')}</span>
         </div>
       </div>
+
+      {/* ── Alias row ── */}
+      {!isImage && (
+        <div className="flex-shrink-0 flex items-center gap-2 px-4 pb-1">
+          {isEditingAlias ? (
+            <input
+              ref={aliasInputRef}
+              type="text"
+              value={aliasDraft}
+              onChange={(e) => setAliasDraft(e.target.value)}
+              onBlur={saveAlias}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); saveAlias() }
+                if (e.key === 'Escape') { e.preventDefault(); cancelAlias() }
+              }}
+              placeholder={tr('detail.aliasPlaceholder')}
+              className="text-xs bg-transparent border-b border-blue-500 text-zinc-700 dark:text-zinc-300 outline-none w-48 py-0.5 transition-colors"
+            />
+          ) : (
+            <button
+              onClick={startEditAlias}
+              className="text-xs text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 border-b border-dashed border-zinc-300 dark:border-zinc-700 py-0.5 transition-colors max-w-[200px] truncate text-left"
+              title={tr('detail.aliasPlaceholder')}
+            >
+              {item.alias || tr('detail.aliasPlaceholder')}
+            </button>
+          )}
+          {item.is_sensitive && (
+            <span className="flex items-center gap-0.5 text-[10px] text-rose-500 dark:text-rose-400 bg-rose-50 dark:bg-rose-900/20 px-1.5 py-0.5 rounded">
+              <Shield className="w-2.5 h-2.5" />
+              {tr('detail.sensitive')}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* ── Tag row ── */}
+      {!isImage && (
+        <div className="flex-shrink-0 flex items-center gap-1.5 px-4 pb-2 flex-wrap">
+          {item.tags.map((tag) => (
+            <span
+              key={tag}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-[10px] text-zinc-600 dark:text-zinc-400"
+            >
+              {tag}
+              <button
+                onClick={() => handleRemoveTag(tag)}
+                className="hover:text-red-500 transition-colors"
+              >
+                <X className="w-2.5 h-2.5" />
+              </button>
+            </span>
+          ))}
+          {showTagInput ? (
+            <input
+              ref={tagInputRef}
+              type="text"
+              value={tagDraft}
+              onChange={(e) => setTagDraft(e.target.value)}
+              onBlur={() => { handleAddTag() }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); handleAddTag() }
+                if (e.key === 'Escape') { e.preventDefault(); setShowTagInput(false); setTagDraft('') }
+              }}
+              placeholder={tr('detail.tagPlaceholder')}
+              className="w-24 h-5 text-[10px] bg-transparent border-b border-blue-500 text-zinc-600 dark:text-zinc-400 outline-none"
+            />
+          ) : (
+            <button
+              onClick={() => setShowTagInput(true)}
+              className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
+              title={tr('detail.addTag')}
+            >
+              <Plus className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Main content */}
       <div className="flex-1 overflow-auto p-4">
@@ -221,13 +389,30 @@ export default function DetailView({ item, onCopy, onDelete, onUpdate, monospace
             spellCheck={false}
           />
         ) : (
-          <pre
-            onDoubleClick={enterEditMode}
-            className={`text-sm text-zinc-800 dark:text-zinc-200 font-normal antialiased whitespace-pre-wrap break-words leading-7 select-text cursor-text hover:bg-zinc-50 dark:hover:bg-zinc-900/50 rounded-lg p-1 -m-1 transition-colors ${monoClass}`}
-            title={tr('detail.dblClickZoom')}
-          >
-            {item.content}
-          </pre>
+          <div className="relative">
+            {/* Sensitive overlay */}
+            {isSensitive && !showSensitive && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center bg-zinc-50/80 dark:bg-zinc-900/80 rounded-lg backdrop-blur-[2px]">
+                <div className="text-center">
+                  <EyeOff className="w-8 h-8 text-zinc-400 dark:text-zinc-500 mx-auto mb-2" />
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">{tr('detail.sensitive')}</p>
+                  <button
+                    onClick={() => setShowSensitive(true)}
+                    className="text-xs text-[var(--accent)] hover:underline"
+                  >
+                    {tr('detail.showSensitive')}
+                  </button>
+                </div>
+              </div>
+            )}
+            <pre
+              onDoubleClick={enterEditMode}
+              className={`text-sm text-zinc-800 dark:text-zinc-200 font-normal antialiased whitespace-pre-wrap break-words leading-7 select-text cursor-text hover:bg-zinc-50 dark:hover:bg-zinc-900/50 rounded-lg p-1 -m-1 transition-colors ${monoClass}`}
+              title={tr('detail.dblClickZoom')}
+            >
+              {displayContent}
+            </pre>
+          </div>
         )}
       </div>
 
@@ -241,6 +426,51 @@ export default function DetailView({ item, onCopy, onDelete, onUpdate, monospace
           <span>{tr('detail.copy')}</span>
           <kbd className="ml-1 text-[10px] text-zinc-400 dark:text-zinc-500 bg-zinc-200 dark:bg-zinc-900 px-1 py-0.5 rounded font-mono">C</kbd>
         </button>
+
+        {/* Pin / Unpin button */}
+        <button
+          onClick={() => onTogglePin(item.id)}
+          className={`flex items-center gap-1.5 h-7 px-3 rounded-md text-xs transition-colors ${
+            item.is_pinned
+              ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-900/50'
+              : 'bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 dark:text-zinc-400'
+          }`}
+        >
+          <Pin className={`w-3.5 h-3.5 ${item.is_pinned ? 'fill-current' : ''}`} />
+          <span>{item.is_pinned ? tr('detail.unpin') : tr('detail.pin')}</span>
+          <kbd className="ml-1 text-[10px] text-zinc-400 dark:text-zinc-500 bg-zinc-200 dark:bg-zinc-900 px-1 py-0.5 rounded font-mono">Ctrl+P</kbd>
+        </button>
+
+        {/* Mark sensitive button */}
+        {!isImage && (
+          <button
+            onClick={() => onToggleSensitive(item.id)}
+            className={`flex items-center gap-1.5 h-7 px-3 rounded-md text-xs transition-colors ${
+              item.is_sensitive
+                ? 'bg-rose-100 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400 hover:bg-rose-200 dark:hover:bg-rose-900/50'
+                : 'bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 dark:text-zinc-400'
+            }`}
+            title={item.is_sensitive ? tr('detail.unmarkSensitive') : tr('detail.markSensitive')}
+          >
+            <Shield className="w-3.5 h-3.5" />
+          </button>
+        )}
+
+        {/* Sensitive toggle — only shown when content is sensitive */}
+        {isSensitive && (
+          <button
+            onClick={() => setShowSensitive(!showSensitive)}
+            className={`flex items-center gap-1.5 h-7 px-2 rounded-md text-xs transition-colors ${
+              showSensitive
+                ? 'bg-rose-100 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400'
+                : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400'
+            } hover:bg-zinc-200 dark:hover:bg-zinc-700`}
+            title={showSensitive ? tr('detail.hideSensitive') : tr('detail.showSensitive')}
+          >
+            {showSensitive ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+          </button>
+        )}
+
         <button
           onClick={() => onDelete(item.id)}
           className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-red-100 dark:hover:bg-red-900/50 hover:text-red-600 dark:hover:text-red-400 text-xs text-zinc-500 dark:text-zinc-400 transition-colors"

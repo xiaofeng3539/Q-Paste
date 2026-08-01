@@ -694,6 +694,10 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                 <kbd className="text-[11px] text-zinc-400 dark:text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded font-mono">W S</kbd>
               </div>
               <div className="flex items-center justify-between py-2 border-b border-zinc-200 dark:border-zinc-800/50">
+                <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{tr('shortcuts.pinItem')}</span>
+                <kbd className="text-[11px] text-zinc-400 dark:text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded font-mono">Ctrl+P</kbd>
+              </div>
+              <div className="flex items-center justify-between py-2 border-b border-zinc-200 dark:border-zinc-800/50">
                 <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{tr('shortcuts.clearSearch')}</span>
                 <kbd className="text-[11px] text-zinc-400 dark:text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded font-mono">Esc</kbd>
               </div>

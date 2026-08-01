@@ -4,7 +4,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Database
   getItems: (params: { limit: number; offset: number }) =>
     ipcRenderer.invoke('db:get-items', params),
-  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string }) =>
+  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) =>
     ipcRenderer.invoke('db:insert-item', item),
   deleteItem: (id: number) =>
     ipcRenderer.invoke('db:delete-item', id),
@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('force-clear-data', type) as Promise<{ success: boolean; error?: string }>,
   updateItem: (params: { id: number; content: string; preview: string; charCount: number; storageSize: number }) =>
     ipcRenderer.invoke('db:update-item', params),
+  updateItemMeta: (params: { id: number; isPinned?: boolean; alias?: string; tags?: string; isSensitive?: boolean }) =>
+    ipcRenderer.invoke('db:update-item-meta', params) as Promise<boolean>,
   getItemCount: () =>
     ipcRenderer.invoke('db:get-item-count'),
   getStorageUsage: () =>

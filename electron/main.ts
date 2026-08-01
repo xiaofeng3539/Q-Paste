@@ -11,6 +11,10 @@ interface StoredItem {
   char_count: number
   storage_size: number
   created_at: string
+  is_pinned: number
+  alias: string
+  tags: string
+  is_sensitive: number
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -95,6 +99,18 @@ async function initDatabase(): Promise<void> {
       created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     )
   `)
+
+  // 迁移：添加金库功能字段（幂等 — 列已存在则忽略）
+  const migrations = [
+    "ALTER TABLE items ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE items ADD COLUMN alias TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE items ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE items ADD COLUMN is_sensitive INTEGER NOT NULL DEFAULT 0",
+  ]
+  for (const sql of migrations) {
+    try { db!.run(sql) } catch { /* 列已存在，忽略 */ }
+  }
+
   saveDb()
 }
 
@@ -340,7 +356,7 @@ function createWindow(): void {
 ipcMain.handle('db:get-items', (_event, { limit, offset }: { limit: number; offset: number }) => {
   if (!db) return []
   const stmt = db.prepare(
-    'SELECT id, type, content, preview, char_count, storage_size, created_at FROM items ORDER BY created_at DESC LIMIT :limit OFFSET :offset'
+    'SELECT id, type, content, preview, char_count, storage_size, created_at, is_pinned, alias, tags, is_sensitive FROM items ORDER BY created_at DESC LIMIT :limit OFFSET :offset'
   )
   stmt.bind({ ':limit': limit, ':offset': offset })
   const items: StoredItem[] = []
@@ -351,11 +367,11 @@ ipcMain.handle('db:get-items', (_event, { limit, offset }: { limit: number; offs
   return items
 })
 
-ipcMain.handle('db:insert-item', (_event, item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string }) => {
+ipcMain.handle('db:insert-item', (_event, item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) => {
   if (!db) return null
   db.run(
-    `INSERT INTO items (type, content, preview, char_count, storage_size, created_at)
-     VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt)`,
+    `INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_sensitive)
+     VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt, :isSensitive)`,
     {
       ':type': item.type,
       ':content': item.content,
@@ -363,6 +379,7 @@ ipcMain.handle('db:insert-item', (_event, item: { type: string; content: string;
       ':charCount': item.charCount,
       ':storageSize': item.storageSize,
       ':createdAt': item.createdAt,
+      ':isSensitive': item.isSensitive ? 1 : 0,
     }
   )
   const res = db.exec('SELECT last_insert_rowid()')
@@ -383,6 +400,34 @@ ipcMain.handle('db:update-item', (_event, { id, content, preview, charCount, sto
     'UPDATE items SET content = :content, preview = :preview, char_count = :charCount, storage_size = :storageSize WHERE id = :id',
     { ':id': id, ':content': content, ':preview': preview, ':charCount': charCount, ':storageSize': storageSize }
   )
+  saveDb()
+  return true
+})
+
+ipcMain.handle('db:update-item-meta', (_event, params: { id: number; isPinned?: boolean; alias?: string; tags?: string; isSensitive?: boolean }) => {
+  if (!db) return false
+  const sets: string[] = []
+  const binds: Record<string, any> = { ':id': params.id }
+
+  if (typeof params.isPinned === 'boolean') {
+    sets.push('is_pinned = :isPinned')
+    binds[':isPinned'] = params.isPinned ? 1 : 0
+  }
+  if (typeof params.alias === 'string') {
+    sets.push('alias = :alias')
+    binds[':alias'] = params.alias
+  }
+  if (typeof params.tags === 'string') {
+    sets.push('tags = :tags')
+    binds[':tags'] = params.tags
+  }
+  if (typeof params.isSensitive === 'boolean') {
+    sets.push('is_sensitive = :isSensitive')
+    binds[':isSensitive'] = params.isSensitive ? 1 : 0
+  }
+
+  if (sets.length === 0) return false
+  db.run(`UPDATE items SET ${sets.join(', ')} WHERE id = :id`, binds)
   saveDb()
   return true
 })
@@ -422,9 +467,9 @@ ipcMain.handle('force-clear-data', async (_event, type: string) => {
     if (!db) throw new Error('数据库未就绪')
 
     if (type === 'images') {
-      db.run("DELETE FROM items WHERE type = 'image'")
+      db.run("DELETE FROM items WHERE type = 'image' AND is_pinned = 0")
     } else if (type === 'all') {
-      db.run('DELETE FROM items')
+      db.run('DELETE FROM items WHERE is_pinned = 0')
       clipboard.clear()
     } else {
       throw new Error('无效的清理类型：' + type)

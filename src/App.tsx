@@ -6,12 +6,14 @@ import Settings from './components/Settings'
 import { ClipboardItem, ClipboardChangedData } from './types'
 import { mockItems } from './mock'
 import { Lang, loadLang, setLang, tr } from './i18n'
+import { detectSensitive } from './lib/utils'
 
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI
 
 type Theme = 'light' | 'dark' | 'auto'
 type AccentColor = 'blue' | 'purple' | 'orange' | 'green' | 'rose' | 'amber'
 type ListDensity = 'comfortable' | 'compact'
+type ActiveTab = 'history' | 'vault'
 
 export const ACCENT_MAP: Record<AccentColor, string> = {
   blue: '#3b82f6', purple: '#a855f7', orange: '#f97316',
@@ -37,6 +39,10 @@ function saveTheme(theme: Theme) {
   try { localStorage.setItem('q-paste-theme', theme) } catch {}
 }
 
+function safeParseJson(str: string, fallback: any): any {
+  try { return JSON.parse(str) } catch { return fallback }
+}
+
 export default function App() {
   const [items, setItems] = useState<ClipboardItem[]>(isElectron ? [] : mockItems)
   const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -54,6 +60,9 @@ export default function App() {
   const [useMonospace, setUseMonospace] = useState(() => {
     try { return localStorage.getItem('q-paste-monospace') !== 'false' } catch { return true }
   })
+  const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
+    try { return (localStorage.getItem('q-paste-tab') as ActiveTab) || 'history' } catch { return 'history' }
+  })
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
@@ -68,6 +77,10 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem('q-paste-monospace', String(useMonospace)) } catch {}
   }, [useMonospace])
+
+  useEffect(() => {
+    try { localStorage.setItem('q-paste-tab', activeTab) } catch {}
+  }, [activeTab])
 
   useEffect(() => { setLang(language) }, [language])
 
@@ -107,9 +120,17 @@ export default function App() {
   useEffect(() => {
     if (!isElectron) return
     window.electronAPI.getItems({ limit: 500, offset: 0 }).then((loaded) => {
-      setItems(loaded)
-      if (loaded.length > 0) {
-        setSelectedId(loaded[0].id)
+      // 规范化数据库字段到前端模型
+      const normalized = loaded.map((row: any) => ({
+        ...row,
+        is_pinned: row.is_pinned === 1 || row.is_pinned === true,
+        alias: row.alias || '',
+        tags: Array.isArray(row.tags) ? row.tags : safeParseJson(row.tags, []),
+        is_sensitive: row.is_sensitive === 1 || row.is_sensitive === true,
+      })) as ClipboardItem[]
+      setItems(normalized)
+      if (normalized.length > 0) {
+        setSelectedId(normalized[0].id)
       }
     })
   }, [])
@@ -117,6 +138,7 @@ export default function App() {
   useEffect(() => {
     if (!isElectron) return
     const cleanup = window.electronAPI.onClipboardChanged(async (data: ClipboardChangedData) => {
+      const isSensitive = data.type !== 'image' && detectSensitive(data.content)
       const id = await window.electronAPI.insertItem({
         type: data.type,
         content: data.content,
@@ -124,6 +146,7 @@ export default function App() {
         charCount: data.charCount ?? 0,
         storageSize: data.storageSize ?? 0,
         createdAt: data.createdAt,
+        isSensitive,
       })
       const newItem: ClipboardItem = {
         id,
@@ -133,10 +156,18 @@ export default function App() {
         char_count: data.charCount ?? 0,
         storage_size: data.storageSize ?? 0,
         created_at: data.createdAt,
+        is_pinned: false,
+        alias: '',
+        tags: [],
+        is_sensitive: isSensitive,
       }
       setItems((prev) => [newItem, ...prev])
       setSelectedId(id)
-      showToast(tr('toast.captured'))
+      if (isSensitive) {
+        showToast(tr('toast.sensitiveDetected'))
+      } else {
+        showToast(tr('toast.captured'))
+      }
     })
     return cleanup
   }, [])
@@ -155,6 +186,21 @@ export default function App() {
         it.content.toLowerCase().includes(q)
     )
   }, [items, searchQuery])
+
+  const vaultItems = useMemo(() => {
+    return items
+      .filter((it) => it.is_pinned)
+      .sort((a, b) => {
+        const tagA = a.tags.length > 0 ? a.tags[0] : '￿'
+        const tagB = b.tags.length > 0 ? b.tags[0] : '￿'
+        if (tagA !== tagB) return tagA.localeCompare(tagB)
+        const aliasA = a.alias || a.preview
+        const aliasB = b.alias || b.preview
+        return aliasA.localeCompare(aliasB)
+      })
+  }, [items])
+
+  const sidebarItems = activeTab === 'vault' ? vaultItems : filteredItems
 
   const handleSelect = useCallback((id: number) => {
     setSelectedId(id)
@@ -212,6 +258,62 @@ export default function App() {
     []
   )
 
+  const handleTogglePin = useCallback(
+    async (id: number) => {
+      const item = items.find((it) => it.id === id)
+      if (!item) return
+      const next = !item.is_pinned
+      if (isElectron) {
+        await window.electronAPI.updateItemMeta({ id, isPinned: next })
+      }
+      setItems((prev) =>
+        prev.map((it) => (it.id === id ? { ...it, is_pinned: next } : it))
+      )
+      showToast(next ? tr('toast.pinned') : tr('toast.unpinned'))
+    },
+    [items]
+  )
+
+  const handleUpdateAlias = useCallback(
+    async (id: number, alias: string) => {
+      if (isElectron) {
+        await window.electronAPI.updateItemMeta({ id, alias })
+      }
+      setItems((prev) =>
+        prev.map((it) => (it.id === id ? { ...it, alias } : it))
+      )
+    },
+    []
+  )
+
+  const handleUpdateTags = useCallback(
+    async (id: number, tags: string[]) => {
+      const tagsJson = JSON.stringify(tags)
+      if (isElectron) {
+        await window.electronAPI.updateItemMeta({ id, tags: tagsJson })
+      }
+      setItems((prev) =>
+        prev.map((it) => (it.id === id ? { ...it, tags } : it))
+      )
+    },
+    []
+  )
+
+  const handleToggleSensitive = useCallback(
+    async (id: number) => {
+      const item = items.find((it) => it.id === id)
+      if (!item) return
+      const next = !item.is_sensitive
+      if (isElectron) {
+        await window.electronAPI.updateItemMeta({ id, isSensitive: next })
+      }
+      setItems((prev) =>
+        prev.map((it) => (it.id === id ? { ...it, is_sensitive: next } : it))
+      )
+    },
+    [items]
+  )
+
   // ── Local keyboard shortcuts ──
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -255,6 +357,12 @@ export default function App() {
         handleDelete(selectedItem.id)
       }
 
+      // Ctrl+P / Alt+P — toggle pin
+      if ((e.key === 'p' || e.key === 'P') && (e.ctrlKey || e.altKey) && !e.metaKey && !e.shiftKey && !inInput) {
+        e.preventDefault()
+        handleTogglePin(selectedItem.id)
+      }
+
       // W/S — navigate
       if ((e.key === 'w' || e.key === 's') && !e.metaKey && !e.ctrlKey && !e.altKey && !inInput) {
         e.preventDefault()
@@ -270,20 +378,26 @@ export default function App() {
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selectedItem, selectedId, filteredItems, searchQuery, handleCopy, handleDelete])
+  }, [selectedItem, selectedId, filteredItems, searchQuery, handleCopy, handleDelete, handleTogglePin])
 
   // ── Settings view (fullscreen) ──
   if (showSettings) {
     return <Settings theme={theme} onThemeChange={setTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} onBack={() => setShowSettings(false)} onClearData={async (type: 'images' | 'all') => {
             if (type === 'all') {
-              setItems([])
-              setSelectedId(null)
-            } else {
-              setItems(prev => prev.filter(it => it.type !== 'image'))
+              // 仅清空未收藏的记录，保留金库数据
+              setItems(prev => prev.filter(it => it.is_pinned))
               setSelectedId(prev => {
                 if (prev === null) return null
                 const item = items.find(it => it.id === prev)
-                return item && item.type !== 'image' ? prev : null
+                return item && !item.is_pinned ? null : prev
+              })
+            } else {
+              // 仅清空未收藏的图片，保留金库图片
+              setItems(prev => prev.filter(it => !(it.type === 'image' && !it.is_pinned)))
+              setSelectedId(prev => {
+                if (prev === null) return null
+                const item = items.find(it => it.id === prev)
+                return item && item.type === 'image' && !item.is_pinned ? null : prev
               })
             }
           }} />
@@ -298,12 +412,14 @@ export default function App() {
       {/* Column 2 — history list (~30%) */}
       <div className="w-[280px] min-w-[240px] max-w-[320px] flex-shrink-0">
         <Sidebar
-          items={filteredItems}
+          items={sidebarItems}
           selectedId={selectedId}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           onSelect={handleSelect}
           density={listDensity}
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
         />
       </div>
 
@@ -315,6 +431,10 @@ export default function App() {
             onCopy={handleCopy}
             onDelete={handleDelete}
             onUpdate={handleUpdate}
+            onTogglePin={handleTogglePin}
+            onUpdateAlias={handleUpdateAlias}
+            onUpdateTags={handleUpdateTags}
+            onToggleSensitive={handleToggleSensitive}
             monospace={useMonospace}
           />
         </div>
