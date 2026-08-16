@@ -48,8 +48,51 @@ export function getTypeLabel(type: string): string {
     case 'text': return tr('detail.typeText')
     case 'url': return tr('detail.typeUrl')
     case 'image': return tr('detail.typeImage')
+    case 'html': return tr('detail.typeHtml')
+    case 'files': return tr('detail.typeFiles')
     default: return type
   }
+}
+
+// ── HTML / 文件列表工具 ──
+
+/** 去除 HTML 标签与实体，提取纯文本（用于预览、敏感检测、复制纯文本） */
+export function stripHtml(html: string): string {
+  if (!html) return ''
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>|<\/div>|<\/li>|<\/h[1-6]>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/** 解析文件路径列表（Windows 剪贴板 FileNameW 格式：UTF-16LE，\0 分隔） */
+export function parseFilePaths(content: string): string[] {
+  if (!content) return []
+  try {
+    const arr = JSON.parse(content)
+    if (!Array.isArray(arr)) return []
+    return arr.filter((p): p is string => typeof p === 'string' && p.length > 0)
+  } catch {
+    return []
+  }
+}
+
+/** 从完整路径中取文件名 */
+export function basename(p: string): string {
+  const parts = p.replace(/\\/g, '/').split('/')
+  return parts[parts.length - 1] || p
 }
 
 // ── 敏感数据检测 ──

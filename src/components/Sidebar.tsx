@@ -1,6 +1,6 @@
 import { ClipboardItem } from '../types'
 import { cn, formatRelativeTime, formatGroupLabel } from '../lib/utils'
-import { FileText, Link, Image, Search, X, Clock, Star, Pin } from 'lucide-react'
+import { FileText, Link, Image, Search, X, Clock, Star, Pin, FileCode2, FolderOpen } from 'lucide-react'
 import { tr } from '../i18n'
 
 type ActiveTab = 'history' | 'vault'
@@ -14,6 +14,9 @@ interface SidebarProps {
   density: 'comfortable' | 'compact'
   activeTab: ActiveTab
   onTabChange: (tab: ActiveTab) => void
+  allTags: string[]
+  selectedTag: string | null
+  onTagChange: (tag: string | null) => void
 }
 
 function typeIcon(type: string) {
@@ -23,6 +26,10 @@ function typeIcon(type: string) {
       return <Link className={cn(cls, 'text-blue-500 dark:text-blue-400')} />
     case 'image':
       return <Image className={cn(cls, 'text-green-500 dark:text-green-400')} />
+    case 'html':
+      return <FileCode2 className={cn(cls, 'text-purple-500 dark:text-purple-400')} />
+    case 'files':
+      return <FolderOpen className={cn(cls, 'text-amber-500 dark:text-amber-400')} />
     default:
       return <FileText className={cn(cls, 'text-zinc-400')} />
   }
@@ -70,6 +77,9 @@ export default function Sidebar({
   density,
   activeTab,
   onTabChange,
+  allTags,
+  selectedTag,
+  onTagChange,
 }: SidebarProps) {
   const groups = activeTab === 'vault' ? groupedByTag(items) : groupedItems(items)
   const itemPy = density === 'compact' ? 'py-1' : 'py-2'
@@ -107,27 +117,56 @@ export default function Sidebar({
         </div>
       </div>
 
-      {/* Search bar — 仅历史视图显示 */}
-      {!isVault && (
-        <div className="flex-shrink-0 px-3 pb-2">
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />
-            <input
-              type="text"
-              placeholder={tr('sidebar.search')}
-              value={searchQuery}
-              onChange={(e) => onSearchChange(e.target.value)}
-              className="w-full h-7 pl-7 pr-6 bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-md text-xs text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 outline-none focus:border-zinc-400 dark:focus:border-zinc-700 transition-colors"
-            />
-            {searchQuery && (
-              <button
-                onClick={() => onSearchChange('')}
-                className="absolute right-1.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:text-zinc-600 dark:hover:text-zinc-400"
-              >
-                <X className="w-3 h-3" />
-              </button>
+      {/* Search bar — 历史与金库视图均显示 */}
+      <div className="flex-shrink-0 px-3 pb-2">
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />
+          <input
+            type="text"
+            placeholder={tr('sidebar.search')}
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+            className="w-full h-7 pl-7 pr-6 bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-md text-xs text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 outline-none focus:border-zinc-400 dark:focus:border-zinc-700 transition-colors"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => onSearchChange('')}
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:text-zinc-600 dark:hover:text-zinc-400"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Tag filter chips */}
+      {allTags.length > 0 && (
+        <div className="flex-shrink-0 px-3 pb-2 flex items-center gap-1 overflow-x-auto">
+          <button
+            onClick={() => onTagChange(null)}
+            className={cn(
+              'flex-shrink-0 px-2 py-0.5 rounded-full text-[11px] border transition-colors',
+              selectedTag === null
+                ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-700 dark:text-zinc-200 border-zinc-300 dark:border-zinc-600'
+                : 'bg-zinc-100 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500 border-transparent hover:text-zinc-600 dark:hover:text-zinc-300'
             )}
-          </div>
+          >
+            {tr('sidebar.filterAll')}
+          </button>
+          {allTags.map((tag) => (
+            <button
+              key={tag}
+              onClick={() => onTagChange(selectedTag === tag ? null : tag)}
+              className={cn(
+                'flex-shrink-0 px-2 py-0.5 rounded-full text-[11px] border transition-colors',
+                selectedTag === tag
+                  ? 'bg-[var(--accent)]/15 text-[var(--accent)] border-[var(--accent)]/40'
+                  : 'bg-zinc-100 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500 border-transparent hover:text-zinc-600 dark:hover:text-zinc-300'
+              )}
+            >
+              {tag}
+            </button>
+          ))}
         </div>
       )}
 
@@ -137,7 +176,7 @@ export default function Sidebar({
           /* ── 金库视图：按标签分组 ── */
           groups.length === 0 ? (
             <div className="px-3 py-8 text-center text-xs text-zinc-400 dark:text-zinc-600">
-              {tr('sidebar.noVaultRecords')}
+              {searchQuery || selectedTag ? tr('sidebar.noResults') : tr('sidebar.noVaultRecords')}
             </div>
           ) : (
             groups.map((group) => (
@@ -215,7 +254,7 @@ export default function Sidebar({
         )}
         {!isVault && items.length === 0 && (
           <div className="px-3 py-8 text-center text-xs text-zinc-400 dark:text-zinc-600">
-            {searchQuery ? tr('sidebar.noResults') : tr('sidebar.noRecords')}
+            {searchQuery || selectedTag ? tr('sidebar.noResults') : tr('sidebar.noRecords')}
           </div>
         )}
       </div>

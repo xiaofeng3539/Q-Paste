@@ -2,8 +2,10 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // Database
-  getItems: (params: { limit: number; offset: number; search?: string }) =>
+  getItems: (params: { limit: number; offset: number; search?: string; pinnedOnly?: boolean }) =>
     ipcRenderer.invoke('db:get-items', params),
+  getItemContent: (id: number) =>
+    ipcRenderer.invoke('db:get-item-content', id) as Promise<string>,
   insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) =>
     ipcRenderer.invoke('db:insert-item', item),
   deleteItem: (id: number) =>
@@ -24,6 +26,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('clipboard:write-text', text),
   writeImage: (dataUrl: string) =>
     ipcRenderer.invoke('clipboard:write-image', dataUrl),
+  writeHtml: (html: string) =>
+    ipcRenderer.invoke('clipboard:write-html', html),
+  writeFiles: (paths: string[]) =>
+    ipcRenderer.invoke('clipboard:write-files', paths),
+  openUrl: (url: string) =>
+    ipcRenderer.invoke('shell:open-url', url) as Promise<boolean>,
+  openFile: (filePath: string) =>
+    ipcRenderer.invoke('shell:open-file', filePath) as Promise<boolean>,
 
   // Listeners
   onClipboardChanged: (callback: (data: any) => void) => {
@@ -54,7 +64,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFolder: (dirPath: string) =>
     ipcRenderer.invoke('shell:open-folder', dirPath),
   changeStoragePath: (newPath: string) =>
-    ipcRenderer.invoke('storage:change-path', newPath),
+    ipcRenderer.invoke('storage:change-path', newPath) as Promise<{ success: boolean; error?: string }>,
   getConfigPath: () =>
     ipcRenderer.invoke('config:get-path') as Promise<string>,
 
@@ -74,11 +84,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getVersion: () =>
     ipcRenderer.invoke('app:get-version') as Promise<string>,
 
+  // Auto-update (electron-updater)
+  checkUpdate: () =>
+    ipcRenderer.invoke('update:check') as Promise<{ success: boolean; error?: string }>,
+  installUpdate: () =>
+    ipcRenderer.invoke('update:install') as Promise<{ success: boolean; error?: string }>,
+  onUpdateStatus: (callback: (status: any) => void) => {
+    const handler = (_event: any, status: any) => callback(status)
+    ipcRenderer.on('update-status', handler)
+    return () => ipcRenderer.removeListener('update-status', handler)
+  },
+
   // Backup / Export
   exportDb: () =>
-    ipcRenderer.invoke('data:export-db') as Promise<{ success: boolean; canceled?: boolean; path?: string; error?: string }>,
+    ipcRenderer.invoke('data:export-db') as Promise<{ success: boolean; canceled?: boolean; path?: string; imagesCopied?: boolean; error?: string }>,
   exportJson: () =>
     ipcRenderer.invoke('data:export-json') as Promise<{ success: boolean; canceled?: boolean; path?: string; error?: string }>,
+  importJson: () =>
+    ipcRenderer.invoke('data:import-json') as Promise<{ success: boolean; canceled?: boolean; count?: number; error?: string }>,
 
   // Tray → renderer events
   onOpenSettings: (callback: () => void) => {

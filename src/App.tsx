@@ -6,7 +6,8 @@ import Settings from './components/Settings'
 import { ClipboardItem, ClipboardChangedData } from './types'
 import { mockItems } from './mock'
 import { Lang, loadLang, setLang, tr } from './i18n'
-import { detectSensitive } from './lib/utils'
+import { detectSensitive, stripHtml } from './lib/utils'
+import { loadShortcuts, saveShortcuts, matchShortcut, ShortcutAction } from './lib/shortcuts'
 
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI
 
@@ -74,8 +75,15 @@ export default function App() {
   const [autoHideOnCopy, setAutoHideOnCopy] = useState(() => {
     try { return localStorage.getItem('q-paste-autohide') === 'true' } catch { return false }
   })
+  /** 本地快捷键配置（自定义，持久化 localStorage） */
+  const [shortcuts, setShortcuts] = useState(loadShortcuts)
   /** DB 层搜索结果（搜索时优先展示；清空搜索后置回 null 恢复本地列表） */
   const [searchResults, setSearchResults] = useState<ClipboardItem[] | null>(null)
+  /** 标签过滤：非空时只显示带该标签的记录 */
+  const [selectedTag, setSelectedTag] = useState<string | null>(null)
+  /** 收藏项删除确认态：记录等待二次确认删除的 id（按两次 D / 点两次删除按钮） */
+  const [pendingDeleteId, setPendingDeleteId] = useState<number | null>(null)
+  const pendingDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
     try { return (localStorage.getItem('q-paste-tab') as ActiveTab) || 'history' } catch { return 'history' }
   })
@@ -97,6 +105,16 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem('q-paste-autohide', String(autoHideOnCopy)) } catch {}
   }, [autoHideOnCopy])
+
+  // 快捷键变更时持久化
+  useEffect(() => {
+    saveShortcuts(shortcuts)
+  }, [shortcuts])
+
+  /** 更新某个快捷键动作的按键 */
+  const handleShortcutChange = useCallback((action: ShortcutAction, combo: string) => {
+    setShortcuts((prev) => ({ ...prev, [action]: combo }))
+  }, [])
 
   useEffect(() => {
     try { localStorage.setItem('q-paste-tab', activeTab) } catch {}
@@ -148,7 +166,7 @@ export default function App() {
     })
   }, [])
 
-  // DB 层全文搜索（防抖）：搜索全部历史，不再局限于已加载的 500 条
+  // DB 层全文搜索（防抖）：搜索全部历史/金库，不再局限于已加载的 500 条
   useEffect(() => {
     if (!isElectron) return
     const q = searchQuery.trim()
@@ -157,16 +175,18 @@ export default function App() {
       return
     }
     const timer = setTimeout(async () => {
-      const loaded = await window.electronAPI.getItems({ limit: 300, offset: 0, search: q })
+      const loaded = await window.electronAPI.getItems({ limit: 300, offset: 0, search: q, pinnedOnly: activeTab === 'vault' })
       setSearchResults(normalizeItems(loaded))
     }, 250)
     return () => clearTimeout(timer)
-  }, [searchQuery])
+  }, [searchQuery, activeTab])
 
   useEffect(() => {
     if (!isElectron) return
     const cleanup = window.electronAPI.onClipboardChanged(async (data: ClipboardChangedData) => {
-      const isSensitive = data.type !== 'image' && detectSensitive(data.content)
+      // 敏感检测：HTML 先转纯文本再检测（避免标签干扰），图片/文件列表不检测
+      const contentForCheck = data.type === 'html' ? stripHtml(data.content) : data.content
+      const isSensitive = (data.type === 'text' || data.type === 'url' || data.type === 'html') && detectSensitive(contentForCheck)
       const res = await window.electronAPI.insertItem({
         type: data.type,
         content: data.content,
@@ -193,6 +213,7 @@ export default function App() {
           return [updated, ...prev.filter((it) => it.id !== id)]
         })
         setSelectedId(id)
+        setPendingDeleteId(null)
         showToast(tr('toast.repinned'))
         return
       }
@@ -211,6 +232,7 @@ export default function App() {
       }
       setItems((prev) => [newItem, ...prev])
       setSelectedId(id)
+      setPendingDeleteId(null)
       if (isSensitive) {
         showToast(tr('toast.sensitiveDetected'))
       } else {
@@ -234,18 +256,28 @@ export default function App() {
 
   const filteredItems = useMemo(() => {
     // 搜索模式下优先展示 DB 搜索结果（非 Electron 环境退回本地过滤）
-    if (searchResults) return searchResults
-    if (!searchQuery.trim()) return items
-    const q = searchQuery.toLowerCase()
-    return items.filter(
-      (it) =>
-        it.preview.toLowerCase().includes(q) ||
-        it.content.toLowerCase().includes(q)
-    )
-  }, [items, searchQuery, searchResults])
+    let list: ClipboardItem[]
+    if (searchResults) {
+      list = searchResults
+    } else if (!searchQuery.trim()) {
+      list = items
+    } else {
+      const q = searchQuery.toLowerCase()
+      list = items.filter(
+        (it) =>
+          it.preview.toLowerCase().includes(q) ||
+          it.content.toLowerCase().includes(q)
+      )
+    }
+    // 标签过滤
+    if (selectedTag) {
+      list = list.filter((it) => it.tags.includes(selectedTag))
+    }
+    return list
+  }, [items, searchQuery, searchResults, selectedTag])
 
   const vaultItems = useMemo(() => {
-    return items
+    let list = items
       .filter((it) => it.is_pinned)
       .sort((a, b) => {
         const tagA = a.tags.length > 0 ? a.tags[0] : '￿'
@@ -255,19 +287,61 @@ export default function App() {
         const aliasB = b.alias || b.preview
         return aliasA.localeCompare(aliasB)
       })
+    // 标签过滤
+    if (selectedTag) {
+      list = list.filter((it) => it.tags.includes(selectedTag))
+    }
+    return list
+  }, [items, selectedTag])
+
+  /** 全部标签（用于标签过滤 chips），按出现次数降序 */
+  const allTags = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const it of items) {
+      for (const tag of it.tags) {
+        counts.set(tag, (counts.get(tag) ?? 0) + 1)
+      }
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([tag]) => tag)
   }, [items])
 
-  const sidebarItems = activeTab === 'vault' ? vaultItems : filteredItems
+  // 金库搜索时优先展示 DB 搜索结果（pinnedOnly），且搜索结果同样应用标签过滤；否则展示本地收藏列表
+  const sidebarItems = useMemo(() => {
+    if (activeTab === 'vault') {
+      if (searchResults) {
+        return selectedTag ? searchResults.filter((it) => it.tags.includes(selectedTag)) : searchResults
+      }
+      return vaultItems
+    }
+    return filteredItems
+  }, [activeTab, searchResults, vaultItems, filteredItems, selectedTag])
 
   const handleSelect = useCallback((id: number) => {
     setSelectedId(id)
+    setPendingDeleteId(null)
   }, [])
 
   const handleCopy = useCallback(
     async (item: ClipboardItem) => {
       if (isElectron) {
-        if (item.type === 'image' && item.content) {
-          await window.electronAPI.writeImage(item.content)
+        if (item.type === 'image') {
+          // 列表查询已置空图片 content，复制前按 id 取完整内容（dataURL）
+          let content = item.content
+          if (!content) {
+            content = await window.electronAPI.getItemContent(item.id)
+          }
+          if (content) {
+            await window.electronAPI.writeImage(content)
+          }
+        } else if (item.type === 'html' && item.content) {
+          await window.electronAPI.writeHtml(item.content)
+        } else if (item.type === 'files' && item.content) {
+          const paths = safeParseJson(item.content, [] as string[])
+          if (Array.isArray(paths) && paths.length > 0) {
+            await window.electronAPI.writeFiles(paths)
+          }
         } else {
           await window.electronAPI.writeText(item.content)
         }
@@ -281,8 +355,35 @@ export default function App() {
     [autoHideOnCopy]
   )
 
+  const handleOpenUrl = useCallback(async (url: string) => {
+    if (isElectron) {
+      await window.electronAPI.openUrl(url)
+    } else {
+      window.open(url, '_blank')
+    }
+  }, [])
+
+  const handleOpenFile = useCallback(async (filePath: string) => {
+    if (isElectron) {
+      await window.electronAPI.openFile(filePath)
+    }
+  }, [])
+
   const handleDelete = useCallback(
     async (id: number) => {
+      // 收藏（金库）项删除需二次确认：第一次进入确认态，第二次才真正删除，防止误删
+      const target = items.find((it) => it.id === id)
+      if (target?.is_pinned && pendingDeleteId !== id) {
+        setPendingDeleteId(id)
+        if (pendingDeleteTimer.current) clearTimeout(pendingDeleteTimer.current)
+        pendingDeleteTimer.current = setTimeout(() => setPendingDeleteId(null), 3000)
+        showToast(tr('toast.confirmDeletePinned'))
+        return
+      }
+      // 清除确认态
+      if (pendingDeleteTimer.current) clearTimeout(pendingDeleteTimer.current)
+      setPendingDeleteId(null)
+
       if (isElectron) {
         await window.electronAPI.deleteItem(id)
       }
@@ -299,7 +400,7 @@ export default function App() {
       })
       showToast(tr('toast.deleted'))
     },
-    [selectedId]
+    [selectedId, items, pendingDeleteId]
   )
 
   const handleUpdate = useCallback(
@@ -377,17 +478,26 @@ export default function App() {
     [items]
   )
 
-  // ── Local keyboard shortcuts ──
+  // ── Local keyboard shortcuts（可自定义）──
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.repeat) return
       const target = e.target as HTMLElement
       const inInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
+      const sc = shortcuts
 
-      // Escape: clear search first, then deselect
-      if (e.key === 'Escape') {
+      // Escape / 自定义清空搜索键：先清搜索 → 再清标签 → 再取消选中
+      if (matchShortcut(e, sc.clearSearch)) {
         if (searchQuery) {
           setSearchQuery('')
+          return
+        }
+        if (selectedTag) {
+          setSelectedTag(null)
+          return
+        }
+        if (pendingDeleteId !== null) {
+          setPendingDeleteId(null)
           return
         }
         if (selectedId !== null) {
@@ -398,14 +508,14 @@ export default function App() {
 
       if (!selectedItem) return
 
-      // C — copy (no modifiers, not in input)
-      if (e.key === 'c' && !e.metaKey && !e.ctrlKey && !e.altKey && !inInput) {
+      // 复制
+      if (matchShortcut(e, sc.copy) && !inInput) {
         e.preventDefault()
         handleCopy(selectedItem)
       }
 
-      // D — delete
-      if (e.key === 'd' && !e.metaKey && !e.ctrlKey && !e.altKey && !inInput) {
+      // 删除
+      if (matchShortcut(e, sc.delete) && !inInput) {
         e.preventDefault()
         handleDelete(selectedItem.id)
       }
@@ -420,32 +530,43 @@ export default function App() {
         handleDelete(selectedItem.id)
       }
 
-      // Ctrl+P / Alt+P — toggle pin
-      if ((e.key === 'p' || e.key === 'P') && (e.ctrlKey || e.altKey) && !e.metaKey && !e.shiftKey && !inInput) {
+      // 收藏 / 取消收藏
+      if (matchShortcut(e, sc.pin) && !inInput) {
         e.preventDefault()
         handleTogglePin(selectedItem.id)
       }
 
-      // W/S — navigate
-      if ((e.key === 'w' || e.key === 's') && !e.metaKey && !e.ctrlKey && !e.altKey && !inInput) {
+      // 上一条 / 下一条导航
+      if (matchShortcut(e, sc.prev) && !inInput) {
         e.preventDefault()
         const idx = filteredItems.findIndex((it) => it.id === selectedId)
         if (idx === -1) return
-        const next =
-          e.key === 's'
-            ? Math.min(idx + 1, filteredItems.length - 1)
-            : Math.max(idx - 1, 0)
-        setSelectedId(filteredItems[next].id)
+        setPendingDeleteId(null)
+        setSelectedId(filteredItems[Math.max(idx - 1, 0)].id)
+      }
+      if (matchShortcut(e, sc.next) && !inInput) {
+        e.preventDefault()
+        const idx = filteredItems.findIndex((it) => it.id === selectedId)
+        if (idx === -1) return
+        setPendingDeleteId(null)
+        setSelectedId(filteredItems[Math.min(idx + 1, filteredItems.length - 1)].id)
       }
     }
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selectedItem, selectedId, filteredItems, searchQuery, handleCopy, handleDelete, handleTogglePin])
+  }, [selectedItem, selectedId, filteredItems, searchQuery, selectedTag, pendingDeleteId, shortcuts, handleCopy, handleDelete, handleTogglePin])
 
   // ── Settings view (fullscreen) ──
   if (showSettings) {
-    return <Settings theme={theme} onThemeChange={setTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} autoHideOnCopy={autoHideOnCopy} onAutoHideChange={setAutoHideOnCopy} onBack={() => setShowSettings(false)} onClearData={async (type: 'images' | 'all') => {
+    return <Settings theme={theme} onThemeChange={setTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} autoHideOnCopy={autoHideOnCopy} onAutoHideChange={setAutoHideOnCopy} shortcuts={shortcuts} onShortcutChange={handleShortcutChange} onBack={() => setShowSettings(false)} onDataImported={async () => {
+            // 导入 JSON 后重新拉取列表
+            if (!isElectron) return
+            const loaded = await window.electronAPI.getItems({ limit: 500, offset: 0 })
+            const normalized = normalizeItems(loaded)
+            setItems(normalized)
+            setSelectedId(normalized.length > 0 ? normalized[0].id : null)
+          }} onClearData={async (type: 'images' | 'all') => {
             if (type === 'all') {
               // 仅清空未收藏的记录，保留金库数据
               setItems(prev => prev.filter(it => it.is_pinned))
@@ -483,6 +604,9 @@ export default function App() {
           density={listDensity}
           activeTab={activeTab}
           onTabChange={setActiveTab}
+          allTags={allTags}
+          selectedTag={selectedTag}
+          onTagChange={setSelectedTag}
         />
       </div>
 
@@ -498,6 +622,10 @@ export default function App() {
             onUpdateAlias={handleUpdateAlias}
             onUpdateTags={handleUpdateTags}
             onToggleSensitive={handleToggleSensitive}
+            onOpenUrl={handleOpenUrl}
+            onOpenFile={handleOpenFile}
+            confirmingDelete={pendingDeleteId === selectedItem?.id}
+            shortcuts={shortcuts}
             monospace={useMonospace}
           />
         </div>

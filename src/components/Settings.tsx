@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
-import { ArrowLeft, Monitor, Keyboard, Info, Palette, Database, Minus, Plus, X } from 'lucide-react'
+import { ArrowLeft, Monitor, Keyboard, Info, Palette, Database, Minus, Plus, X, RotateCcw } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { Lang, tr, setLang } from '../i18n'
 import SectionHeader from './SectionHeader'
+import { ShortcutAction, SHORTCUT_ACTIONS, DEFAULT_SHORTCUTS } from '../lib/shortcuts'
 
 type Theme = 'light' | 'dark' | 'auto'
 
@@ -19,7 +20,10 @@ interface SettingsProps {
   onMonospaceChange: (v: boolean) => void
   autoHideOnCopy: boolean
   onAutoHideChange: (v: boolean) => void
+  shortcuts: Record<ShortcutAction, string>
+  onShortcutChange: (action: ShortcutAction, combo: string) => void
   onBack: () => void
+  onDataImported: () => Promise<void>
   onClearData: (type: 'images' | 'all') => Promise<void>
 }
 
@@ -35,7 +39,7 @@ function useMenuItems(): { key: MenuKey; label: string; icon: React.ReactNode }[
   ]
 }
 
-export default function Settings({ theme, onThemeChange, language, onLanguageChange, accentColor, onAccentChange, listDensity, onDensityChange, useMonospace, onMonospaceChange, autoHideOnCopy, onAutoHideChange, onBack, onClearData }: SettingsProps) {
+export default function Settings({ theme, onThemeChange, language, onLanguageChange, accentColor, onAccentChange, listDensity, onDensityChange, useMonospace, onMonospaceChange, autoHideOnCopy, onAutoHideChange, shortcuts, onShortcutChange, onBack, onDataImported, onClearData }: SettingsProps) {
   const [activeMenu, setActiveMenu] = useState<MenuKey>('general')
   const menuItems = useMenuItems()
 
@@ -164,6 +168,23 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
     window.electronAPI.getVersion().then(setAppVersion)
   }, [])
 
+  // ── 自动更新状态 ──
+  const [updateState, setUpdateState] = useState('idle')
+  const [updateVersion, setUpdateVersion] = useState('')
+  const [updatePercent, setUpdatePercent] = useState(0)
+  const [updateMessage, setUpdateMessage] = useState('')
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.electronAPI) return
+    const cleanup = window.electronAPI.onUpdateStatus((status) => {
+      setUpdateState(status.status)
+      if (status.version) setUpdateVersion(status.version)
+      if (typeof status.percent === 'number') setUpdatePercent(status.percent)
+      if (status.message) setUpdateMessage(status.message)
+    })
+    return cleanup
+  }, [])
+
   const [shortcutRecording, setShortcutRecording] = useState(false)
   const [toggleShortcut, setToggleShortcut] = useState('Alt+Space')
   useEffect(() => {
@@ -172,6 +193,84 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
       if (sc) setToggleShortcut(sc)
     })
   }, [])
+
+  // ── 本地快捷键录制（复制/删除/收藏/导航/清空搜索）──
+  /** 正在录制的本地快捷键动作；null 表示未在录制 */
+  const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null)
+
+  // 录制监听：按下组合键后写入，Esc/失焦取消
+  useEffect(() => {
+    if (!recordingAction) return
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.repeat) return
+      e.preventDefault()
+      e.stopPropagation()
+
+      // Escape → 取消
+      if (e.key === 'Escape') {
+        setRecordingAction(null)
+        return
+      }
+
+      // 组合键需至少一个修饰键；纯单键允许（如 C / W / S / D）
+      const modifierKeys = new Set(['Control', 'Alt', 'Shift', 'Meta'])
+      if (modifierKeys.has(e.key)) return // 只按了修饰键本身
+
+      const parts: string[] = []
+      if (e.ctrlKey) parts.push('Ctrl')
+      if (e.altKey) parts.push('Alt')
+      if (e.shiftKey) parts.push('Shift')
+      if (e.metaKey) parts.push('Meta')
+      parts.push(e.key.length === 1 ? e.key.toUpperCase() : e.key)
+
+      const combo = parts.join('+')
+      // 闭包内自行收窄（不依赖外层 effect 的收窄传递）
+      const action: ShortcutAction = recordingAction as ShortcutAction
+      // 冲突检测：同一组合键已被其他动作占用时拒绝
+      const conflict = SHORTCUT_ACTIONS.find(
+        (a) => a !== action && shortcuts[a] === combo
+      )
+      if (conflict) {
+        alert(tr('shortcuts.conflict', { action: shortcutLabel(conflict) }))
+        setRecordingAction(null)
+        return
+      }
+      onShortcutChange(action, combo)
+      setRecordingAction(null)
+    }
+
+    function onBlur() {
+      setRecordingAction(null)
+    }
+
+    window.addEventListener('keydown', onKeyDown, true)
+    window.addEventListener('blur', onBlur)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true)
+      window.removeEventListener('blur', onBlur)
+    }
+  }, [recordingAction, onShortcutChange, shortcuts])
+
+  /** 快捷键标签文案 */
+  function shortcutLabel(action: ShortcutAction): string {
+    switch (action) {
+      case 'copy': return tr('shortcuts.copyItem')
+      case 'delete': return tr('shortcuts.deleteItem')
+      case 'pin': return tr('shortcuts.pinItem')
+      case 'prev': return tr('shortcuts.prevItem')
+      case 'next': return tr('shortcuts.nextItem')
+      case 'clearSearch': return tr('shortcuts.clearSearch')
+      default: return action
+    }
+  }
+
+  /** 重置本地快捷键为默认值 */
+  function handleResetShortcuts() {
+    for (const action of SHORTCUT_ACTIONS) {
+      onShortcutChange(action, DEFAULT_SHORTCUTS[action])
+    }
+  }
 
   // ── Storage path handlers ──
 
@@ -207,7 +306,10 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
     }
 
     // 保存新路径 → 迁移数据 → 强制重启
-    await window.electronAPI.changeStoragePath(result.path)
+    const res = await window.electronAPI.changeStoragePath(result.path)
+    if (res && !res.success) {
+      alert('数据迁移失败：' + (res.error || '未知错误，存储路径未更改。'))
+    }
   }
 
   async function handleOpenFolder() {
@@ -830,6 +932,31 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                       {tr('storage.exportJson')}
                     </button>
                   </div>
+                  <div className="flex items-center justify-between p-5">
+                    <div>
+                      <p className="text-[13px] text-zinc-700 dark:text-zinc-300">{tr('storage.importJson')}</p>
+                      <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">{tr('storage.importJsonHint')}</p>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        if (typeof window === 'undefined' || !window.electronAPI) return
+                        const res = await window.electronAPI.importJson()
+                        if (res.success) {
+                          if (res.count !== undefined && res.count > 0) {
+                            alert(tr('storage.importOk', { count: res.count }))
+                            await onDataImported()
+                          } else {
+                            alert(tr('storage.importOk', { count: 0 }))
+                          }
+                        } else if (!res.canceled) {
+                          alert(tr('storage.importErr', { error: res.error || 'unknown' }))
+                        }
+                      }}
+                      className="flex-shrink-0 h-8 px-4 rounded-md border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-xs text-zinc-600 dark:text-zinc-400 transition-colors font-medium"
+                    >
+                      {tr('storage.importJson')}
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -899,41 +1026,60 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
 
           {activeMenu === 'shortcuts' && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between py-2 border-b border-zinc-200 dark:border-zinc-800/50">
-                <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{tr('shortcuts.copyItem')}</span>
-                <kbd className="text-[11px] text-zinc-400 dark:text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded font-mono">C</kbd>
+              <div className="flex items-center justify-between pb-2 border-b border-zinc-200 dark:border-zinc-800/50">
+                <span className="text-[13px] font-medium text-zinc-700 dark:text-zinc-300">{tr('shortcuts.localTitle')}</span>
+                <button
+                  onClick={handleResetShortcuts}
+                  className="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300 transition-colors"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  {tr('shortcuts.reset')}
+                </button>
               </div>
-              <div className="flex items-center justify-between py-2 border-b border-zinc-200 dark:border-zinc-800/50">
-                <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{tr('shortcuts.deleteItem')}</span>
-                <kbd className="text-[11px] text-zinc-400 dark:text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded font-mono">D</kbd>
-              </div>
-              <div className="flex items-center justify-between py-2 border-b border-zinc-200 dark:border-zinc-800/50">
-                <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{tr('shortcuts.switchItem')}</span>
-                <kbd className="text-[11px] text-zinc-400 dark:text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded font-mono">W S</kbd>
-              </div>
-              <div className="flex items-center justify-between py-2 border-b border-zinc-200 dark:border-zinc-800/50">
-                <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{tr('shortcuts.pinItem')}</span>
-                <kbd className="text-[11px] text-zinc-400 dark:text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded font-mono">Ctrl+P</kbd>
-              </div>
-              <div className="flex items-center justify-between py-2 border-b border-zinc-200 dark:border-zinc-800/50">
-                <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{tr('shortcuts.clearSearch')}</span>
-                <kbd className="text-[11px] text-zinc-400 dark:text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded font-mono">Esc</kbd>
-              </div>
-              <div className="flex items-center justify-between py-2 border-b border-zinc-200 dark:border-zinc-800/50">
+
+              {/* 本地快捷键（点击即可录制） */}
+              {SHORTCUT_ACTIONS.map((action) => {
+                const isRecording = recordingAction === action
+                return (
+                  <div key={action} className="flex items-center justify-between py-2 border-b border-zinc-200 dark:border-zinc-800/50">
+                    <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{shortcutLabel(action)}</span>
+                    <button
+                      onClick={() => {
+                        if (isRecording) { setRecordingAction(null); return }
+                        setRecordingAction(action)
+                      }}
+                      style={isRecording ? { backgroundColor: 'color-mix(in srgb, var(--accent) 10%, transparent)' } : undefined}
+                      className={cn(
+                        'text-[11px] px-2 py-0.5 rounded font-mono transition-all cursor-pointer select-none min-w-[64px] text-center',
+                        isRecording
+                          ? 'text-[var(--accent)] ring-1 ring-[var(--accent)]/50'
+                          : 'text-zinc-400 dark:text-zinc-500 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700',
+                      )}
+                      title={tr('shortcuts.clickToRecord')}
+                    >
+                      {isRecording ? '...' : shortcuts[action]}
+                    </button>
+                  </div>
+                )
+              })}
+
+              {/* 全局快捷键（呼出/隐藏窗口） */}
+              <div className="flex items-center justify-between py-2">
                 <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{tr('shortcuts.toggleWindow')}</span>
                 <button
                   onClick={() => setShortcutRecording(true)}
                   style={shortcutRecording ? { backgroundColor: 'color-mix(in srgb, var(--accent) 10%, transparent)' } : undefined}
                   className={cn(
-                    'text-[11px] px-2 py-0.5 rounded font-mono transition-all cursor-pointer select-none',
+                    'text-[11px] px-2 py-0.5 rounded font-mono transition-all cursor-pointer select-none min-w-[64px] text-center',
                     shortcutRecording
                       ? 'text-[var(--accent)] ring-1 ring-[var(--accent)]/50'
                       : 'text-zinc-400 dark:text-zinc-500 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700',
                   )}
                 >
-                  {shortcutRecording ? '按下组合键...' : toggleShortcut}
+                  {shortcutRecording ? '...' : toggleShortcut}
                 </button>
               </div>
+              <p className="text-[11px] text-zinc-400 dark:text-zinc-600">{tr('shortcuts.hint')}</p>
             </div>
           )}
 
@@ -952,6 +1098,49 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
               <div className="text-[13px] text-zinc-400 dark:text-zinc-600 space-y-1">
                 <p>{tr('about.techStack')}</p>
                 <p>{tr('about.storageEngine')}</p>
+              </div>
+
+              {/* ── 检查更新 ── */}
+              <div className="pt-2 border-t border-zinc-200 dark:border-zinc-800/50">
+                <button
+                  onClick={async () => {
+                    if (typeof window === 'undefined' || !window.electronAPI) return
+                    setUpdateState('checking')
+                    const res = await window.electronAPI.checkUpdate()
+                    if (!res.success) {
+                      setUpdateState('error')
+                      setUpdateMessage(res.error || '')
+                    }
+                  }}
+                  disabled={updateState === 'checking' || updateState === 'downloading'}
+                  className="h-8 px-4 rounded-md bg-zinc-800 dark:bg-zinc-700 hover:bg-zinc-700 dark:hover:bg-zinc-600 disabled:opacity-50 text-xs text-zinc-200 transition-colors font-medium"
+                >
+                  {tr('about.checkUpdate')}
+                </button>
+                {updateState !== 'idle' && (
+                  <p className="mt-2 text-[12px] text-zinc-500 dark:text-zinc-400">
+                    {updateState === 'checking' && tr('about.updateChecking')}
+                    {updateState === 'available' && tr('about.updateAvailable', { version: updateVersion || '' })}
+                    {updateState === 'downloading' && tr('about.updateDownloading', { percent: updatePercent })}
+                    {updateState === 'downloaded' && (
+                      <span className="inline-flex items-center gap-2">
+                        {tr('about.updateDownloaded')}
+                        <button
+                          onClick={async () => {
+                            if (typeof window !== 'undefined' && window.electronAPI) {
+                              await window.electronAPI.installUpdate()
+                            }
+                          }}
+                          className="text-[var(--accent)] hover:underline"
+                        >
+                          {tr('about.updateRestart')}
+                        </button>
+                      </span>
+                    )}
+                    {updateState === 'not-available' && tr('about.updateNotAvailable')}
+                    {updateState === 'error' && tr('about.updateError', { error: updateMessage || '' })}
+                  </p>
+                )}
               </div>
             </div>
           )}

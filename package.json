@@ -11,11 +11,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "sql.js": "^1.12.0",
     "clsx": "^2.1.1",
+    "electron-updater": "6.3.9",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "sql.js": "^1.12.0",
     "tailwind-merge": "^2.6.0"
   },
   "devDependencies": {
@@ -39,6 +40,13 @@
     "directories": {
       "output": "release"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "xiaofeng3539",
+        "repo": "Q-Paste"
+      }
+    ],
     "files": [
       "dist/**/*",
       "dist-electron/**/*"
@@ -62,7 +70,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },

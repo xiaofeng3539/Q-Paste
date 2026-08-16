@@ -14,7 +14,7 @@ export default defineConfig({
           build: {
             outDir: 'dist-electron',
             rollupOptions: {
-              external: ['sql.js'],
+              external: ['sql.js', 'electron-updater'],
               output: {
                 format: 'cjs',
               },

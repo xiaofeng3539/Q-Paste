@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { ClipboardItem } from '../types'
-import { formatStorageSize, getTypeLabel, maskSensitive } from '../lib/utils'
-import { FileText, Link, Image, Copy, Trash2, Monitor, X, ZoomIn, RotateCcw, Pin, Eye, EyeOff, Shield, Plus } from 'lucide-react'
+import { formatStorageSize, getTypeLabel, maskSensitive, parseFilePaths, basename } from '../lib/utils'
+import { ShortcutAction } from '../lib/shortcuts'
+import { FileText, Link, Image, Copy, Trash2, Monitor, X, ZoomIn, RotateCcw, Pin, Eye, EyeOff, Shield, Plus, ExternalLink, FolderOpen, FileCode2 } from 'lucide-react'
 import { tr } from '../i18n'
 
 interface DetailViewProps {
@@ -13,6 +14,12 @@ interface DetailViewProps {
   onUpdateAlias: (id: number, alias: string) => void
   onUpdateTags: (id: number, tags: string[]) => void
   onToggleSensitive: (id: number) => void
+  onOpenUrl: (url: string) => void
+  onOpenFile: (filePath: string) => void
+  /** 收藏项删除确认态：为 true 时删除按钮变为"确认删除"高亮 */
+  confirmingDelete: boolean
+  /** 本地快捷键配置（用于按钮上的键位提示） */
+  shortcuts: Record<ShortcutAction, string>
   monospace: boolean
 }
 
@@ -22,6 +29,10 @@ function typeIcon(type: string, size = 'w-4 h-4') {
       return <Link className={`${size} text-blue-500 dark:text-blue-400`} />
     case 'image':
       return <Image className={`${size} text-green-500 dark:text-green-400`} />
+    case 'html':
+      return <FileCode2 className={`${size} text-purple-500 dark:text-purple-400`} />
+    case 'files':
+      return <FolderOpen className={`${size} text-amber-500 dark:text-amber-400`} />
     default:
       return <FileText className={`${size} text-zinc-400 dark:text-zinc-400`} />
   }
@@ -40,6 +51,10 @@ export default function DetailView({
   onUpdateAlias,
   onUpdateTags,
   onToggleSensitive,
+  onOpenUrl,
+  onOpenFile,
+  confirmingDelete,
+  shortcuts,
   monospace,
 }: DetailViewProps) {
   const [lightboxOpen, setLightboxOpen] = useState(false)
@@ -66,6 +81,21 @@ export default function DetailView({
 
   // Sensitive visibility
   const [showSensitive, setShowSensitive] = useState(false)
+
+  /** 图片完整内容（dataURL）：列表查询已置空图片 content，详情按 id 异步加载 */
+  const [imageContent, setImageContent] = useState('')
+
+  // 选中图片记录时加载完整图片内容
+  useEffect(() => {
+    setImageContent('')
+    if (!item || item.type !== 'image') return
+    if (typeof window === 'undefined' || !window.electronAPI) return
+    let cancelled = false
+    window.electronAPI.getItemContent(item.id).then((content) => {
+      if (!cancelled && content) setImageContent(content)
+    })
+    return () => { cancelled = true }
+  }, [item?.id, item?.type])
 
   // Reset edit modes when item changes
   useEffect(() => {
@@ -99,7 +129,7 @@ export default function DetailView({
   }, [showTagInput])
 
   function enterEditMode() {
-    if (!item || item.type === 'image') return
+    if (!item || item.type === 'image' || item.type === 'html' || item.type === 'files') return
     setEditContent(item.content)
     setIsEditing(true)
   }
@@ -230,10 +260,10 @@ export default function DetailView({
           </div>
           <p className="text-sm text-zinc-400 dark:text-zinc-600">{tr('detail.empty')}</p>
           <div className="flex items-center gap-3 mt-2 justify-center text-[10px] text-zinc-300 dark:text-zinc-700">
-            <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">W S</kbd> {tr('detail.switch')}</span>
-            <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">C</kbd> {tr('detail.copy')}</span>
-            <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">D</kbd> {tr('detail.delete')}</span>
-            <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">Ctrl+P</kbd> {tr('detail.pin')}</span>
+            <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">{shortcuts.prev} {shortcuts.next}</kbd> {tr('detail.switch')}</span>
+            <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">{shortcuts.copy}</kbd> {tr('detail.copy')}</span>
+            <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">{shortcuts.delete}</kbd> {tr('detail.delete')}</span>
+            <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">{shortcuts.pin}</kbd> {tr('detail.pin')}</span>
           </div>
         </div>
       </div>
@@ -241,9 +271,12 @@ export default function DetailView({
   }
 
   const isImage = item.type === 'image'
+  const isHtml = item.type === 'html'
+  const isFiles = item.type === 'files'
   const isSensitive = item.is_sensitive
   const displayContent = isSensitive && !showSensitive ? maskSensitive(item.content) : item.content
   const presetTags = tr('detail.presetTags').split(',').map((t) => t.trim())
+  const filePaths = isFiles ? parseFilePaths(item.content) : []
 
   return (
     <div className="h-full flex flex-col bg-transparent">
@@ -356,10 +389,10 @@ export default function DetailView({
       {/* Main content */}
       <div className="flex-1 overflow-auto p-4">
         {isImage ? (
-          item.content ? (
+          imageContent || item.content ? (
             <div className="flex items-center justify-center min-h-full">
               <img
-                src={item.content}
+                src={imageContent || item.content}
                 alt={item.preview}
                 onDoubleClick={openLightbox}
                 className="max-w-full max-h-full object-contain rounded-lg cursor-zoom-in"
@@ -374,6 +407,71 @@ export default function DetailView({
                 <p className="text-sm text-zinc-400 dark:text-zinc-500">{tr('detail.noPreview')}</p>
               </div>
             </div>
+          )
+        ) : isHtml ? (
+          // 富文本预览：sandbox 隔离渲染，防止脚本注入
+          <div className="h-full rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden bg-white dark:bg-zinc-900">
+            {isSensitive && !showSensitive ? (
+              <div className="h-full flex items-center justify-center">
+                <div className="text-center">
+                  <EyeOff className="w-8 h-8 text-zinc-400 dark:text-zinc-500 mx-auto mb-2" />
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">{tr('detail.sensitive')}</p>
+                  <button
+                    onClick={() => setShowSensitive(true)}
+                    className="text-xs text-[var(--accent)] hover:underline"
+                  >
+                    {tr('detail.showSensitive')}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <iframe
+                title="rich-text-preview"
+                sandbox=""
+                srcDoc={displayContent}
+                className="w-full h-full bg-white dark:bg-zinc-900"
+              />
+            )}
+          </div>
+        ) : isFiles ? (
+          // 文件列表：点击打开（标记为敏感时先遮挡）
+          isSensitive && !showSensitive ? (
+            <div className="h-full flex items-center justify-center">
+              <div className="text-center">
+                <EyeOff className="w-8 h-8 text-zinc-400 dark:text-zinc-500 mx-auto mb-2" />
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">{tr('detail.sensitive')}</p>
+                <button
+                  onClick={() => setShowSensitive(true)}
+                  className="text-xs text-[var(--accent)] hover:underline"
+                >
+                  {tr('detail.showSensitive')}
+                </button>
+              </div>
+            </div>
+          ) : (
+          <div className="space-y-1.5">
+            <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mb-2 flex items-center gap-1">
+              <FolderOpen className="w-3 h-3" />
+              {tr('detail.filesCount', { n: filePaths.length })} · {tr('detail.filesHint')}
+            </p>
+            {filePaths.map((p) => (
+              <button
+                key={p}
+                onClick={() => onOpenFile(p)}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-800/60 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/60 text-left transition-colors group"
+                title={p}
+              >
+                <FolderOpen className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
+                <span className="flex-1 min-w-0 truncate text-xs text-zinc-700 dark:text-zinc-300">
+                  {basename(p)}
+                </span>
+                <span className="text-[10px] text-zinc-400 dark:text-zinc-600 truncate max-w-[180px] hidden sm:block">
+                  {p}
+                </span>
+                <ExternalLink className="w-3 h-3 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-400 flex-shrink-0" />
+              </button>
+            ))}
+          </div>
           )
         ) : isEditing ? (
           <textarea
@@ -418,13 +516,24 @@ export default function DetailView({
 
       {/* Bottom action bar */}
       <div className="flex-shrink-0 h-12 flex items-center justify-end gap-2 px-4">
+        {item.type === 'url' && (
+          <button
+            onClick={() => onOpenUrl(item.content)}
+            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
+            title={tr('detail.openUrl')}
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            <span>{tr('detail.openUrl')}</span>
+          </button>
+        )}
+
         <button
           onClick={() => onCopy(item)}
           className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
         >
           <Copy className="w-3.5 h-3.5" />
           <span>{tr('detail.copy')}</span>
-          <kbd className="ml-1 text-[10px] text-zinc-400 dark:text-zinc-500 bg-zinc-200 dark:bg-zinc-900 px-1 py-0.5 rounded font-mono">C</kbd>
+          <kbd className="ml-1 text-[10px] text-zinc-400 dark:text-zinc-500 bg-zinc-200 dark:bg-zinc-900 px-1 py-0.5 rounded font-mono">{shortcuts.copy}</kbd>
         </button>
 
         {/* Pin / Unpin button */}
@@ -438,7 +547,7 @@ export default function DetailView({
         >
           <Pin className={`w-3.5 h-3.5 ${item.is_pinned ? 'fill-current' : ''}`} />
           <span>{item.is_pinned ? tr('detail.unpin') : tr('detail.pin')}</span>
-          <kbd className="ml-1 text-[10px] text-zinc-400 dark:text-zinc-500 bg-zinc-200 dark:bg-zinc-900 px-1 py-0.5 rounded font-mono">Ctrl+P</kbd>
+          <kbd className="ml-1 text-[10px] text-zinc-400 dark:text-zinc-500 bg-zinc-200 dark:bg-zinc-900 px-1 py-0.5 rounded font-mono">{shortcuts.pin}</kbd>
         </button>
 
         {/* Mark sensitive button */}
@@ -473,16 +582,24 @@ export default function DetailView({
 
         <button
           onClick={() => onDelete(item.id)}
-          className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-red-100 dark:hover:bg-red-900/50 hover:text-red-600 dark:hover:text-red-400 text-xs text-zinc-500 dark:text-zinc-400 transition-colors"
+          className={`flex items-center gap-1.5 h-7 px-3 rounded-md text-xs transition-colors ${
+            confirmingDelete
+              ? 'bg-red-600 text-white hover:bg-red-700 shadow-sm'
+              : 'bg-zinc-100 dark:bg-zinc-800 hover:bg-red-100 dark:hover:bg-red-900/50 hover:text-red-600 dark:hover:text-red-400 text-zinc-500 dark:text-zinc-400'
+          }`}
         >
           <Trash2 className="w-3.5 h-3.5" />
-          <span>{tr('detail.delete')}</span>
-          <kbd className="ml-1 text-[10px] text-zinc-400 dark:text-zinc-500 bg-zinc-200 dark:bg-zinc-900 px-1 py-0.5 rounded font-mono">D</kbd>
+          <span>{confirmingDelete ? tr('detail.confirmDelete') : tr('detail.delete')}</span>
+          <kbd className={`ml-1 text-[10px] px-1 py-0.5 rounded font-mono ${
+            confirmingDelete
+              ? 'text-red-100 bg-red-500/40'
+              : 'text-zinc-400 dark:text-zinc-500 bg-zinc-200 dark:bg-zinc-900'
+          }`}>{shortcuts.delete}</kbd>
         </button>
       </div>
 
       {/* Lightbox overlay — always dark */}
-      {lightboxOpen && item.content && (
+      {lightboxOpen && (imageContent || item.content) && (
         <div
           className="fixed inset-0 z-50 bg-black/90 backdrop-blur-sm overflow-hidden"
           onWheel={handleWheel}
@@ -520,7 +637,7 @@ export default function DetailView({
           </div>
 
           <img
-            src={item.content}
+            src={imageContent || item.content}
             alt={item.preview}
             onMouseDown={(e) => {
               e.stopPropagation()
