@@ -27,8 +27,8 @@ export interface UpdateMetaParams {
 }
 
 export interface ElectronAPI {
-  getItems: (params: { limit: number; offset: number }) => Promise<ClipboardItem[]>
-  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) => Promise<number>
+  getItems: (params: { limit: number; offset: number; search?: string }) => Promise<ClipboardItem[]>
+  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) => Promise<{ id: number; updated: boolean }>
   deleteItem: (id: number) => Promise<boolean>
   forceClearData: (type: 'images' | 'all') => Promise<{ success: boolean; error?: string }>
   updateItem: (params: { id: number; content: string; preview: string; charCount: number; storageSize: number }) => Promise<boolean>
@@ -49,6 +49,14 @@ export interface ElectronAPI {
   openFolder: (dirPath: string) => Promise<void>
   changeStoragePath: (newPath: string) => Promise<void>
   getConfigPath: () => Promise<string>
+  getRetention: () => Promise<{ retentionDays: number | 'forever'; maxRecords: number }>
+  setRetention: (settings: { retentionDays?: number | 'forever'; maxRecords?: number }) => Promise<{ success: boolean }>
+  getCaptureRules: () => Promise<{ ignorePatterns: string[]; dedupeOnCapture: boolean }>
+  setCaptureRules: (settings: { ignorePatterns?: string[]; dedupeOnCapture?: boolean }) => Promise<{ success: boolean }>
+  getVersion: () => Promise<string>
+  exportDb: () => Promise<{ success: boolean; canceled?: boolean; path?: string; error?: string }>
+  exportJson: () => Promise<{ success: boolean; canceled?: boolean; path?: string; error?: string }>
+  onOpenSettings: (callback: () => void) => () => void
 }
 
 export interface ClipboardChangedData {

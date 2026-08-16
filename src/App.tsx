@@ -43,6 +43,17 @@ function safeParseJson(str: string, fallback: any): any {
   try { return JSON.parse(str) } catch { return fallback }
 }
 
+/** 规范化数据库字段到前端模型 */
+function normalizeItems(rows: any[]): ClipboardItem[] {
+  return rows.map((row: any) => ({
+    ...row,
+    is_pinned: row.is_pinned === 1 || row.is_pinned === true,
+    alias: row.alias || '',
+    tags: Array.isArray(row.tags) ? row.tags : safeParseJson(row.tags, []),
+    is_sensitive: row.is_sensitive === 1 || row.is_sensitive === true,
+  })) as ClipboardItem[]
+}
+
 export default function App() {
   const [items, setItems] = useState<ClipboardItem[]>(isElectron ? [] : mockItems)
   const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -60,6 +71,11 @@ export default function App() {
   const [useMonospace, setUseMonospace] = useState(() => {
     try { return localStorage.getItem('q-paste-monospace') !== 'false' } catch { return true }
   })
+  const [autoHideOnCopy, setAutoHideOnCopy] = useState(() => {
+    try { return localStorage.getItem('q-paste-autohide') === 'true' } catch { return false }
+  })
+  /** DB 层搜索结果（搜索时优先展示；清空搜索后置回 null 恢复本地列表） */
+  const [searchResults, setSearchResults] = useState<ClipboardItem[] | null>(null)
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
     try { return (localStorage.getItem('q-paste-tab') as ActiveTab) || 'history' } catch { return 'history' }
   })
@@ -77,6 +93,10 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem('q-paste-monospace', String(useMonospace)) } catch {}
   }, [useMonospace])
+
+  useEffect(() => {
+    try { localStorage.setItem('q-paste-autohide', String(autoHideOnCopy)) } catch {}
+  }, [autoHideOnCopy])
 
   useEffect(() => {
     try { localStorage.setItem('q-paste-tab', activeTab) } catch {}
@@ -120,14 +140,7 @@ export default function App() {
   useEffect(() => {
     if (!isElectron) return
     window.electronAPI.getItems({ limit: 500, offset: 0 }).then((loaded) => {
-      // 规范化数据库字段到前端模型
-      const normalized = loaded.map((row: any) => ({
-        ...row,
-        is_pinned: row.is_pinned === 1 || row.is_pinned === true,
-        alias: row.alias || '',
-        tags: Array.isArray(row.tags) ? row.tags : safeParseJson(row.tags, []),
-        is_sensitive: row.is_sensitive === 1 || row.is_sensitive === true,
-      })) as ClipboardItem[]
+      const normalized = normalizeItems(loaded)
       setItems(normalized)
       if (normalized.length > 0) {
         setSelectedId(normalized[0].id)
@@ -135,11 +148,26 @@ export default function App() {
     })
   }, [])
 
+  // DB 层全文搜索（防抖）：搜索全部历史，不再局限于已加载的 500 条
+  useEffect(() => {
+    if (!isElectron) return
+    const q = searchQuery.trim()
+    if (!q) {
+      setSearchResults(null)
+      return
+    }
+    const timer = setTimeout(async () => {
+      const loaded = await window.electronAPI.getItems({ limit: 300, offset: 0, search: q })
+      setSearchResults(normalizeItems(loaded))
+    }, 250)
+    return () => clearTimeout(timer)
+  }, [searchQuery])
+
   useEffect(() => {
     if (!isElectron) return
     const cleanup = window.electronAPI.onClipboardChanged(async (data: ClipboardChangedData) => {
       const isSensitive = data.type !== 'image' && detectSensitive(data.content)
-      const id = await window.electronAPI.insertItem({
+      const res = await window.electronAPI.insertItem({
         type: data.type,
         content: data.content,
         preview: data.preview,
@@ -148,6 +176,26 @@ export default function App() {
         createdAt: data.createdAt,
         isSensitive,
       })
+      if (!res) return
+      const id = res.id
+      if (res.updated) {
+        // 内容去重：复用已有记录并置顶
+        setItems((prev) => {
+          const existing = prev.find((it) => it.id === id)
+          if (!existing) return prev
+          const updated: ClipboardItem = {
+            ...existing,
+            preview: data.preview,
+            char_count: data.charCount ?? 0,
+            storage_size: data.storageSize ?? 0,
+            created_at: data.createdAt,
+          }
+          return [updated, ...prev.filter((it) => it.id !== id)]
+        })
+        setSelectedId(id)
+        showToast(tr('toast.repinned'))
+        return
+      }
       const newItem: ClipboardItem = {
         id,
         type: data.type,
@@ -172,12 +220,21 @@ export default function App() {
     return cleanup
   }, [])
 
+  // Tray menu: open settings
+  useEffect(() => {
+    if (!isElectron) return
+    const cleanup = window.electronAPI.onOpenSettings(() => setShowSettings(true))
+    return cleanup
+  }, [])
+
   const selectedItem = useMemo(
     () => items.find((it) => it.id === selectedId) ?? null,
     [items, selectedId]
   )
 
   const filteredItems = useMemo(() => {
+    // 搜索模式下优先展示 DB 搜索结果（非 Electron 环境退回本地过滤）
+    if (searchResults) return searchResults
     if (!searchQuery.trim()) return items
     const q = searchQuery.toLowerCase()
     return items.filter(
@@ -185,7 +242,7 @@ export default function App() {
         it.preview.toLowerCase().includes(q) ||
         it.content.toLowerCase().includes(q)
     )
-  }, [items, searchQuery])
+  }, [items, searchQuery, searchResults])
 
   const vaultItems = useMemo(() => {
     return items
@@ -216,8 +273,12 @@ export default function App() {
         }
       }
       showToast(tr('toast.copied'))
+      // 复制后自动隐藏窗口（弹窗式使用）
+      if (autoHideOnCopy && isElectron) {
+        window.electronAPI.closeWindow()
+      }
     },
-    []
+    [autoHideOnCopy]
   )
 
   const handleDelete = useCallback(
@@ -254,6 +315,7 @@ export default function App() {
           it.id === id ? { ...it, content, preview, char_count: charCount, storage_size: storageSize } : it
         )
       )
+      showToast(tr('toast.updated'))
     },
     []
   )
@@ -282,6 +344,7 @@ export default function App() {
       setItems((prev) =>
         prev.map((it) => (it.id === id ? { ...it, alias } : it))
       )
+      showToast(tr('toast.aliasUpdated'))
     },
     []
   )
@@ -382,7 +445,7 @@ export default function App() {
 
   // ── Settings view (fullscreen) ──
   if (showSettings) {
-    return <Settings theme={theme} onThemeChange={setTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} onBack={() => setShowSettings(false)} onClearData={async (type: 'images' | 'all') => {
+    return <Settings theme={theme} onThemeChange={setTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} autoHideOnCopy={autoHideOnCopy} onAutoHideChange={setAutoHideOnCopy} onBack={() => setShowSettings(false)} onClearData={async (type: 'images' | 'all') => {
             if (type === 'all') {
               // 仅清空未收藏的记录，保留金库数据
               setItems(prev => prev.filter(it => it.is_pinned))

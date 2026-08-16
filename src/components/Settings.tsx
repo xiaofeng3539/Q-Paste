@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { ArrowLeft, Monitor, Keyboard, Info, Palette, Database, Minus, Plus } from 'lucide-react'
+import { ArrowLeft, Monitor, Keyboard, Info, Palette, Database, Minus, Plus, X } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { Lang, tr, setLang } from '../i18n'
 import SectionHeader from './SectionHeader'
@@ -17,6 +17,8 @@ interface SettingsProps {
   onDensityChange: (d: 'comfortable' | 'compact') => void
   useMonospace: boolean
   onMonospaceChange: (v: boolean) => void
+  autoHideOnCopy: boolean
+  onAutoHideChange: (v: boolean) => void
   onBack: () => void
   onClearData: (type: 'images' | 'all') => Promise<void>
 }
@@ -33,7 +35,7 @@ function useMenuItems(): { key: MenuKey; label: string; icon: React.ReactNode }[
   ]
 }
 
-export default function Settings({ theme, onThemeChange, language, onLanguageChange, accentColor, onAccentChange, listDensity, onDensityChange, useMonospace, onMonospaceChange, onBack, onClearData }: SettingsProps) {
+export default function Settings({ theme, onThemeChange, language, onLanguageChange, accentColor, onAccentChange, listDensity, onDensityChange, useMonospace, onMonospaceChange, autoHideOnCopy, onAutoHideChange, onBack, onClearData }: SettingsProps) {
   const [activeMenu, setActiveMenu] = useState<MenuKey>('general')
   const menuItems = useMenuItems()
 
@@ -85,6 +87,82 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
 
   const [retentionDays, setRetentionDays] = useState('forever')
   const [maxRecords, setMaxRecords] = useState(500)
+
+  // 从主进程读取已保存的保留策略
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.electronAPI) return
+    window.electronAPI.getRetention().then((s) => {
+      setRetentionDays(String(s.retentionDays))
+      setMaxRecords(s.maxRecords)
+    })
+  }, [])
+
+  function handleRetentionChange(v: string) {
+    setRetentionDays(v)
+    if (typeof window !== 'undefined' && window.electronAPI) {
+      window.electronAPI.setRetention({ retentionDays: v === 'forever' ? 'forever' : Number(v) })
+    }
+  }
+
+  function handleMaxRecordsChange(n: number) {
+    const clamped = Math.min(9999, Math.max(100, Math.round(n) || 100))
+    setMaxRecords(clamped)
+    if (typeof window !== 'undefined' && window.electronAPI) {
+      window.electronAPI.setRetention({ maxRecords: clamped })
+    }
+  }
+
+  // ── 捕获规则（忽略规则 / 去重置顶开关）──
+  const [ignorePatterns, setIgnorePatterns] = useState<string[]>([])
+  const [dedupeOnCapture, setDedupeOnCapture] = useState(true)
+  const [ignoreRuleDraft, setIgnoreRuleDraft] = useState('')
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.electronAPI) return
+    window.electronAPI.getCaptureRules().then((s) => {
+      setIgnorePatterns(s.ignorePatterns)
+      setDedupeOnCapture(s.dedupeOnCapture)
+    })
+  }, [])
+
+  function handleToggleDedupe(v: boolean) {
+    setDedupeOnCapture(v)
+    if (typeof window !== 'undefined' && window.electronAPI) {
+      window.electronAPI.setCaptureRules({ dedupeOnCapture: v })
+    }
+  }
+
+  function handleAddIgnoreRule() {
+    const rule = ignoreRuleDraft.trim()
+    if (!rule) return
+    try { new RegExp(rule) } catch {
+      alert(tr('general.invalidRegex'))
+      return
+    }
+    if (!ignorePatterns.includes(rule)) {
+      const next = [...ignorePatterns, rule]
+      setIgnorePatterns(next)
+      if (typeof window !== 'undefined' && window.electronAPI) {
+        window.electronAPI.setCaptureRules({ ignorePatterns: next })
+      }
+    }
+    setIgnoreRuleDraft('')
+  }
+
+  function handleRemoveIgnoreRule(rule: string) {
+    const next = ignorePatterns.filter((r) => r !== rule)
+    setIgnorePatterns(next)
+    if (typeof window !== 'undefined' && window.electronAPI) {
+      window.electronAPI.setCaptureRules({ ignorePatterns: next })
+    }
+  }
+
+  // ── 版本号（动态获取，与 package.json 一致）──
+  const [appVersion, setAppVersion] = useState('')
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.electronAPI) return
+    window.electronAPI.getVersion().then(setAppVersion)
+  }, [])
 
   const [shortcutRecording, setShortcutRecording] = useState(false)
   const [toggleShortcut, setToggleShortcut] = useState('Alt+Space')
@@ -289,6 +367,31 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                     />
                   </button>
                 </div>
+
+                {/* Auto-hide after copy */}
+                <div className="flex items-center justify-between py-4 px-5 border-t border-zinc-200 dark:border-zinc-800">
+                  <div className="flex flex-col">
+                    <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('general.autoHideOnCopy')}</span>
+                    <span className="text-[12px] text-zinc-400 dark:text-zinc-500 mt-0.5">{tr('general.autoHideOnCopyDesc')}</span>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={autoHideOnCopy}
+                    onClick={() => onAutoHideChange(!autoHideOnCopy)}
+                    className={cn(
+                      'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200',
+                      autoHideOnCopy ? 'bg-[var(--accent)]' : 'bg-zinc-300 dark:bg-zinc-600'
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform duration-200',
+                        autoHideOnCopy ? 'translate-x-4' : 'translate-x-0'
+                      )}
+                    />
+                  </button>
+                </div>
               </div>
 
               <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl p-5 border border-zinc-200 dark:border-zinc-800">
@@ -301,6 +404,79 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                   <option value="zh-CN">中文（简体）</option>
                   <option value="en">English</option>
                 </select>
+              </div>
+
+              {/* ── 剪贴板行为 ── */}
+              <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+                <SectionHeader className="px-5 pt-5 pb-1 mb-0">{tr('general.clipboard')}</SectionHeader>
+
+                {/* Dedupe toggle */}
+                <div className="flex items-center justify-between py-4 px-5 border-b border-zinc-200 dark:border-zinc-800">
+                  <div className="flex flex-col">
+                    <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('general.dedupeOnCapture')}</span>
+                    <span className="text-[12px] text-zinc-400 dark:text-zinc-500 mt-0.5">{tr('general.dedupeOnCaptureDesc')}</span>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={dedupeOnCapture}
+                    onClick={() => handleToggleDedupe(!dedupeOnCapture)}
+                    className={cn(
+                      'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200',
+                      dedupeOnCapture ? 'bg-[var(--accent)]' : 'bg-zinc-300 dark:bg-zinc-600'
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform duration-200',
+                        dedupeOnCapture ? 'translate-x-4' : 'translate-x-0'
+                      )}
+                    />
+                  </button>
+                </div>
+
+                {/* Ignore rules */}
+                <div className="px-5 py-4">
+                  <p className="text-[13px] text-zinc-700 dark:text-zinc-300">{tr('general.ignoreRules')}</p>
+                  <p className="text-[12px] text-zinc-400 dark:text-zinc-500 mt-0.5 mb-3">{tr('general.ignoreRulesDesc')}</p>
+                  {ignorePatterns.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-3">
+                      {ignorePatterns.map((rule) => (
+                        <span
+                          key={rule}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-[11px] text-zinc-600 dark:text-zinc-400 font-mono"
+                        >
+                          {rule}
+                          <button
+                            onClick={() => handleRemoveIgnoreRule(rule)}
+                            className="hover:text-red-500 transition-colors"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={ignoreRuleDraft}
+                      onChange={(e) => setIgnoreRuleDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') { e.preventDefault(); handleAddIgnoreRule() }
+                        if (e.key === 'Escape') { e.preventDefault(); setIgnoreRuleDraft('') }
+                      }}
+                      placeholder={tr('general.ignoreRulesPlaceholder')}
+                      className="flex-1 h-7 px-2.5 rounded-md text-xs bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 outline-none focus:border-zinc-400 dark:focus:border-zinc-700 transition-colors font-mono"
+                    />
+                    <button
+                      onClick={handleAddIgnoreRule}
+                      className="flex-shrink-0 h-7 px-3 rounded-md bg-zinc-800 dark:bg-zinc-700 hover:bg-zinc-700 dark:hover:bg-zinc-600 text-xs text-zinc-200 transition-colors font-medium"
+                    >
+                      {tr('general.addRule')}
+                    </button>
+                  </div>
+                </div>
               </div>
 
             </div>
@@ -571,14 +747,15 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
 
               {/* ── Retention rules ── */}
               <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl p-5 border border-zinc-200 dark:border-zinc-800">
-                <SectionHeader className="mb-4">{tr('storage.retention')}</SectionHeader>
+                <SectionHeader className="mb-1">{tr('storage.retention')}</SectionHeader>
+                <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mb-4">{tr('storage.retentionHint')}</p>
                 <div className="space-y-4">
                   {/* Retention time */}
                   <div className="flex items-center justify-between">
                     <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{tr('storage.retentionTime')}</span>
                     <select
                       value={retentionDays}
-                      onChange={(e) => setRetentionDays(e.target.value)}
+                      onChange={(e) => handleRetentionChange(e.target.value)}
                       className="h-7 px-2.5 rounded-md text-xs bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 outline-none focus:border-zinc-400 dark:focus:border-zinc-700 appearance-none cursor-pointer"
                     >
                       <option value="7">{tr('storage.retention7d')}</option>
@@ -593,7 +770,7 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                     <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{tr('storage.maxRecords')}</span>
                     <div className="flex items-center">
                       <button
-                        onClick={() => setMaxRecords((n) => Math.max(100, n - 100))}
+                        onClick={() => handleMaxRecordsChange(maxRecords - 100)}
                         className="w-6 h-7 flex items-center justify-center rounded-l-md border border-zinc-200 dark:border-zinc-800 bg-zinc-100 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-800 transition-colors"
                       >
                         <Minus className="w-3 h-3" />
@@ -601,16 +778,57 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                       <input
                         type="number"
                         value={maxRecords}
-                        onChange={(e) => setMaxRecords(Number(e.target.value) || 100)}
+                        onChange={(e) => handleMaxRecordsChange(Number(e.target.value) || 100)}
                         className="w-16 h-7 text-center bg-zinc-50 dark:bg-zinc-950 border-y border-zinc-200 dark:border-zinc-800 text-xs text-zinc-700 dark:text-zinc-300 outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                       />
                       <button
-                        onClick={() => setMaxRecords((n) => Math.min(9999, n + 100))}
+                        onClick={() => handleMaxRecordsChange(maxRecords + 100)}
                         className="w-6 h-7 flex items-center justify-center rounded-r-md border border-zinc-200 dark:border-zinc-800 bg-zinc-100 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-800 transition-colors"
                       >
                         <Plus className="w-3 h-3" />
                       </button>
                     </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* ── Data backup ── */}
+              <div>
+                <SectionHeader className="mb-4">{tr('storage.backup')}</SectionHeader>
+                <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-200 dark:border-zinc-800 divide-y divide-zinc-200 dark:divide-zinc-800">
+                  <div className="flex items-center justify-between p-5">
+                    <div>
+                      <p className="text-[13px] text-zinc-700 dark:text-zinc-300">{tr('storage.backupDb')}</p>
+                      <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">{tr('storage.backupDbHint')}</p>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        if (typeof window === 'undefined' || !window.electronAPI) return
+                        const res = await window.electronAPI.exportDb()
+                        if (res.success && res.path) alert(tr('storage.backupOk', { path: res.path }))
+                        else if (!res.canceled) alert(tr('storage.backupErr', { error: res.error || 'unknown' }))
+                      }}
+                      className="flex-shrink-0 h-8 px-4 rounded-md bg-zinc-800 dark:bg-zinc-700 hover:bg-zinc-700 dark:hover:bg-zinc-600 text-xs text-zinc-200 transition-colors font-medium"
+                    >
+                      {tr('storage.backupDb')}
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between p-5">
+                    <div>
+                      <p className="text-[13px] text-zinc-700 dark:text-zinc-300">{tr('storage.exportJson')}</p>
+                      <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">{tr('storage.exportJsonHint')}</p>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        if (typeof window === 'undefined' || !window.electronAPI) return
+                        const res = await window.electronAPI.exportJson()
+                        if (res.success && res.path) alert(tr('storage.exportOk', { path: res.path }))
+                        else if (!res.canceled) alert(tr('storage.exportErr', { error: res.error || 'unknown' }))
+                      }}
+                      className="flex-shrink-0 h-8 px-4 rounded-md border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-xs text-zinc-600 dark:text-zinc-400 transition-colors font-medium"
+                    >
+                      {tr('storage.exportJson')}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -727,7 +945,7 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                 </div>
                 <div>
                   <p className="text-sm font-medium text-zinc-800 dark:text-zinc-300">Q-Paste</p>
-                  <p className="text-xs text-zinc-500 dark:text-zinc-500">{tr('about.version')} 1.0.0</p>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-500">{tr('about.version')} {appVersion || '1.2.0'}</p>
                 </div>
               </div>
               <p className="text-[13px] text-zinc-500 dark:text-zinc-500 leading-relaxed">{tr('about.description')}</p>

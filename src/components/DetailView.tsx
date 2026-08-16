@@ -230,7 +230,7 @@ export default function DetailView({
           </div>
           <p className="text-sm text-zinc-400 dark:text-zinc-600">{tr('detail.empty')}</p>
           <div className="flex items-center gap-3 mt-2 justify-center text-[10px] text-zinc-300 dark:text-zinc-700">
-            <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">↑↓</kbd> {tr('detail.switch')}</span>
+            <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">W S</kbd> {tr('detail.switch')}</span>
             <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">C</kbd> {tr('detail.copy')}</span>
             <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">D</kbd> {tr('detail.delete')}</span>
             <span><kbd className="bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded font-mono">Ctrl+P</kbd> {tr('detail.pin')}</span>
@@ -408,7 +408,7 @@ export default function DetailView({
             <pre
               onDoubleClick={enterEditMode}
               className={`text-sm text-zinc-800 dark:text-zinc-200 font-normal antialiased whitespace-pre-wrap break-words leading-7 select-text cursor-text hover:bg-zinc-50 dark:hover:bg-zinc-900/50 rounded-lg p-1 -m-1 transition-colors ${monoClass}`}
-              title={tr('detail.dblClickZoom')}
+              title={tr('detail.dblClickEdit')}
             >
               {displayContent}
             </pre>

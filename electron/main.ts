@@ -30,9 +30,24 @@ interface AppConfig {
   storagePath?: string
   autoStart?: boolean
   startMinimized?: boolean
+  /** 记录保留天数：数字或 'forever'（未设置 = 不自动清理） */
+  retentionDays?: number | 'forever'
+  /** 最大记录条数（未设置 = 不自动裁剪） */
+  maxRecords?: number
+  /** 忽略捕获规则：正则表达式列表，匹配的剪贴板内容不捕获 */
+  ignorePatterns?: string[]
+  /** 重复内容自动去重置顶（false 时保留重复记录） */
+  dedupeOnCapture?: boolean
 }
 
-const defaultConfig: AppConfig = { toggleShortcut: 'Alt+Space', autoStart: true, startMinimized: true }
+const defaultConfig: AppConfig = {
+  toggleShortcut: 'Alt+Space',
+  autoStart: true,
+  startMinimized: true,
+  retentionDays: 'forever',
+  maxRecords: 500,
+  dedupeOnCapture: true,
+}
 let config: AppConfig = { ...defaultConfig }
 
 function loadConfig(): void {
@@ -55,6 +70,69 @@ function saveConfig(): void {
 function saveDb(): void {
   if (!db) return
   fs.writeFileSync(dbPath, Buffer.from(db.export()))
+}
+
+// ── 保留策略：仅清理未收藏的记录，金库数据永远保留 ──
+
+let retentionTimer: ReturnType<typeof setInterval> | null = null
+
+/** 按保留天数清理过期记录（retentionDays 未设置或为 'forever' 时跳过） */
+function enforceRetention(): void {
+  if (!db) return
+  const days = config.retentionDays
+  if (!days || days === 'forever') return
+  db.run(
+    `DELETE FROM items WHERE is_pinned = 0 AND created_at < datetime('now', 'localtime', '-${days} days')`
+  )
+}
+
+/** 超出最大记录条数时，裁剪最旧的未收藏记录 */
+function enforceMaxRecords(): void {
+  if (!db) return
+  const max = config.maxRecords
+  if (!max || max <= 0) return
+
+  const stmt = db.prepare('SELECT COUNT(*) AS total, SUM(is_pinned) AS pinned FROM items')
+  let total = 0
+  let pinned = 0
+  if (stmt.step()) {
+    const row = stmt.getAsObject()
+    total = (row.total as number) || 0
+    pinned = (row.pinned as number) || 0
+  }
+  stmt.free()
+
+  const allowedUnpinned = Math.max(0, max - pinned)
+  const unpinned = total - pinned
+  if (unpinned <= allowedUnpinned) return
+
+  // 保留最新 allowedUnpinned 条未收藏记录，删除其余更旧的
+  db.run(
+    `DELETE FROM items WHERE is_pinned = 0 AND id NOT IN (
+       SELECT id FROM items WHERE is_pinned = 0 ORDER BY created_at DESC, id DESC LIMIT :keep
+     )`,
+    { ':keep': allowedUnpinned }
+  )
+}
+
+function enforceRetentionRules(): void {
+  enforceRetention()
+  enforceMaxRecords()
+}
+
+function startRetentionTimer(): void {
+  if (retentionTimer) clearInterval(retentionTimer)
+  retentionTimer = setInterval(() => {
+    enforceRetentionRules()
+    saveDb()
+  }, 60 * 60 * 1000) // 每小时执行一次
+}
+
+function stopRetentionTimer(): void {
+  if (retentionTimer) {
+    clearInterval(retentionTimer)
+    retentionTimer = null
+  }
 }
 
 async function initDatabase(): Promise<void> {
@@ -140,6 +218,20 @@ function hashBuffer(buf: Buffer): string {
   return `${buf.length}:${h}`
 }
 
+/** 剪贴板文本是否命中忽略规则（正则列表） */
+function isIgnoredContent(text: string): boolean {
+  const patterns = config.ignorePatterns ?? []
+  if (patterns.length === 0) return false
+  for (const p of patterns) {
+    try {
+      if (new RegExp(p).test(text)) return true
+    } catch {
+      // 忽略非法正则
+    }
+  }
+  return false
+}
+
 function checkClipboard(): void {
   if (!mainWindow) return
 
@@ -183,6 +275,12 @@ function checkClipboard(): void {
   if (!text || text === lastTextContent) return
   lastTextContent = text
 
+  // 忽略规则：匹配正则的内容不捕获（如密码管理器复制的密码）
+  if (isIgnoredContent(text)) {
+    console.log('[Q-Paste] 剪贴板内容命中忽略规则，已跳过')
+    return
+  }
+
   const isUrl = /^https?:\/\/\S+/i.test(text)
   const preview = text.length > 100 ? text.slice(0, 100) + '...' : text
   const createdAt = nowLocal()
@@ -198,7 +296,14 @@ function checkClipboard(): void {
 }
 
 function startClipboardMonitor(): void {
+  // 设基线：启动/恢复监听时不捕获当前剪贴板已有内容（文本与图片行为一致）
   lastTextContent = clipboard.readText().trim() || ''
+  const formats = clipboard.availableFormats()
+  if (formats.includes('image/png') || formats.includes('image/jpeg')) {
+    lastImageHash = hashBuffer(clipboard.readImage().toPNG())
+  } else {
+    lastImageHash = ''
+  }
   clipboardTimer = setInterval(checkClipboard, 500)
 }
 
@@ -217,6 +322,8 @@ function getIconPath(): string {
   }
   return path.join(__dirname, '../../build/tray-icon.ico')
 }
+
+let monitoringPaused = false
 
 function createTray(): void {
   let icon: Electron.NativeImage
@@ -238,10 +345,30 @@ function createTray(): void {
   tray = new Tray(icon)
   tray.setToolTip('Q-Paste')
 
-  const contextMenu = Menu.buildFromTemplate([
+  const buildMenu = () => Menu.buildFromTemplate([
     {
       label: '显示窗口',
       click: () => showWindow(),
+    },
+    {
+      label: '打开设置',
+      click: () => {
+        showWindow()
+        mainWindow?.webContents.send('open-settings')
+      },
+    },
+    { type: 'separator' },
+    {
+      label: monitoringPaused ? '恢复监听剪贴板' : '暂停监听剪贴板',
+      click: () => {
+        monitoringPaused = !monitoringPaused
+        if (monitoringPaused) {
+          stopClipboardMonitor()
+        } else {
+          startClipboardMonitor()
+        }
+        tray?.setContextMenu(buildMenu())
+      },
     },
     { type: 'separator' },
     {
@@ -252,7 +379,7 @@ function createTray(): void {
       },
     },
   ])
-  tray.setContextMenu(contextMenu)
+  tray.setContextMenu(buildMenu())
   tray.on('double-click', () => showWindow())
 }
 
@@ -338,9 +465,9 @@ function createWindow(): void {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
   }
 
-  // Hide to tray instead of closing on non-macOS
+  // Hide to tray instead of closing (Windows/Linux)；macOS 关窗即退出，由 activate 重建
   mainWindow.on('close', (e) => {
-    if (!isQuitting) {
+    if (process.platform !== 'darwin' && !isQuitting) {
       e.preventDefault()
       mainWindow?.hide()
     }
@@ -353,12 +480,23 @@ function createWindow(): void {
 
 // ── IPC handlers ──
 
-ipcMain.handle('db:get-items', (_event, { limit, offset }: { limit: number; offset: number }) => {
+ipcMain.handle('db:get-items', (_event, { limit, offset, search }: { limit: number; offset: number; search?: string }) => {
   if (!db) return []
-  const stmt = db.prepare(
-    'SELECT id, type, content, preview, char_count, storage_size, created_at, is_pinned, alias, tags, is_sensitive FROM items ORDER BY created_at DESC LIMIT :limit OFFSET :offset'
-  )
-  stmt.bind({ ':limit': limit, ':offset': offset })
+  const q = (search || '').trim()
+  let sql =
+    'SELECT id, type, content, preview, char_count, storage_size, created_at, is_pinned, alias, tags, is_sensitive FROM items'
+  const binds: Record<string, any> = { ':limit': limit, ':offset': offset }
+  if (q) {
+    // 转义 LIKE 通配符，避免 % _ 被当作通配符
+    const escaped = q.replace(/[\\%_]/g, (m) => '\\' + m)
+    sql +=
+      " WHERE content LIKE :q ESCAPE '\\' OR preview LIKE :q ESCAPE '\\' OR alias LIKE :q ESCAPE '\\' OR tags LIKE :q ESCAPE '\\'"
+    binds[':q'] = `%${escaped}%`
+  }
+  // created_at 精度到秒，同秒多条用 id 兜底保证稳定排序
+  sql += ' ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset'
+  const stmt = db.prepare(sql)
+  stmt.bind(binds)
   const items: StoredItem[] = []
   while (stmt.step()) {
     items.push(stmt.getAsObject() as unknown as StoredItem)
@@ -369,6 +507,31 @@ ipcMain.handle('db:get-items', (_event, { limit, offset }: { limit: number; offs
 
 ipcMain.handle('db:insert-item', (_event, item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) => {
   if (!db) return null
+
+  // 内容去重置顶（可配置）：文本/URL 存在相同内容的未收藏记录时，复用该记录并更新到最新（避免重复堆积）
+  if (config.dedupeOnCapture !== false && item.type !== 'image' && item.content) {
+    const dup = db.prepare('SELECT id FROM items WHERE type = :type AND content = :content AND is_pinned = 0 LIMIT 1')
+    dup.bind({ ':type': item.type, ':content': item.content })
+    let dupId: number | null = null
+    if (dup.step()) dupId = (dup.getAsObject().id as number) ?? null
+    dup.free()
+
+    if (dupId !== null) {
+      db.run(
+        `UPDATE items SET preview = :preview, char_count = :charCount, storage_size = :storageSize, created_at = :createdAt WHERE id = :id`,
+        {
+          ':id': dupId,
+          ':preview': item.preview,
+          ':charCount': item.charCount,
+          ':storageSize': item.storageSize,
+          ':createdAt': item.createdAt,
+        }
+      )
+      saveDb()
+      return { id: dupId, updated: true }
+    }
+  }
+
   db.run(
     `INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_sensitive)
      VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt, :isSensitive)`,
@@ -383,8 +546,10 @@ ipcMain.handle('db:insert-item', (_event, item: { type: string; content: string;
     }
   )
   const res = db.exec('SELECT last_insert_rowid()')
+  const id = res[0]?.values[0]?.[0] ?? null
   saveDb()
-  return res[0]?.values[0]?.[0] ?? null
+  enforceMaxRecords()
+  return { id, updated: false }
 })
 
 ipcMain.handle('db:delete-item', (_event, id: number) => {
@@ -477,6 +642,116 @@ ipcMain.handle('force-clear-data', async (_event, type: string) => {
 
     saveDb()
     return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err?.message ?? String(err) }
+  }
+})
+
+// ── 保留策略（保留时间 / 最大记录条数）──
+ipcMain.handle('settings:get-retention', () => {
+  return {
+    retentionDays: config.retentionDays ?? 'forever',
+    maxRecords: config.maxRecords ?? 500,
+  }
+})
+
+ipcMain.handle('settings:set-retention', (_event, settings: { retentionDays?: number | 'forever'; maxRecords?: number }) => {
+  if (settings.retentionDays !== undefined) {
+    const v = settings.retentionDays
+    config.retentionDays = v === 'forever' || v === 7 || v === 30 || v === 90 ? v : 'forever'
+  }
+  if (settings.maxRecords !== undefined) {
+    const n = Math.round(Number(settings.maxRecords))
+    config.maxRecords = Number.isFinite(n) && n > 0 ? Math.min(9999, Math.max(100, n)) : undefined
+  }
+  saveConfig()
+  enforceRetentionRules()
+  saveDb()
+  return { success: true }
+})
+
+// ── 捕获规则（忽略规则 / 去重置顶开关）──
+ipcMain.handle('settings:get-capture-rules', () => {
+  return {
+    ignorePatterns: config.ignorePatterns ?? [],
+    dedupeOnCapture: config.dedupeOnCapture ?? true,
+  }
+})
+
+ipcMain.handle('settings:set-capture-rules', (_event, settings: { ignorePatterns?: string[]; dedupeOnCapture?: boolean }) => {
+  if (Array.isArray(settings.ignorePatterns)) {
+    // 过滤空串与非法正则
+    const valid: string[] = []
+    for (const p of settings.ignorePatterns) {
+      const s = String(p).trim()
+      if (!s) continue
+      try { new RegExp(s); valid.push(s) } catch { /* 忽略非法正则 */ }
+    }
+    config.ignorePatterns = valid
+  }
+  if (typeof settings.dedupeOnCapture === 'boolean') {
+    config.dedupeOnCapture = settings.dedupeOnCapture
+  }
+  saveConfig()
+  return { success: true }
+})
+
+// ── 版本号（与 package.json 保持一致）──
+ipcMain.handle('app:get-version', () => app.getVersion())
+
+// ── 数据备份 / 导出 ──
+ipcMain.handle('data:export-db', async () => {
+  try {
+    if (!db) throw new Error('数据库未就绪')
+    if (!mainWindow) throw new Error('窗口未就绪')
+    saveDb() // 确保导出的是最新数据
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: '备份数据库文件',
+      defaultPath: `q-paste-backup-${new Date().toISOString().slice(0, 10)}.db`,
+      filters: [{ name: 'SQLite Database', extensions: ['db'] }],
+    })
+    if (result.canceled || !result.filePath) return { success: false, canceled: true }
+    fs.copyFileSync(dbPath, result.filePath)
+    return { success: true, path: result.filePath }
+  } catch (err: any) {
+    return { success: false, error: err?.message ?? String(err) }
+  }
+})
+
+ipcMain.handle('data:export-json', async () => {
+  try {
+    if (!db) throw new Error('数据库未就绪')
+    if (!mainWindow) throw new Error('窗口未就绪')
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: '导出 JSON 备份',
+      defaultPath: `q-paste-backup-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    })
+    if (result.canceled || !result.filePath) return { success: false, canceled: true }
+
+    const rows: Record<string, any>[] = []
+    const stmt = db.prepare(
+      'SELECT id, type, content, preview, char_count, storage_size, created_at, is_pinned, alias, tags, is_sensitive FROM items ORDER BY id'
+    )
+    while (stmt.step()) rows.push(stmt.getAsObject())
+    stmt.free()
+
+    fs.writeFileSync(
+      result.filePath,
+      JSON.stringify(
+        {
+          app: 'Q-Paste',
+          version: '1.2.0',
+          exportedAt: new Date().toISOString(),
+          count: rows.length,
+          items: rows,
+        },
+        null,
+        2
+      ),
+      'utf-8'
+    )
+    return { success: true, path: result.filePath }
   } catch (err: any) {
     return { success: false, error: err?.message ?? String(err) }
   }
@@ -601,7 +876,15 @@ if (!gotTheLock) {
   Menu.setApplicationMenu(null)
 
   app.whenReady().then(async () => {
+    // Windows 任务栏/通知归属标识
+    if (process.platform === 'win32') {
+      app.setAppUserModelId('com.qpaste.app')
+    }
+
     await initDatabase()
+    // 启动时执行一次保留策略（仅清理未收藏记录）
+    enforceRetentionRules()
+    saveDb()
 
     // 应用自启设置（Windows 注册表）
     app.setLoginItemSettings({ openAtLogin: config.autoStart ?? true })
@@ -610,6 +893,7 @@ if (!gotTheLock) {
     createTray()
     registerGlobalShortcut()
     startClipboardMonitor()
+    startRetentionTimer()
   })
 
   app.on('window-all-closed', () => {
@@ -626,6 +910,7 @@ if (!gotTheLock) {
   app.on('before-quit', () => {
     isQuitting = true
     stopClipboardMonitor()
+    stopRetentionTimer()
     globalShortcut.unregisterAll()
     if (db) { saveDb(); db.close() }
   })

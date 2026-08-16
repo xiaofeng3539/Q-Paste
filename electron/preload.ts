@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // Database
-  getItems: (params: { limit: number; offset: number }) =>
+  getItems: (params: { limit: number; offset: number; search?: string }) =>
     ipcRenderer.invoke('db:get-items', params),
   insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) =>
     ipcRenderer.invoke('db:insert-item', item),
@@ -57,4 +57,33 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('storage:change-path', newPath),
   getConfigPath: () =>
     ipcRenderer.invoke('config:get-path') as Promise<string>,
+
+  // Retention rules
+  getRetention: () =>
+    ipcRenderer.invoke('settings:get-retention') as Promise<{ retentionDays: number | 'forever'; maxRecords: number }>,
+  setRetention: (settings: { retentionDays?: number | 'forever'; maxRecords?: number }) =>
+    ipcRenderer.invoke('settings:set-retention', settings) as Promise<{ success: boolean }>,
+
+  // Capture rules (ignore patterns / dedupe toggle)
+  getCaptureRules: () =>
+    ipcRenderer.invoke('settings:get-capture-rules') as Promise<{ ignorePatterns: string[]; dedupeOnCapture: boolean }>,
+  setCaptureRules: (settings: { ignorePatterns?: string[]; dedupeOnCapture?: boolean }) =>
+    ipcRenderer.invoke('settings:set-capture-rules', settings) as Promise<{ success: boolean }>,
+
+  // App version
+  getVersion: () =>
+    ipcRenderer.invoke('app:get-version') as Promise<string>,
+
+  // Backup / Export
+  exportDb: () =>
+    ipcRenderer.invoke('data:export-db') as Promise<{ success: boolean; canceled?: boolean; path?: string; error?: string }>,
+  exportJson: () =>
+    ipcRenderer.invoke('data:export-json') as Promise<{ success: boolean; canceled?: boolean; path?: string; error?: string }>,
+
+  // Tray → renderer events
+  onOpenSettings: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('open-settings', handler)
+    return () => ipcRenderer.removeListener('open-settings', handler)
+  },
 })
