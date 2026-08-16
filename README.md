@@ -1,10 +1,10 @@
 # Q-Paste
 
-> 一款极简、高效的跨平台桌面剪贴板管理工具，助你告别繁杂的复制粘贴。
+> 一款极简、高效的 Windows 桌面剪贴板管理工具，助你告别繁杂的复制粘贴。
 
 ![Version](https://img.shields.io/badge/version-1.2.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+![Platform](https://img.shields.io/badge/platform-windows-blue)
 
 Q-Paste 静默运行于系统托盘，自动捕获你复制过的文本、链接与图片，随时通过全局快捷键唤出取用。数据全部保存在本地，无需联网，安全可控。
 
