@@ -187,15 +187,21 @@ export default function App() {
       // 敏感检测：HTML 先转纯文本再检测（避免标签干扰），图片/文件列表不检测
       const contentForCheck = data.type === 'html' ? stripHtml(data.content) : data.content
       const isSensitive = (data.type === 'text' || data.type === 'url' || data.type === 'html') && detectSensitive(contentForCheck)
-      const res = await window.electronAPI.insertItem({
-        type: data.type,
-        content: data.content,
-        preview: data.preview,
-        charCount: data.charCount ?? 0,
-        storageSize: data.storageSize ?? 0,
-        createdAt: data.createdAt,
-        isSensitive,
-      })
+      let res: { id: number; updated: boolean } | null = null
+      try {
+        res = await window.electronAPI.insertItem({
+          type: data.type,
+          content: data.content,
+          preview: data.preview,
+          charCount: data.charCount ?? 0,
+          storageSize: data.storageSize ?? 0,
+          createdAt: data.createdAt,
+          isSensitive,
+        })
+      } catch (err: any) {
+        console.error('[Q-Paste] 插入记录失败:', err)
+        return
+      }
       if (!res) return
       const id = res.id
       if (res.updated) {
@@ -326,24 +332,29 @@ export default function App() {
   const handleCopy = useCallback(
     async (item: ClipboardItem) => {
       if (isElectron) {
-        if (item.type === 'image') {
-          // 列表查询已置空图片 content，复制前按 id 取完整内容（dataURL）
-          let content = item.content
-          if (!content) {
-            content = await window.electronAPI.getItemContent(item.id)
+        try {
+          if (item.type === 'image') {
+            // 列表查询已置空图片 content，复制前按 id 取完整内容（dataURL）
+            let content = item.content
+            if (!content) {
+              content = await window.electronAPI.getItemContent(item.id)
+            }
+            if (content) {
+              await window.electronAPI.writeImage(content)
+            }
+          } else if (item.type === 'html' && item.content) {
+            await window.electronAPI.writeHtml(item.content)
+          } else if (item.type === 'files' && item.content) {
+            const paths = safeParseJson(item.content, [] as string[])
+            if (Array.isArray(paths) && paths.length > 0) {
+              await window.electronAPI.writeFiles(paths)
+            }
+          } else {
+            await window.electronAPI.writeText(item.content)
           }
-          if (content) {
-            await window.electronAPI.writeImage(content)
-          }
-        } else if (item.type === 'html' && item.content) {
-          await window.electronAPI.writeHtml(item.content)
-        } else if (item.type === 'files' && item.content) {
-          const paths = safeParseJson(item.content, [] as string[])
-          if (Array.isArray(paths) && paths.length > 0) {
-            await window.electronAPI.writeFiles(paths)
-          }
-        } else {
-          await window.electronAPI.writeText(item.content)
+        } catch (err: any) {
+          showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+          return
         }
       }
       showToast(tr('toast.copied'))
@@ -356,16 +367,24 @@ export default function App() {
   )
 
   const handleOpenUrl = useCallback(async (url: string) => {
-    if (isElectron) {
-      await window.electronAPI.openUrl(url)
-    } else {
-      window.open(url, '_blank')
+    try {
+      if (isElectron) {
+        await window.electronAPI.openUrl(url)
+      } else {
+        window.open(url, '_blank')
+      }
+    } catch (err: any) {
+      showToast(tr('toast.error', { error: err?.message ?? String(err) }))
     }
   }, [])
 
   const handleOpenFile = useCallback(async (filePath: string) => {
-    if (isElectron) {
-      await window.electronAPI.openFile(filePath)
+    try {
+      if (isElectron) {
+        await window.electronAPI.openFile(filePath)
+      }
+    } catch (err: any) {
+      showToast(tr('toast.error', { error: err?.message ?? String(err) }))
     }
   }, [])
 
@@ -384,8 +403,13 @@ export default function App() {
       if (pendingDeleteTimer.current) clearTimeout(pendingDeleteTimer.current)
       setPendingDeleteId(null)
 
-      if (isElectron) {
-        await window.electronAPI.deleteItem(id)
+      try {
+        if (isElectron) {
+          await window.electronAPI.deleteItem(id)
+        }
+      } catch (err: any) {
+        showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+        return
       }
       setItems((prev) => {
         const next = prev.filter((it) => it.id !== id)
@@ -408,8 +432,13 @@ export default function App() {
       const preview = content.length > 100 ? content.slice(0, 100) + '...' : content
       const charCount = content.length
       const storageSize = new TextEncoder().encode(content).length
-      if (isElectron) {
-        await window.electronAPI.updateItem({ id, content, preview, charCount, storageSize })
+      try {
+        if (isElectron) {
+          await window.electronAPI.updateItem({ id, content, preview, charCount, storageSize })
+        }
+      } catch (err: any) {
+        showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+        return
       }
       setItems((prev) =>
         prev.map((it) =>
@@ -426,8 +455,13 @@ export default function App() {
       const item = items.find((it) => it.id === id)
       if (!item) return
       const next = !item.is_pinned
-      if (isElectron) {
-        await window.electronAPI.updateItemMeta({ id, isPinned: next })
+      try {
+        if (isElectron) {
+          await window.electronAPI.updateItemMeta({ id, isPinned: next })
+        }
+      } catch (err: any) {
+        showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+        return
       }
       setItems((prev) =>
         prev.map((it) => (it.id === id ? { ...it, is_pinned: next } : it))
@@ -439,8 +473,13 @@ export default function App() {
 
   const handleUpdateAlias = useCallback(
     async (id: number, alias: string) => {
-      if (isElectron) {
-        await window.electronAPI.updateItemMeta({ id, alias })
+      try {
+        if (isElectron) {
+          await window.electronAPI.updateItemMeta({ id, alias })
+        }
+      } catch (err: any) {
+        showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+        return
       }
       setItems((prev) =>
         prev.map((it) => (it.id === id ? { ...it, alias } : it))
@@ -453,8 +492,13 @@ export default function App() {
   const handleUpdateTags = useCallback(
     async (id: number, tags: string[]) => {
       const tagsJson = JSON.stringify(tags)
-      if (isElectron) {
-        await window.electronAPI.updateItemMeta({ id, tags: tagsJson })
+      try {
+        if (isElectron) {
+          await window.electronAPI.updateItemMeta({ id, tags: tagsJson })
+        }
+      } catch (err: any) {
+        showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+        return
       }
       setItems((prev) =>
         prev.map((it) => (it.id === id ? { ...it, tags } : it))
@@ -468,8 +512,13 @@ export default function App() {
       const item = items.find((it) => it.id === id)
       if (!item) return
       const next = !item.is_sensitive
-      if (isElectron) {
-        await window.electronAPI.updateItemMeta({ id, isSensitive: next })
+      try {
+        if (isElectron) {
+          await window.electronAPI.updateItemMeta({ id, isSensitive: next })
+        }
+      } catch (err: any) {
+        showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+        return
       }
       setItems((prev) =>
         prev.map((it) => (it.id === id ? { ...it, is_sensitive: next } : it))

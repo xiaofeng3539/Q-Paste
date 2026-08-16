@@ -59,10 +59,16 @@ const zh: Record<string, string> = {
   'detail.unmarkSensitive': '取消敏感标记',
   'detail.presetTags': '代码,账号,发票,灵感,待办,链接,设计,敏感',
 
+  // Dialog（应用内弹窗）
+  'dialog.ok': '确定',
+  'dialog.cancel': '取消',
+  'dialog.confirm': '确认',
+
   // Toast
   'toast.captured': '已捕获新剪贴板内容',
   'toast.copied': '已复制到系统剪贴板',
   'toast.deleted': '已删除',
+  'toast.error': '操作失败：{error}',
   'toast.pinned': '已添加到金库',
   'toast.unpinned': '已取消收藏',
   'toast.confirmDeletePinned': '这是收藏内容，再按一次 D 确认删除',
@@ -156,6 +162,14 @@ const zh: Record<string, string> = {
   'storage.clearAllBtn': '清空未收藏',
   'storage.clearImagesConfirm': '确定要清除所有未收藏的图片缓存吗？此操作不可逆（金库数据将被保留）。',
   'storage.clearAllConfirm': '确定要清空所有未收藏的历史记录吗？此操作不可逆（金库数据将被保留）。',
+  'storage.clearImagesDone': '图片缓存已清除',
+  'storage.clearAllDone': '历史记录已清空',
+  'storage.clearFailed': '清理失败，原因：{error}',
+  'storage.ipcError': '操作异常：{error}',
+  'storage.forbiddenPath': '该目录为系统保护目录，无法写入数据，请选择其他位置。',
+  'storage.migrateFailed': '数据迁移失败：{error}',
+  'storage.migrateFailedUnknown': '数据迁移失败：未知错误，存储路径未更改。',
+  'storage.selectDirElectronOnly': '选择目录功能需要在 Electron 环境中运行',
 
   // Settings - Shortcuts
   'shortcuts.copyItem': '复制选中内容',
@@ -253,9 +267,15 @@ const en: Record<string, string> = {
   'detail.unmarkSensitive': 'Unmark sensitive',
   'detail.presetTags': 'Code,Account,Invoice,Inspiration,Todo,Link,Design,Sensitive',
 
+  // Dialog（应用内弹窗）
+  'dialog.ok': 'OK',
+  'dialog.cancel': 'Cancel',
+  'dialog.confirm': 'Confirm',
+
   'toast.captured': 'New clipboard content captured',
   'toast.copied': 'Copied to clipboard',
   'toast.deleted': 'Deleted',
+  'toast.error': 'Operation failed: {error}',
   'toast.pinned': 'Pinned to vault',
   'toast.unpinned': 'Unpinned',
   'toast.confirmDeletePinned': 'This is pinned — press D again to confirm delete',
@@ -345,6 +365,14 @@ const en: Record<string, string> = {
   'storage.clearAllBtn': 'Clear Unpinned',
   'storage.clearImagesConfirm': 'Are you sure you want to clear all unpinned image cache? This action is irreversible (vault data will be preserved).',
   'storage.clearAllConfirm': 'Are you sure you want to clear all unpinned history? This action is irreversible (vault data will be preserved).',
+  'storage.clearImagesDone': 'Image cache cleared',
+  'storage.clearAllDone': 'History cleared',
+  'storage.clearFailed': 'Clear failed: {error}',
+  'storage.ipcError': 'Operation error: {error}',
+  'storage.forbiddenPath': 'This is a system-protected directory and cannot be written to. Please choose another location.',
+  'storage.migrateFailed': 'Data migration failed: {error}',
+  'storage.migrateFailedUnknown': 'Data migration failed: unknown error, storage path unchanged.',
+  'storage.selectDirElectronOnly': 'Directory selection requires the Electron environment',
 
   'shortcuts.copyItem': 'Copy selected',
   'shortcuts.deleteItem': 'Delete selected',

@@ -4,6 +4,7 @@ import { cn } from '../lib/utils'
 import { Lang, tr, setLang } from '../i18n'
 import SectionHeader from './SectionHeader'
 import { ShortcutAction, SHORTCUT_ACTIONS, DEFAULT_SHORTCUTS } from '../lib/shortcuts'
+import { useDialog } from './DialogProvider'
 
 type Theme = 'light' | 'dark' | 'auto'
 
@@ -42,6 +43,7 @@ function useMenuItems(): { key: MenuKey; label: string; icon: React.ReactNode }[
 export default function Settings({ theme, onThemeChange, language, onLanguageChange, accentColor, onAccentChange, listDensity, onDensityChange, useMonospace, onMonospaceChange, autoHideOnCopy, onAutoHideChange, shortcuts, onShortcutChange, onBack, onDataImported, onClearData }: SettingsProps) {
   const [activeMenu, setActiveMenu] = useState<MenuKey>('general')
   const menuItems = useMenuItems()
+  const { alert, confirm } = useDialog()
 
   // General toggle state
   const [autoStart, setAutoStart] = useState(true)
@@ -294,21 +296,21 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
 
   async function handleChangeDir() {
     if (typeof window === 'undefined' || !window.electronAPI) {
-      setStoragePath('选择目录功能需要在 Electron 环境中运行')
+      setStoragePath(tr('storage.selectDirElectronOnly'))
       return
     }
     const result = await window.electronAPI.selectDirectory()
     if (result.canceled || !result.path) return
 
     if (isForbiddenPath(result.path)) {
-      alert('该目录为系统保护目录，无法写入数据，请选择其他位置。')
+      alert(tr('storage.forbiddenPath'))
       return
     }
 
     // 保存新路径 → 迁移数据 → 强制重启
     const res = await window.electronAPI.changeStoragePath(result.path)
     if (res && !res.success) {
-      alert('数据迁移失败：' + (res.error || '未知错误，存储路径未更改。'))
+      alert(res.error ? tr('storage.migrateFailed', { error: res.error }) : tr('storage.migrateFailedUnknown'))
     }
   }
 
@@ -973,18 +975,18 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                     <button
                       style={{ fontSize: 12, padding: '6px 12px', borderRadius: 6, border: '1px solid #d1d5db', background: 'transparent', color: '#52525b', cursor: 'pointer' }}
                       onClick={async () => {
-                        if (!window.confirm(tr('storage.clearImagesConfirm'))) return
+                        if (!(await confirm(tr('storage.clearImagesConfirm'), { danger: true, confirmText: tr('storage.clear') }))) return
                         try {
                           const res = await window.electronAPI.forceClearData('images')
                           if (res.success) {
-                            alert('图片缓存已清除！')
+                            alert(tr('storage.clearImagesDone'))
                             window.electronAPI.getStorageUsage().then(setStorageUsage)
                             onClearData('images')
                           } else {
-                            alert('底层清理失败，原因：' + (res.error || '未知'))
+                            alert(tr('storage.clearFailed', { error: res.error || 'unknown' }))
                           }
                         } catch (e: any) {
-                          alert('IPC 异常：' + (e?.message ?? String(e)))
+                          alert(tr('storage.ipcError', { error: e?.message ?? String(e) }))
                         }
                       }}
                     >
@@ -1001,18 +1003,18 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                     <button
                       style={{ fontSize: 12, padding: '6px 16px', borderRadius: 6, border: 'none', background: '#dc2626', color: '#fff', cursor: 'pointer' }}
                       onClick={async () => {
-                        if (!window.confirm(tr('storage.clearAllConfirm'))) return
+                        if (!(await confirm(tr('storage.clearAllConfirm'), { danger: true, confirmText: tr('storage.clearAllBtn') }))) return
                         try {
                           const res = await window.electronAPI.forceClearData('all')
                           if (res.success) {
-                            alert('物理清理成功！')
+                            alert(tr('storage.clearAllDone'))
                             window.electronAPI.getStorageUsage().then(setStorageUsage)
                             onClearData('all')
                           } else {
-                            alert('底层清理失败，原因：' + (res.error || '未知'))
+                            alert(tr('storage.clearFailed', { error: res.error || 'unknown' }))
                           }
                         } catch (e: any) {
-                          alert('IPC 异常：' + (e?.message ?? String(e)))
+                          alert(tr('storage.ipcError', { error: e?.message ?? String(e) }))
                         }
                       }}
                     >
