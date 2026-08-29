@@ -1,3 +1,5 @@
+import { useMemo } from 'react'
+import { Virtuoso } from 'react-virtuoso'
 import { ClipboardItem } from '../types'
 import { cn, formatRelativeTime, formatGroupLabel } from '../lib/utils'
 import { FileText, Link, Image, Search, X, Clock, Star, Pin, FileCode2, FolderOpen } from 'lucide-react'
@@ -82,13 +84,22 @@ export default function Sidebar({
   onTagChange,
 }: SidebarProps) {
   const groups = activeTab === 'vault' ? groupedByTag(items) : groupedItems(items)
-  const itemPy = density === 'compact' ? 'py-1' : 'py-2'
+  // 虚拟滚动：分组拍平为 [表头, 条目...] 交错序列
+  const flatRows = useMemo(
+    () =>
+      groups.flatMap((group) => [
+        { kind: 'header' as const, id: `h_${group.label}`, label: group.label },
+        ...group.items.map((item) => ({ kind: 'item' as const, id: `i_${item.id}`, item })),
+      ]),
+    [groups],
+  )
+  const itemPy = `py-1.5 transition-all ${density === 'compact' ? 'py-0.5' : 'py-3'}`
   const isVault = activeTab === 'vault'
 
   return (
-    <div className="h-full flex flex-col bg-white dark:bg-zinc-950 select-none">
+    <div className="h-full flex flex-col bg-[#FAFBFC] dark:bg-zinc-900 rounded-2xl border border-zinc-200/60 dark:border-zinc-800/50 shadow-sm overflow-hidden select-none">
       {/* Tab bar */}
-      <div className="flex-shrink-0 px-3 pt-6 pb-1">
+      <div className="flex-shrink-0 px-3 pt-5 pb-1">
         <div className="flex rounded-md bg-zinc-100 dark:bg-zinc-900 p-0.5">
           <button
             onClick={() => onTabChange('history')}
@@ -126,7 +137,7 @@ export default function Sidebar({
             placeholder={tr('sidebar.search')}
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            className="w-full h-7 pl-7 pr-6 bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-md text-xs text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 outline-none focus:border-zinc-400 dark:focus:border-zinc-700 transition-colors"
+            className="w-full h-7 pl-7 pr-6 bg-zinc-100 dark:bg-zinc-900 border border-transparent rounded-md text-xs text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 outline-none focus:border-zinc-300 dark:focus:border-zinc-700 transition-colors"
           />
           {searchQuery && (
             <button
@@ -170,94 +181,102 @@ export default function Sidebar({
         </div>
       )}
 
-      {/* Items list */}
-      <div className="flex-1 overflow-y-auto px-2">
-        {isVault ? (
-          /* ── 金库视图：按标签分组 ── */
-          groups.length === 0 ? (
+      {/* Items list — 虚拟滚动（仅渲染可视区行） */}
+      {(() => {
+        if (flatRows.length === 0) {
+          const emptyKey = isVault
+            ? (searchQuery || selectedTag ? 'sidebar.noResults' : 'sidebar.noVaultRecords')
+            : (searchQuery || selectedTag ? 'sidebar.noResults' : 'sidebar.noRecords')
+          return (
             <div className="px-3 py-8 text-center text-xs text-zinc-400 dark:text-zinc-600">
-              {searchQuery || selectedTag ? tr('sidebar.noResults') : tr('sidebar.noVaultRecords')}
+              {tr(emptyKey)}
             </div>
-          ) : (
-            groups.map((group) => (
-              <div key={group.label}>
-                <div className="px-3 py-2 text-[11px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
-                  🏷️ {group.label}
-                </div>
-                {group.items.map((item) => (
-                  <button
-                    key={item.id}
-                    onClick={() => onSelect(item.id)}
-                    className={cn(
-                      'w-full flex items-center gap-2.5 px-3 text-left transition-all rounded-lg',
-                      itemPy,
-                      selectedId === item.id
-                        ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 text-zinc-900 dark:text-zinc-100'
-                        : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50 border border-transparent',
-                    )}
-                  >
-                    <span className="flex-shrink-0 mt-0.5 text-amber-500">
-                      <Pin className="w-3.5 h-3.5" />
-                    </span>
-                    <span className="flex-1 min-w-0 text-left">
-                      <span className="block truncate text-[13px] leading-tight">
-                        {item.alias || item.preview || (item.type === 'image' ? tr('detail.image') : tr('detail.emptyContent'))}
-                      </span>
-                      {item.alias && (
-                        <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">
-                          {item.preview}
-                        </span>
-                      )}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            ))
           )
-        ) : (
-          /* ── 历史视图：按时间分组 ── */
-          groups.map((group) => (
-            <div key={group.label}>
-              <div className="px-3 py-2 text-[11px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
-                {group.label}
-              </div>
-              {group.items.map((item) => (
-                <button
-                  key={item.id}
-                  onClick={() => onSelect(item.id)}
-                  className={cn(
-                    'w-full flex items-center gap-2.5 px-3 text-left transition-all rounded-lg border border-transparent',
-                    itemPy,
-                    selectedId === item.id
-                      ? 'bg-zinc-200/80 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100'
-                      : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50',
-                    item.is_pinned && 'border-l-2 border-l-amber-400 rounded-l-none',
-                  )}
-                >
-                  <span className="flex-shrink-0 mt-0.5">
-                    {item.is_pinned ? (
-                      <Pin className="w-4 h-4 text-amber-500" />
-                    ) : (
-                      typeIcon(item.type)
-                    )}
-                  </span>
-                  <span className="flex-1 min-w-0 truncate text-[13px] leading-tight">
-                    {item.preview || (item.type === 'image' ? tr('detail.image') : tr('detail.emptyContent'))}
-                  </span>
-                  <span className="flex-shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600">
-                    {formatRelativeTime(item.created_at)}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ))
-        )}
-        {!isVault && items.length === 0 && (
-          <div className="px-3 py-8 text-center text-xs text-zinc-400 dark:text-zinc-600">
-            {searchQuery || selectedTag ? tr('sidebar.noResults') : tr('sidebar.noRecords')}
+        }
+
+        const renderHeader = (label: string) => (
+          <div className="px-3 py-2 text-[11px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
+            {isVault ? `\u{1F3F7}\uFE0F ${label}` : label}
           </div>
-        )}
-      </div>
+        )
+
+        const renderVaultItem = (item: ClipboardItem) => (
+          <button
+            key={item.id}
+            onClick={() => onSelect(item.id)}
+            className={cn(
+              'w-full flex items-center gap-2.5 px-3 text-left transition-all rounded-lg',
+              itemPy,
+              selectedId === item.id
+                ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 text-zinc-900 dark:text-zinc-100'
+                : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50 border border-transparent',
+            )}
+          >
+            <span className="flex-shrink-0 mt-0.5 text-amber-500">
+              <Pin className="w-3.5 h-3.5" />
+            </span>
+            <span className="flex-1 min-w-0 text-left">
+              <span className="block truncate text-[13px] leading-tight">
+                {item.alias || item.preview || (item.type === 'image' ? tr('detail.image') : tr('detail.emptyContent'))}
+              </span>
+              {item.alias && (
+                <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">
+                  {item.preview}
+                </span>
+              )}
+            </span>
+          </button>
+        )
+
+        const renderHistoryItem = (item: ClipboardItem) => (
+          <button
+            key={item.id}
+            onClick={() => onSelect(item.id)}
+            className={cn(
+              'w-full flex items-center gap-2.5 px-3 text-left transition-all rounded-lg border border-transparent',
+              itemPy,
+              item.is_pinned && selectedId !== item.id && 'border-l-2 border-l-amber-400 rounded-l-none',
+              selectedId === item.id
+                ? 'bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 border-l-2 border-l-[var(--accent)] dark:border-l-transparent'
+                : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50',
+            )}
+          >
+            <span className="flex-shrink-0 mt-0.5">
+              {item.is_pinned ? (
+                <Pin className="w-4 h-4 text-amber-500" />
+              ) : (
+                typeIcon(item.type)
+              )}
+            </span>
+            <span className="flex-1 min-w-0 text-left">
+              <span className="block truncate text-[13px] leading-tight">
+                {item.alias || item.preview || (item.type === 'image' ? tr('detail.image') : tr('detail.emptyContent'))}
+              </span>
+              {item.alias && item.preview && (
+                <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">
+                  {item.preview}
+                </span>
+              )}
+            </span>
+            <span className="flex-shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600">
+              {formatRelativeTime(item.created_at)}
+            </span>
+          </button>
+        )
+
+        return (
+          <Virtuoso
+            className="flex-1 min-w-0"
+            style={{ padding: '0 8px', overflowX: 'hidden' }}
+            totalCount={flatRows.length}
+            itemContent={(index) => {
+              const row = flatRows[index]
+              if (row.kind === 'header') return renderHeader(row.label)
+              return isVault ? renderVaultItem(row.item) : renderHistoryItem(row.item)
+            }}
+          />
+        )
+      })()}
     </div>
   )
 }

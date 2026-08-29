@@ -1,10 +1,14 @@
-import { useState, useEffect } from 'react'
-import { ArrowLeft, Monitor, Keyboard, Info, Palette, Database, Minus, Plus, X, RotateCcw } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { ArrowLeft, Monitor, Keyboard, Info, Palette, Database, Minus, Plus, X, RotateCcw, FileClock, HelpCircle, Cloud } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { Lang, tr, setLang } from '../i18n'
 import SectionHeader from './SectionHeader'
 import { ShortcutAction, SHORTCUT_ACTIONS, DEFAULT_SHORTCUTS } from '../lib/shortcuts'
 import { useDialog } from './DialogProvider'
+import type { CloudSyncConfig, CloudSyncStatus } from '../main/sync/types'
+import type { FtStatus, FtSettings } from '../types'
+import FileTransferChat from './FileTransferChat'
+import { QRCodeCanvas } from 'qrcode.react'
 
 type Theme = 'light' | 'dark' | 'auto'
 
@@ -26,21 +30,49 @@ interface SettingsProps {
   onBack: () => void
   onDataImported: () => Promise<void>
   onClearData: (type: 'images' | 'all') => Promise<void>
+  /** 轻提示（复用主界面 Toast），云同步开关失败归因等使用 */
+  onToast?: (msg: string) => void
 }
 
-type MenuKey = 'general' | 'appearance' | 'storage' | 'shortcuts' | 'about'
+type MenuKey = 'general' | 'appearance' | 'fileTransfer' | 'cloudSync' | 'storage' | 'shortcuts' | 'about'
 
 function useMenuItems(): { key: MenuKey; label: string; icon: React.ReactNode }[] {
   return [
     { key: 'general', label: tr('settings.general'), icon: <Monitor className="w-4 h-4" /> },
     { key: 'appearance', label: tr('settings.appearance'), icon: <Palette className="w-4 h-4" /> },
+    { key: 'fileTransfer', label: tr('ft.title'), icon: <FileClock className="w-4 h-4" /> },
+    { key: 'cloudSync', label: tr('settings.cloudSync'), icon: <Cloud className="w-4 h-4" /> },
     { key: 'storage', label: tr('settings.storage'), icon: <Database className="w-4 h-4" /> },
     { key: 'shortcuts', label: tr('settings.shortcuts'), icon: <Keyboard className="w-4 h-4" /> },
     { key: 'about', label: tr('settings.about'), icon: <Info className="w-4 h-4" /> },
   ]
 }
 
-export default function Settings({ theme, onThemeChange, language, onLanguageChange, accentColor, onAccentChange, listDensity, onDensityChange, useMonospace, onMonospaceChange, autoHideOnCopy, onAutoHideChange, shortcuts, onShortcutChange, onBack, onDataImported, onClearData }: SettingsProps) {
+/** 局域网传输设置开关：全热区、无禁用态，点击即时回调（乐观更新由调用方处理） */
+function FtSwitch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className={cn(
+        'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200',
+        'after:content-[\'\'] after:absolute after:-inset-1.5 after:rounded-full',
+        checked ? 'bg-[var(--accent)]' : 'bg-zinc-300 dark:bg-zinc-600'
+      )}
+    >
+      <span
+        className={cn(
+          'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform duration-200',
+          checked ? 'translate-x-4' : 'translate-x-0'
+        )}
+      />
+    </button>
+  )
+}
+
+export default function Settings({ theme, onThemeChange, language, onLanguageChange, accentColor, onAccentChange, listDensity, onDensityChange, useMonospace, onMonospaceChange, autoHideOnCopy, onAutoHideChange, shortcuts, onShortcutChange, onBack, onDataImported, onClearData, onToast }: SettingsProps) {
   const [activeMenu, setActiveMenu] = useState<MenuKey>('general')
   const menuItems = useMenuItems()
   const { alert, confirm } = useDialog()
@@ -121,6 +153,7 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
   // ── 捕获规则（忽略规则 / 去重置顶开关）──
   const [ignorePatterns, setIgnorePatterns] = useState<string[]>([])
   const [dedupeOnCapture, setDedupeOnCapture] = useState(true)
+  const [maxCaptureKb, setMaxCaptureKb] = useState(1024)
   const [ignoreRuleDraft, setIgnoreRuleDraft] = useState('')
 
   useEffect(() => {
@@ -128,6 +161,7 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
     window.electronAPI.getCaptureRules().then((s) => {
       setIgnorePatterns(s.ignorePatterns)
       setDedupeOnCapture(s.dedupeOnCapture)
+      setMaxCaptureKb(s.maxCaptureKb)
     })
   }, [])
 
@@ -135,6 +169,159 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
     setDedupeOnCapture(v)
     if (typeof window !== 'undefined' && window.electronAPI) {
       window.electronAPI.setCaptureRules({ dedupeOnCapture: v })
+    }
+  }
+
+  // ── 局域网文件传输（手机 ↔ PC，对齐 Tiez 交互）──
+  const [ftEnabled, setFtEnabled] = useState(false)
+  const [ftStatus, setFtStatus] = useState<FtStatus | null>(null)
+  const [ftSettings, setFtSettings] = useState<FtSettings>({ enabled: false, port: 18888, path: '', autoOpen: false, autoClose: false, autoCopy: true, bindIp: '' })
+  const [ftPortDraft, setFtPortDraft] = useState('18888')
+  const [availableIps, setAvailableIps] = useState<string[]>([])
+  const [localIp, setLocalIp] = useState('')
+  const [showAutoCloseHint, setShowAutoCloseHint] = useState(false)
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.electronAPI?.ftGetSettings) return
+    window.electronAPI.ftGetSettings().then((s) => {
+      setFtSettings(s)
+      setFtEnabled(s.enabled)
+      setFtPortDraft(String(s.port))
+      return window.electronAPI.ftStatus()
+    }).then((st) => {
+      setFtStatus(st)
+      if (st?.ip) setLocalIp(st.ip)
+    }).catch(() => {})
+    window.electronAPI.ftGetAvailableIps().then((ips) => {
+      setAvailableIps(ips)
+      setLocalIp((cur) => cur || ips[0] || '')
+    }).catch(() => {})
+    const offStatus = window.electronAPI.onFtStatusChanged((st) => {
+      setFtStatus(st)
+      setFtEnabled(st.enabled)
+      if (st.ip) setLocalIp(st.ip)
+    })
+    return offStatus
+  }, [])
+
+  async function handleFtToggle(v: boolean): Promise<void> {
+    const res = await window.electronAPI.ftToggle(v, Number(ftPortDraft) || undefined)
+    if (res.success) {
+      setFtEnabled(v)
+      const st = await window.electronAPI.ftStatus()
+      setFtStatus(st)
+      if (v && !localIp) {
+        const ips = await window.electronAPI.ftGetAvailableIps()
+        setAvailableIps(ips)
+        setLocalIp(ips[0] || '127.0.0.1')
+      }
+    } else {
+      setFtEnabled(false)
+      onToast?.(res.error || 'error')
+    }
+  }
+
+  /** 端口失焦/回车应用：重启服务绑定新端口（等价 Tiez applyFileServerPort） */
+  function applyFtPort(): void {
+    const n = Number(ftPortDraft)
+    if (Number.isInteger(n) && n > 0 && n < 65536 && ftEnabled) void handleFtToggle(true)
+  }
+
+  const ftSavingKeys = useRef<Set<string>>(new Set())
+  async function ftSaveSetting(key: 'fileTransferAutoOpen' | 'fileTransferAutoClose' | 'fileTransferAutoCopy', v: boolean): Promise<void> {
+    // 快速连点串行化：同键在途时忽略，防 UI 与配置不一致
+    if (ftSavingKeys.current.has(key)) return
+    ftSavingKeys.current.add(key)
+    setFtSettings((s) => ({ ...s, [key]: v })) // 即时切换 UI
+    try {
+      await window.electronAPI.ftSetSetting(key, v) // 实时持久化（同步写配置文件）
+      const fresh = await window.electronAPI.ftGetSettings() // 读回校准，双向绑定
+      setFtSettings((s) => ({ ...s, ...fresh, [key]: v }))
+    } catch (err: any) {
+      setFtSettings((s) => ({ ...s, [key]: !v })) // 失败回滚 UI
+      onToast?.(err?.message ?? String(err))
+    } finally {
+      ftSavingKeys.current.delete(key)
+    }
+  }
+
+  // ── 云同步（WebDAV，多设备）──
+  const [cloudCfg, setCloudCfg] = useState<CloudSyncConfig>({
+    enabled: false, webdavUrl: '', username: '', password: '',
+    basePath: 'qpaste-sync', deviceId: '', intervalSecs: 120,
+  })
+  const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus | null>(null)
+  const [cloudErr, setCloudErr] = useState('')
+  const [cloudBusy, setCloudBusy] = useState(false)
+  /** 本地是否有配置缓存（决定开启 Toggle 时是否直接展开表单） */
+  const [showCloudForm, setShowCloudForm] = useState(false)
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.electronAPI?.getCloudSyncConfig) return
+    window.electronAPI.getCloudSyncConfig().then((cfg) => {
+      setCloudCfg(cfg)
+      if (cfg.enabled) window.electronAPI.getCloudSyncStatus().then(setCloudStatus).catch(() => {})
+    }).catch(() => {})
+  }, [])
+
+  function cloudFailText(reason?: string): string {
+    if (reason === 'auth') return tr('general.cloudSyncAuthFailed')
+    if (reason === 'network') return tr('general.cloudSyncNetworkFailed')
+    return tr('general.cloudSyncServerError')
+  }
+
+  /**
+   * 开关唯一入口：调主进程 toggleWebDav，由 Promise 结果决定 Toggle 是否停留。
+   * 无配置缓存时开启 → 仅展开表单，保存按钮二次触发真正的开启。
+   */
+  async function handleToggleCloudSync(v: boolean): Promise<boolean> {
+    if (v && !cloudCfg.webdavUrl.trim()) {
+      setShowCloudForm(true)
+      setCloudErr(tr('general.cloudSyncNeedUrl'))
+      return false
+    }
+    setCloudBusy(true)
+    setCloudErr('')
+    try {
+      const res = await window.electronAPI.toggleWebDav({
+        webdavUrl: cloudCfg.webdavUrl,
+        username: cloudCfg.username,
+        password: cloudCfg.password,
+        basePath: cloudCfg.basePath,
+        intervalSecs: cloudCfg.intervalSecs,
+      }, v)
+      setCloudStatus(res.status ?? null)
+      if (!res.ok) {
+        // 鉴权失败 / 网络断开：Toggle 回弹到关闭，Toast 提示归因
+        setCloudErr(res.message || cloudFailText(res.reason))
+        onToast?.(cloudFailText(res.reason))
+        return false
+      }
+      setCloudCfg((c) => ({ ...c, enabled: v }))
+      onToast?.(tr(v ? 'general.cloudSyncEnabled' : 'general.cloudSyncDisabled'))
+      return true
+    } catch (err: any) {
+      const msg = err?.message ?? String(err)
+      setCloudErr(msg)
+      onToast?.(cloudFailText('server'))
+      return false
+    } finally {
+      setCloudBusy(false)
+    }
+  }
+
+  async function handleCloudSyncNow() {
+    if (!window.electronAPI?.cloudSyncNow) return
+    setCloudBusy(true)
+    try {
+      const res = await window.electronAPI.cloudSyncNow()
+      setCloudStatus(res.status)
+      if (!res.ok && res.error) {
+        setCloudErr(res.error)
+        onToast?.(cloudFailText('network'))
+      }
+    } finally {
+      setCloudBusy(false)
     }
   }
 
@@ -379,7 +566,7 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
   }, [shortcutRecording, toggleShortcut])
 
   return (
-    <div className="h-screen flex bg-zinc-50 dark:bg-zinc-950">
+    <div className="h-full flex bg-zinc-50 dark:bg-zinc-950">
       {/* Left — settings menu */}
       <div className="w-[200px] flex-shrink-0 flex flex-col">
         {/* Menu items */}
@@ -447,8 +634,8 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                   </button>
                 </div>
 
-                {/* Min to tray */}
-                <div className="flex items-center justify-between py-4 px-5">
+                {/* Min to tray on launch */}
+                <div className="flex items-center justify-between py-4 px-5 border-t border-zinc-200 dark:border-zinc-800">
                   <div className="flex flex-col">
                     <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('general.minToTray')}</span>
                     <span className="text-[12px] text-zinc-400 dark:text-zinc-500 mt-0.5">{tr('general.minToTrayDesc')}</span>
@@ -581,8 +768,172 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                     </button>
                   </div>
                 </div>
+
               </div>
 
+            </div>
+          )}
+
+          {activeMenu === 'fileTransfer' && (
+            <div className="space-y-4">
+              <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+                <SectionHeader className="px-5 pt-5 pb-1 mb-0">{tr('ft.title')}</SectionHeader>
+
+                {/* 启用开关 */}
+                <div className="flex items-center justify-between py-4 px-5 border-b border-zinc-200 dark:border-zinc-800">
+                  <div className="flex flex-col">
+                    <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('ft.enable')}</span>
+                    <span className="text-[12px] text-zinc-400 dark:text-zinc-500 mt-0.5">{tr('ft.hint')}</span>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={ftEnabled}
+                    onClick={() => void handleFtToggle(!ftEnabled)}
+                    className={cn(
+                      'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200',
+                      ftEnabled ? 'bg-[var(--accent)]' : 'bg-zinc-300 dark:bg-zinc-600'
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform duration-200',
+                        ftEnabled ? 'translate-x-4' : 'translate-x-0'
+                      )}
+                    />
+                  </button>
+                </div>
+
+                {ftEnabled && (
+                  <>
+                    {/* 端口 */}
+                    <div className="flex items-center justify-between py-4 px-5 border-b border-zinc-200 dark:border-zinc-800">
+                      <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('ft.port')}</span>
+                      <input
+                        className="w-24 h-8 px-2.5 rounded-md text-xs bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 outline-none focus:border-zinc-400 dark:focus:border-zinc-700 transition-colors font-mono text-right"
+                        value={ftPortDraft}
+                        onChange={(e) => setFtPortDraft(e.target.value.replace(/\D/g, ''))}
+                        onBlur={applyFtPort}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault()
+                            applyFtPort()
+                          }
+                        }}
+                        placeholder="18888"
+                      />
+                    </div>
+
+                    {/* 本机 IP */}
+                    <div className="flex items-center justify-between py-4 px-5 border-b border-zinc-200 dark:border-zinc-800">
+                      <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">Local IP</span>
+                      <div className="flex items-center gap-1 font-mono text-xs text-zinc-600 dark:text-zinc-300">
+                        {availableIps.length > 1 ? (
+                          <select
+                            className="bg-transparent outline-none cursor-pointer"
+                            value={localIp}
+                            onChange={(e) => {
+                              setLocalIp(e.target.value)
+                              void window.electronAPI.ftSetSetting('fileTransferBindIp', e.target.value).then(() => {
+                                if (ftEnabled) return window.electronAPI.ftToggle(true, Number(ftPortDraft) || undefined)
+                              })
+                            }}
+                          >
+                            {availableIps.map((ip) => (
+                              <option key={ip} value={ip}>{ip}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span>{localIp || '—'}</span>
+                        )}
+                        <span className="opacity-70">:{ftStatus?.port ?? ftPortDraft}</span>
+                      </div>
+                    </div>
+
+                    {/* 接收后自动打开 */}
+                    <div className="flex items-center justify-between py-4 px-5 border-b border-zinc-200 dark:border-zinc-800">
+                      <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('ft.autoOpen')}</span>
+                      <FtSwitch checked={ftSettings.autoOpen} onChange={(v) => void ftSaveSetting('fileTransferAutoOpen', v)} />
+                    </div>
+
+                    {/* 自动关闭服务（5 分钟无传输） */}
+                    <div className="py-4 px-5 border-b border-zinc-200 dark:border-zinc-800">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('ft.autoClose')}</span>
+                          <button
+                            className="p-0 bg-transparent border-none cursor-pointer flex items-center opacity-60 hover:opacity-100 text-zinc-500"
+                            onClick={() => setShowAutoCloseHint(!showAutoCloseHint)}
+                            title=""
+                          >
+                            <HelpCircle size={13} />
+                          </button>
+                        </div>
+                        <FtSwitch checked={ftSettings.autoClose} onChange={(v) => void ftSaveSetting('fileTransferAutoClose', v)} />
+                      </div>
+                      {showAutoCloseHint && (
+                        <div className="mt-2 p-2.5 rounded-lg bg-[color-mix(in_srgb,var(--accent)_8%,transparent)] border border-[color-mix(in_srgb,var(--accent)_20%,transparent)] text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                          {tr('ft.autoCloseHint')}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 接收后自动复制 */}
+                    <div className="flex items-center justify-between py-4 px-5 border-b border-zinc-200 dark:border-zinc-800">
+                      <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('ft.autoCopy')}</span>
+                      <FtSwitch checked={ftSettings.autoCopy} onChange={(v) => void ftSaveSetting('fileTransferAutoCopy', v)} />
+                    </div>
+
+                    {/* 二维码 */}
+                    {localIp && (ftStatus?.port ?? 0) > 0 && (
+                      <div className="flex items-center gap-5 py-5 px-5 border-b border-zinc-200 dark:border-zinc-800">
+                        <div className="rounded-lg bg-white p-2 border border-zinc-200 dark:border-zinc-700 flex-shrink-0">
+                          <QRCodeCanvas value={`http://${localIp}:${ftStatus?.port}`} size={90} />
+                        </div>
+                        <div className="flex flex-col gap-1 font-mono text-[11px]">
+                          <span className="text-[13px] font-bold text-zinc-800 dark:text-zinc-200">{tr('ft.scanToSend')}</span>
+                          <span className="text-zinc-400 dark:text-zinc-500">STATUS: <span className="text-emerald-600 dark:text-emerald-500 font-bold">ONLINE</span></span>
+                          <span className="text-zinc-400 dark:text-zinc-500">HOST: <span className="text-zinc-700 dark:text-zinc-300">{localIp}</span></span>
+                          <span className="text-zinc-400 dark:text-zinc-500">PORT: <span className="text-zinc-700 dark:text-zinc-300">{ftStatus?.port}</span></span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 保存路径 */}
+                    <div className="py-4 px-5">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('ft.savePath')}</span>
+                        <button
+                          className="h-7 px-3 rounded-md text-xs bg-zinc-800 dark:bg-zinc-700 hover:bg-zinc-700 dark:hover:bg-zinc-600 text-zinc-200 transition-colors font-medium"
+                          onClick={() => {
+                            void window.electronAPI.ftChooseSavePath().then((r) => {
+                              if (!r.canceled && r.path) setFtSettings((s) => ({ ...s, path: r.path as string }))
+                            })
+                          }}
+                        >
+                          {tr('ft.choose')}
+                        </button>
+                      </div>
+                      <div
+                        className="text-[11px] font-mono text-zinc-500 dark:text-zinc-400 cursor-pointer truncate"
+                        title={ftSettings.path || tr('ft.notSet')}
+                        onClick={() => {
+                          void window.electronAPI.ftGetActivePath().then((p) => {
+                            if (p) void window.electronAPI.ftOpenPath(p)
+                          })
+                        }}
+                      >
+                        {ftSettings.path || tr('ft.notSet')}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* 聊天传输视图（对齐 Tiez FileTransferChatView） */}
+              {ftEnabled && (
+                <FileTransferChat status={ftStatus} localIp={localIp} />
+              )}
             </div>
           )}
 
@@ -747,6 +1098,51 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                 </div>
               </div>
 
+              {/* ── Density live preview ── */}
+              <div className="pt-3">
+                <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/60 p-2.5">
+                  <div className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 mb-1.5">{tr('appearance.densityPreview')}</div>
+                  <div className="space-y-1">
+                    {[
+                      { title: tr('appearance.previewItem1'), meta: tr('appearance.previewMeta1') },
+                      { title: tr('appearance.previewItem2'), meta: tr('appearance.previewMeta2') },
+                      { title: tr('appearance.previewItem3'), meta: tr('appearance.previewMeta3') },
+                    ].map((m, i) => (
+                      <div
+                        key={i}
+                        className={cn(
+                          'rounded-md border border-zinc-200 dark:border-zinc-700/70 bg-white dark:bg-zinc-900 px-3 transition-all',
+                          listDensity === 'compact' ? 'py-0.5' : 'py-2',
+                        )}
+                      >
+                        <div className="text-xs font-medium text-zinc-800 dark:text-zinc-200 truncate">{m.title}</div>
+                        <div className="text-[10px] text-zinc-400 dark:text-zinc-500 truncate">{m.meta}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* ── 单条捕获上限 ── */}
+              <div className="flex items-center justify-between pt-4 border-t border-zinc-200 dark:border-zinc-800">
+                <div className="flex flex-col">
+                  <span className="text-[13px] text-zinc-600 dark:text-zinc-400">{tr('general.maxCapture')}</span>
+                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">{tr('general.maxCaptureDesc')}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="number"
+                    min={0}
+                    value={maxCaptureKb}
+                    onChange={(e) => setMaxCaptureKb(Number(e.target.value) || 0)}
+                    onBlur={() => window.electronAPI.setCaptureRules({ maxCaptureKb })}
+                    onKeyDown={(e) => { if (e.key === 'Enter') window.electronAPI.setCaptureRules({ maxCaptureKb }) }}
+                    className="w-20 h-7 px-2 rounded-md text-xs bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 outline-none focus:border-zinc-400 dark:focus:border-zinc-700 transition-colors font-mono text-right"
+                  />
+                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500">KB</span>
+                </div>
+              </div>
+
               {/* ── Typography ── */}
               <div className="flex items-center justify-between pt-4 border-t border-zinc-200 dark:border-zinc-800">
                 <div className="flex flex-col">
@@ -774,8 +1170,142 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
             </div>
           )}
 
+          {activeMenu === 'cloudSync' && (
+            <div className="space-y-4">
+              <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+                <SectionHeader className="px-5 pt-5 pb-1 mb-0">{tr('settings.cloudSync')}</SectionHeader>
+
+                {/* Cloud sync (WebDAV, multi-device) */}
+                <div className="py-4 px-5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex flex-col">
+                      <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('general.cloudSync')}</span>
+                      <span className="text-[12px] text-zinc-400 dark:text-zinc-500 mt-0.5">{tr('general.cloudSyncDesc')}</span>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={cloudCfg.enabled}
+                      disabled={cloudBusy}
+                      onClick={() => handleToggleCloudSync(!cloudCfg.enabled)}
+                      className={cn(
+                        'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200',
+                        cloudCfg.enabled ? 'bg-[var(--accent)]' : 'bg-zinc-300 dark:bg-zinc-600'
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform duration-200',
+                          cloudCfg.enabled ? 'translate-x-4' : 'translate-x-0'
+                        )}
+                      />
+                    </button>
+                  </div>
+
+                  {(cloudCfg.enabled || showCloudForm) && (
+                    <div className="mt-3 space-y-2">
+                      <input
+                        value={cloudCfg.webdavUrl}
+                        onChange={(e) => setCloudCfg({ ...cloudCfg, webdavUrl: e.target.value })}
+                        placeholder="https://dav.jianguoyun.com/dav/"
+                        spellCheck={false}
+                        className="w-full h-7 px-2.5 rounded-md text-xs bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 outline-none focus:border-zinc-400 dark:focus:border-zinc-700 transition-colors font-mono"
+                      />
+                      <div className="flex gap-2">
+                        <input
+                          value={cloudCfg.username}
+                          onChange={(e) => setCloudCfg({ ...cloudCfg, username: e.target.value })}
+                          placeholder={tr('general.cloudSyncUser')}
+                          spellCheck={false}
+                          autoComplete="off"
+                          className="flex-1 h-7 px-2.5 rounded-md text-xs bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 outline-none focus:border-zinc-400 dark:focus:border-zinc-700 transition-colors"
+                        />
+                        <input
+                          type="password"
+                          value={cloudCfg.password}
+                          onChange={(e) => setCloudCfg({ ...cloudCfg, password: e.target.value })}
+                          placeholder={tr('general.cloudSyncPwd')}
+                          autoComplete="new-password"
+                          className="flex-1 h-7 px-2.5 rounded-md text-xs bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 outline-none focus:border-zinc-400 dark:focus:border-zinc-700 transition-colors"
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          value={cloudCfg.basePath}
+                          onChange={(e) => setCloudCfg({ ...cloudCfg, basePath: e.target.value })}
+                          placeholder="qpaste-sync"
+                          spellCheck={false}
+                          title={tr('general.cloudSyncBase')}
+                          className="w-32 h-7 px-2.5 rounded-md text-xs bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 outline-none focus:border-zinc-400 dark:focus:border-zinc-700 transition-colors font-mono"
+                        />
+                        <input
+                          type="number"
+                          min={0}
+                          max={3600}
+                          value={cloudCfg.intervalSecs}
+                          onChange={(e) => setCloudCfg({ ...cloudCfg, intervalSecs: Number(e.target.value) || 0 })}
+                          title={tr('general.cloudSyncInterval')}
+                          className="w-20 h-7 px-2.5 rounded-md text-xs bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 outline-none focus:border-zinc-400 dark:focus:border-zinc-700 transition-colors"
+                        />
+                        <button
+                          onClick={() => void handleToggleCloudSync(true)}
+                          disabled={cloudBusy}
+                          className="flex-shrink-0 h-7 px-3 rounded-md bg-zinc-800 dark:bg-zinc-700 hover:bg-zinc-700 dark:hover:bg-zinc-600 disabled:opacity-50 text-xs text-zinc-200 transition-colors font-medium"
+                        >
+                          {tr('general.cloudSyncSave')}
+                        </button>
+                        <button
+                          onClick={handleCloudSyncNow}
+                          disabled={cloudBusy}
+                          className="flex-shrink-0 h-7 px-3 rounded-md bg-zinc-800 dark:bg-zinc-700 hover:bg-zinc-700 dark:hover:bg-zinc-600 disabled:opacity-50 text-xs text-zinc-200 transition-colors font-medium"
+                        >
+                          {tr('general.cloudSyncNow')}
+                        </button>
+                      </div>
+
+                      {cloudErr && (
+                        <span className="block text-[11px] text-red-500 dark:text-red-400">{cloudErr}</span>
+                      )}
+                      {cloudStatus && (
+                        <div className="text-[11px] leading-relaxed">
+                          <span className={cloudStatus.lastError ? 'text-red-500 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-500'}>
+                            {cloudStatus.lastError || tr('general.cloudSyncOn')}
+                          </span>
+                          <span className="block text-zinc-400 dark:text-zinc-500">
+                            {tr('general.cloudSyncLast', { time: cloudStatus.lastSyncAt ? new Date(cloudStatus.lastSyncAt).toLocaleString() : '—' })}
+                          </span>
+                          <span className="block text-zinc-400 dark:text-zinc-500">
+                            {tr('general.cloudSyncStat', { n: cloudStatus.receivedItems, m: cloudStatus.uploadedItems })}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           {activeMenu === 'storage' && (
             <div className="space-y-8">
+              <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+                <SectionHeader className="px-5 pt-5 pb-1 mb-0">{tr('storage.dbTool')}</SectionHeader>
+                <div className="flex items-center justify-between py-4 px-5">
+                  <div className="flex flex-col">
+                    <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('storage.dbCheck')}</span>
+                    <span className="text-[12px] text-zinc-400 dark:text-zinc-500 mt-0.5">{tr('about.logsDesc')}</span>
+                  </div>
+                  <button
+                    className="flex-shrink-0 h-7 px-3 rounded-md text-xs bg-zinc-800 dark:bg-zinc-700 hover:bg-zinc-700 dark:hover:bg-zinc-600 text-zinc-200 transition-colors font-medium"
+                    onClick={async () => {
+                      const r = await window.electronAPI.checkDatabase()
+                      onToast?.(tr(r.ok ? 'storage.dbCheckOk' : 'storage.dbCheckBad', { count: r.count, integrity: r.integrity, size: r.size }))
+                    }}
+                  >
+                    {tr('storage.dbCheck')}
+                  </button>
+                </div>
+              </div>
               {/* ── Database status card ── */}
               {(() => {
                 const textBytes = storageUsage?.textBytes ?? 0
@@ -944,8 +1474,12 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                         if (typeof window === 'undefined' || !window.electronAPI) return
                         const res = await window.electronAPI.importJson()
                         if (res.success) {
-                          if (res.count !== undefined && res.count > 0) {
-                            alert(tr('storage.importOk', { count: res.count }))
+                          if ((res.count ?? 0) > 0) {
+                            alert(tr('storage.importOk', { count: res.count ?? 0 }))
+                            await onDataImported()
+                          } else if ((res.duplicates ?? 0) > 0) {
+                            // 全部为已存在记录：明确告知数据没丢，不是导入失败
+                            alert(tr('storage.importAllDup', { count: res.duplicates ?? 0 }))
                             await onDataImported()
                           } else {
                             alert(tr('storage.importOk', { count: 0 }))
@@ -1087,6 +1621,21 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
 
           {activeMenu === 'about' && (
             <div className="space-y-4">
+              <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+                <SectionHeader className="px-5 pt-5 pb-1 mb-0">{tr('about.diagnostics')}</SectionHeader>
+                <div className="flex items-center justify-between py-4 px-5 border-t border-zinc-200 dark:border-zinc-800">
+                  <div className="flex flex-col">
+                    <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('about.logs')}</span>
+                    <span className="text-[12px] text-zinc-400 dark:text-zinc-500 mt-0.5">{tr('about.logsDesc')}</span>
+                  </div>
+                  <button
+                    className="h-7 px-3 rounded-md text-xs bg-zinc-800 dark:bg-zinc-700 hover:bg-zinc-700 dark:hover:bg-zinc-600 text-zinc-200 transition-colors font-medium"
+                    onClick={() => void window.electronAPI.openLogsDir?.()}
+                  >
+                    {tr('about.openLogs')}
+                  </button>
+                </div>
+              </div>
               <div className="flex items-center gap-4">
                 <div className="w-12 h-12 rounded-xl bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center">
                   <Monitor className="w-6 h-6 text-zinc-400 dark:text-zinc-500" />

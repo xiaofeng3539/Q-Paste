@@ -2,18 +2,48 @@
 @tailwind components;
 @tailwind utilities;
 
+/* zinc 色阶变量：浅色=精致灰阶（层级：底 F5F6F8 / 面板 FAFBFC / 卡片 FFFFFF），
+   深色=Tailwind 原版 zinc（保持现有效果，逐字节不变） */
+:root {
+  --zc-50: 245 246 248;
+  --zc-100: 239 241 244;
+  --zc-200: 229 231 235;
+  --zc-300: 210 214 220;
+  --zc-400: 154 161 171;
+  --zc-500: 106 114 128;
+  --zc-600: 106 114 128;
+  --zc-700: 74 80 96;
+  --zc-800: 42 47 56;
+  --zc-900: 29 33 41;
+  --zc-950: 17 20 24;
+}
+.dark {
+  --zc-50: 250 250 250;
+  --zc-100: 244 244 245;
+  --zc-200: 228 228 231;
+  --zc-300: 212 212 216;
+  --zc-400: 161 161 170;
+  --zc-500: 113 113 122;
+  --zc-600: 82 82 91;
+  --zc-700: 63 63 70;
+  --zc-800: 39 39 42;
+  --zc-900: 24 24 27;
+  --zc-950: 9 9 11;
+}
+
 @layer base {
   * {
     @apply border-border;
   }
   body {
-    @apply bg-zinc-50 text-zinc-900 antialiased;
+    /* 透明窗口：body 不得绘制实心底，否则盖掉根容器圆角（背景由应用根容器自绘） */
+    @apply bg-transparent text-zinc-900 antialiased;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
     overflow: hidden;
     user-select: none;
   }
   .dark body {
-    @apply bg-zinc-950 text-zinc-100;
+    @apply bg-transparent text-zinc-100;
   }
   ::-webkit-scrollbar {
     width: 4px;

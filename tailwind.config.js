@@ -8,6 +8,19 @@ module.exports = {
   theme: {
     extend: {
       colors: {
+        zinc: {
+          50: 'rgb(var(--zc-50) / <alpha-value>)',
+          100: 'rgb(var(--zc-100) / <alpha-value>)',
+          200: 'rgb(var(--zc-200) / <alpha-value>)',
+          300: 'rgb(var(--zc-300) / <alpha-value>)',
+          400: 'rgb(var(--zc-400) / <alpha-value>)',
+          500: 'rgb(var(--zc-500) / <alpha-value>)',
+          600: 'rgb(var(--zc-600) / <alpha-value>)',
+          700: 'rgb(var(--zc-700) / <alpha-value>)',
+          800: 'rgb(var(--zc-800) / <alpha-value>)',
+          900: 'rgb(var(--zc-900) / <alpha-value>)',
+          950: 'rgb(var(--zc-950) / <alpha-value>)',
+        },
         border: 'hsl(240 3.7% 15.9%)',
         input: 'hsl(240 3.7% 15.9%)',
         ring: 'hsl(240 4.9% 83.9%)',

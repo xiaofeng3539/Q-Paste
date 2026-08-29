@@ -2,11 +2,13 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { ClipboardItem } from '../types'
 import { formatStorageSize, getTypeLabel, maskSensitive, parseFilePaths, basename } from '../lib/utils'
 import { ShortcutAction } from '../lib/shortcuts'
-import { FileText, Link, Image, Copy, Trash2, Monitor, X, ZoomIn, RotateCcw, Pin, Eye, EyeOff, Shield, Plus, ExternalLink, FolderOpen, FileCode2 } from 'lucide-react'
+import { FileText, Link, Image, Copy, Trash2, Monitor, X, ZoomIn, RotateCcw, Pin, Eye, EyeOff, Shield, Plus, ExternalLink, FolderOpen, FileCode2, QrCode, ScanText, FileDown, Loader2 } from 'lucide-react'
+import { QRCodeCanvas } from 'qrcode.react'
 import { tr } from '../i18n'
 
 interface DetailViewProps {
   item: ClipboardItem | null
+  density?: 'comfortable' | 'compact'
   onCopy: (item: ClipboardItem) => void
   onDelete: (id: number) => void
   onUpdate: (id: number, content: string) => void
@@ -20,6 +22,8 @@ interface DetailViewProps {
   confirmingDelete: boolean
   /** 本地快捷键配置（用于按钮上的键位提示） */
   shortcuts: Record<ShortcutAction, string>
+  /** 轻提示（复用主界面 Toast） */
+  onToast?: (msg: string) => void
   monospace: boolean
 }
 
@@ -56,6 +60,8 @@ export default function DetailView({
   confirmingDelete,
   shortcuts,
   monospace,
+  density = 'comfortable',
+  onToast,
 }: DetailViewProps) {
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const monoClass = monospace ? 'font-mono' : 'font-sans'
@@ -84,6 +90,9 @@ export default function DetailView({
 
   /** 图片完整内容（dataURL）：列表查询已置空图片 content，详情按 id 异步加载 */
   const [imageContent, setImageContent] = useState('')
+  const [qrOpen, setQrOpen] = useState(false)
+  const [ocrBusy, setOcrBusy] = useState(false)
+  const [ocrStage, setOcrStage] = useState('')
 
   // 选中图片记录时加载完整图片内容
   useEffect(() => {
@@ -276,7 +285,98 @@ export default function DetailView({
   const isSensitive = item.is_sensitive
   const displayContent = isSensitive && !showSensitive ? maskSensitive(item.content) : item.content
   const presetTags = tr('detail.presetTags').split(',').map((t) => t.trim())
+  /** 富文本预览文档：注入主题化基础样式，覆盖源内容自带的颜色/背景（不改原始数据） */
+  function buildHtmlPreviewDoc(content: string): string {
+    const dark = document.documentElement.classList.contains('dark')
+    let accent = '#4f7dff'
+    try {
+      const v = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()
+      if (v) accent = v
+    } catch {}
+    const t = dark
+      ? { text: '#e4e4e7', page: '#18181b', sub: '#27272a', border: '#3f3f46', sel: 'rgba(79,125,255,0.35)' }
+      : { text: '#1f2937', page: '#ffffff', sub: '#f3f4f6', border: '#e5e7eb', sel: 'rgba(79,125,255,0.25)' }
+    const css = [
+      'html,body{background:' + t.page + ' !important;color:' + t.text + ' !important;}',
+      '*,*::before,*::after{background-color:transparent !important;background-image:none !important;color:' + t.text + ' !important;border-color:' + t.border + ' !important;}',
+      'a,a *{color:' + accent + ' !important;text-decoration-color:' + accent + ' !important;}',
+      'pre,code,kbd,samp,blockquote{background:' + t.sub + ' !important;color:' + t.text + ' !important;border-color:' + t.border + ' !important;}',
+      'table,th,td{border-color:' + t.border + ' !important;}',
+      'hr{border:none;border-top:1px solid ' + t.border + ' !important;background:none !important;height:1px;}',
+      'img,svg,video,canvas{background:none !important;}',
+      '::selection{background:' + t.sel + ' !important;color:' + t.text + ' !important;}',
+    ].join('\n')
+    return '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' + css + '</style></head><body>' + content + '</body></html>'
+  }
+
+  const plainText = isImage
+    ? ''
+    : isHtml
+      ? displayContent.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+      : displayContent.trim()
   const filePaths = isFiles ? parseFilePaths(item.content) : []
+  /** 图片 OCR 文字提取（tesseract.js 按需加载，中文+英文） */
+  /** OCR 引擎按需加载：首次使用时从 CDN 拉取并缓存（不随安装包分发，减小体积） */
+  async function loadTesseractEngine(): Promise<any> {
+    const w = window as any
+    if (w.Tesseract) return w.Tesseract
+    await new Promise<void>((resolve, reject) => {
+      const sc = document.createElement('script')
+      sc.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'
+      sc.onload = () => resolve()
+      sc.onerror = () => reject(new Error('OCR 引擎加载失败（首次使用需联网）'))
+      document.head.appendChild(sc)
+    })
+    if (!w.Tesseract) throw new Error('OCR 引擎加载失败')
+    return w.Tesseract
+  }
+
+  const runOcr = async () => {
+    if (ocrBusy) return
+    const src = imageContent || item.content
+    if (!src) return
+    setOcrBusy(true)
+    try {
+      setOcrStage(tr('detail.ocrLoading'))
+      const Tesseract = await loadTesseractEngine()
+      const worker = await Tesseract.createWorker(['chi_sim', 'eng'], 1, {
+        logger: (m: { status?: string; progress?: number }) => {
+          if (m.status === 'loading tesseract core') setOcrStage(tr('detail.ocrLoading'))
+          else if ((m.progress ?? 0) > 0) setOcrStage(`${Math.round((m.progress ?? 0) * 100)}%`)
+        },
+      })
+      const { data } = await worker.recognize(src)
+      await worker.terminate()
+      const text = (data.text ?? '').replace(/\n{3,}/g, '\n\n').trim()
+      if (!text) {
+        onToast?.(tr('detail.ocrEmpty'))
+        return
+      }
+      const res = await window.electronAPI.insertItem({
+        type: 'text', content: text,
+        preview: [...text].slice(0, 100).join('') + ([...text].length > 100 ? '...' : ''),
+        charCount: text.length, storageSize: new TextEncoder().encode(text).length,
+        createdAt: new Date().toLocaleString('sv-SE').replace('T', ' ').slice(0, 19),
+      })
+      onToast?.(tr('detail.ocrDone'))
+      void res
+    } catch (err: any) {
+      onToast?.(tr('detail.ocrFailed', { error: err?.message ?? String(err) }))
+    } finally {
+      setOcrBusy(false)
+      setOcrStage('')
+    }
+  }
+
+  /** 文本/链接转存为 .txt 文件写入剪贴板 */
+  const saveAsFile = async () => {
+    if (!plainText) return
+    const name = (item.alias || item.preview || 'snippet').replace(/\.[a-z0-9]{1,5}$/i, '')
+    const res = await window.electronAPI.writeTextAsFile(plainText, name)
+    if (res.success) onToast?.(tr('detail.savedAsFile', { name: res.path?.split(/[/\\]/).pop() ?? '' }))
+    else onToast?.(res.error || 'error')
+  }
+
 
   return (
     <div className="h-full flex flex-col bg-transparent">
@@ -387,7 +487,7 @@ export default function DetailView({
       )}
 
       {/* Main content */}
-      <div className="flex-1 overflow-auto p-4">
+      <div className={`flex-1 overflow-auto ${density === 'compact' ? 'p-3' : 'p-5'}`}>
         {isImage ? (
           imageContent || item.content ? (
             <div className="flex items-center justify-center min-h-full">
@@ -428,7 +528,7 @@ export default function DetailView({
               <iframe
                 title="rich-text-preview"
                 sandbox=""
-                srcDoc={displayContent}
+                srcDoc={buildHtmlPreviewDoc(displayContent)}
                 className="w-full h-full bg-white dark:bg-zinc-900"
               />
             )}
@@ -527,13 +627,44 @@ export default function DetailView({
           </button>
         )}
 
+        {(item.type === 'text' || item.type === 'url' || item.type === 'html') && plainText.length > 0 && plainText.length <= 2500 && (
+          <button
+            onClick={() => setQrOpen(true)}
+            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
+            title={tr('detail.qr')}
+          >
+            <QrCode className="w-3.5 h-3.5" />
+          </button>
+        )}
+
+        {isImage && (
+          <button
+            onClick={() => void runOcr()}
+            disabled={ocrBusy}
+            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
+            title={tr('detail.ocr')}
+          >
+            {ocrBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanText className="w-3.5 h-3.5" />}
+            {ocrBusy && ocrStage && <span className="text-[10px] text-zinc-400 dark:text-zinc-500">{ocrStage}</span>}
+          </button>
+        )}
+
+        {!isImage && plainText.length > 0 && (
+          <button
+            onClick={() => void saveAsFile()}
+            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
+            title={tr('detail.saveAsFile')}
+          >
+            <FileDown className="w-3.5 h-3.5" />
+          </button>
+        )}
+
         <button
           onClick={() => onCopy(item)}
           className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
         >
           <Copy className="w-3.5 h-3.5" />
           <span>{tr('detail.copy')}</span>
-          <kbd className="ml-1 text-[10px] text-zinc-400 dark:text-zinc-500 bg-zinc-200 dark:bg-zinc-900 px-1 py-0.5 rounded font-mono">{shortcuts.copy}</kbd>
         </button>
 
         {/* Pin / Unpin button */}
@@ -547,7 +678,6 @@ export default function DetailView({
         >
           <Pin className={`w-3.5 h-3.5 ${item.is_pinned ? 'fill-current' : ''}`} />
           <span>{item.is_pinned ? tr('detail.unpin') : tr('detail.pin')}</span>
-          <kbd className="ml-1 text-[10px] text-zinc-400 dark:text-zinc-500 bg-zinc-200 dark:bg-zinc-900 px-1 py-0.5 rounded font-mono">{shortcuts.pin}</kbd>
         </button>
 
         {/* Mark sensitive button */}
@@ -590,11 +720,6 @@ export default function DetailView({
         >
           <Trash2 className="w-3.5 h-3.5" />
           <span>{confirmingDelete ? tr('detail.confirmDelete') : tr('detail.delete')}</span>
-          <kbd className={`ml-1 text-[10px] px-1 py-0.5 rounded font-mono ${
-            confirmingDelete
-              ? 'text-red-100 bg-red-500/40'
-              : 'text-zinc-400 dark:text-zinc-500 bg-zinc-200 dark:bg-zinc-900'
-          }`}>{shortcuts.delete}</kbd>
         </button>
       </div>
 
@@ -663,6 +788,34 @@ export default function DetailView({
           />
         </div>
       )}
+      {/* ── 二维码分享弹窗 ── */}
+      {qrOpen && (
+        <div
+          className="fixed inset-0 z-[999] bg-black/50 backdrop-blur-sm flex items-center justify-center"
+          onClick={() => setQrOpen(false)}
+        >
+          <div
+            className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 shadow-xl p-6 flex flex-col items-center gap-4 max-w-[320px]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-sm font-bold text-zinc-800 dark:text-zinc-200">{tr('detail.qr')}</div>
+            <div className="rounded-xl bg-white p-3 border border-zinc-200 dark:border-zinc-700">
+              <QRCodeCanvas value={plainText.slice(0, 2500)} size={240} />
+            </div>
+            <div className="text-[11px] text-zinc-400 dark:text-zinc-500 text-center break-all line-clamp-2">
+              {plainText.slice(0, 120)}{plainText.length > 120 ? '…' : ''}
+            </div>
+            <button
+              className="h-8 px-5 rounded-md text-xs text-white"
+              style={{ background: 'var(--accent)' }}
+              onClick={() => setQrOpen(false)}
+            >
+              {tr('detail.close')}
+            </button>
+          </div>
+        </div>
+      )}
+
     </div>
   )
 }

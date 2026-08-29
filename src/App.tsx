@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import NavBar from './components/NavBar'
+import TitleBar from './components/TitleBar'
 import Sidebar from './components/Sidebar'
 import DetailView from './components/DetailView'
 import Settings from './components/Settings'
@@ -183,7 +184,29 @@ export default function App() {
 
   useEffect(() => {
     if (!isElectron) return
-    const cleanup = window.electronAPI.onClipboardChanged(async (data: ClipboardChangedData) => {
+    const cleanup = window.electronAPI.onClipboardChanged(async (data: ClipboardChangedData & { fromFt?: boolean; fromOversize?: boolean; id?: number }) => {
+      // 来自文件传输/超大文本确认入库的内容已在主进程入库，直接更新列表，不再重复插入
+      if ((data.fromFt || data.fromOversize) && data.id !== undefined) {
+        const newItem: ClipboardItem = {
+          id: data.id,
+          type: data.type,
+          content: data.content,
+          preview: data.preview,
+          char_count: data.charCount ?? 0,
+          storage_size: data.storageSize ?? 0,
+          created_at: data.createdAt,
+          is_pinned: false,
+          alias: '',
+          tags: [],
+          is_sensitive: false,
+        }
+        setItems((prev) => [newItem, ...prev])
+        setSelectedId(data.id)
+        setPendingDeleteId(null)
+        showToast(tr('toast.ftReceived', { preview: data.preview }))
+        return
+      }
+
       // 敏感检测：HTML 先转纯文本再检测（避免标签干扰），图片/文件列表不检测
       const contentForCheck = data.type === 'html' ? stripHtml(data.content) : data.content
       const isSensitive = (data.type === 'text' || data.type === 'url' || data.type === 'html') && detectSensitive(contentForCheck)
@@ -205,12 +228,14 @@ export default function App() {
       if (!res) return
       const id = res.id
       if (res.updated) {
-        // 内容去重：复用已有记录并置顶
+        // 内容去重/富文本归一：复用已有记录并置顶（类型与内容同步更新，如 text 升级为 html）
         setItems((prev) => {
           const existing = prev.find((it) => it.id === id)
           if (!existing) return prev
           const updated: ClipboardItem = {
             ...existing,
+            type: data.type,
+            content: data.content,
             preview: data.preview,
             char_count: data.charCount ?? 0,
             storage_size: data.storageSize ?? 0,
@@ -244,6 +269,61 @@ export default function App() {
       } else {
         showToast(tr('toast.captured'))
       }
+    })
+    return cleanup
+  }, [])
+
+  // 云端同步：主进程入库后的远端记录直接并入列表（按 id 去重，最新在前）
+  useEffect(() => {
+    if (!isElectron) return
+    const cleanup = window.electronAPI.onCloudSyncPulled((rows) => {
+      if (!rows.length) return
+      setItems((prev) => {
+        const known = new Set(prev.map((it) => it.id))
+        const incoming = rows
+          .filter((r) => !known.has(r.id))
+          .map((r) => ({
+            id: r.id,
+            type: r.type as ClipboardItem['type'],
+            content: r.content,
+            preview: r.preview,
+            char_count: r.charCount,
+            storage_size: r.storageSize,
+            created_at: r.createdAt,
+            is_pinned: false,
+            alias: '',
+            tags: [],
+            is_sensitive: false,
+          }))
+        return [...incoming.reverse(), ...prev]
+      })
+      showToast(tr('toast.cloudSyncPulled', { n: rows.length }))
+    })
+    return cleanup
+  }, [])
+
+  // 超大文本：等待用户选择「完整保留 / 截断保留」（主进程捕获到超限内容时触发）
+  const [oversizePending, setOversizePending] = useState<{ content: string; kb: number } | null>(null)
+  useEffect(() => {
+    if (!isElectron) return
+    const cleanup = window.electronAPI.onOversizeConfirm?.((info) => setOversizePending(info))
+    return cleanup
+  }, [])
+
+  async function handleOversizeChoice(truncate: boolean) {
+    if (!oversizePending) return
+    const res = await window.electronAPI.insertOversize(oversizePending.content, truncate)
+    setOversizePending(null)
+    if (res?.id) setSelectedId(res.id)
+  }
+
+  // 数据库完整性异常提示（启动自愈检查发现时）
+  const [dbIssue, setDbIssue] = useState(false)
+  useEffect(() => {
+    if (!isElectron) return
+    const cleanup = window.electronAPI.onDbIntegrityIssue?.(() => {
+      setDbIssue(true)
+      showToast(tr('toast.dbIntegrity'))
     })
     return cleanup
   }, [])
@@ -555,6 +635,17 @@ export default function App() {
         }
       }
 
+      // Ctrl/Cmd + 1..9：按列表位置快捷复制（写入剪贴板，遵循复制后自动隐藏设置）
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && !inInput && /^[1-9]$/.test(e.key)) {
+        const target = filteredItems[Number(e.key) - 1]
+        if (target) {
+          e.preventDefault()
+          handleCopy(target)
+          setSelectedId(target.id)
+        }
+        return
+      }
+
       if (!selectedItem) return
 
       // 复制
@@ -585,30 +676,45 @@ export default function App() {
         handleTogglePin(selectedItem.id)
       }
 
-      // 上一条 / 下一条导航
+      // 上一条 / 下一条导航（在当前视图实际显示的列表中切换：历史用 filteredItems，金库用 vaultItems/搜索结果）
       if (matchShortcut(e, sc.prev) && !inInput) {
         e.preventDefault()
-        const idx = filteredItems.findIndex((it) => it.id === selectedId)
+        const list = sidebarItems
+        const idx = list.findIndex((it) => it.id === selectedId)
         if (idx === -1) return
         setPendingDeleteId(null)
-        setSelectedId(filteredItems[Math.max(idx - 1, 0)].id)
+        setSelectedId(list[Math.max(idx - 1, 0)].id)
       }
       if (matchShortcut(e, sc.next) && !inInput) {
         e.preventDefault()
-        const idx = filteredItems.findIndex((it) => it.id === selectedId)
+        const list = sidebarItems
+        const idx = list.findIndex((it) => it.id === selectedId)
         if (idx === -1) return
         setPendingDeleteId(null)
-        setSelectedId(filteredItems[Math.min(idx + 1, filteredItems.length - 1)].id)
+        setSelectedId(list[Math.min(idx + 1, list.length - 1)].id)
       }
     }
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selectedItem, selectedId, filteredItems, searchQuery, selectedTag, pendingDeleteId, shortcuts, handleCopy, handleDelete, handleTogglePin])
+  }, [selectedItem, selectedId, sidebarItems, searchQuery, selectedTag, pendingDeleteId, shortcuts, handleCopy, handleDelete, handleTogglePin, filteredItems])
+
+  // 窗口最大化时取消内容圆角（透明窗口四角不再透出桌面缺口）
+  const [winMaximized, setWinMaximized] = useState(false)
+  useEffect(() => {
+    if (!isElectron || !window.electronAPI?.onWindowMaximizeChanged) return
+    window.electronAPI.getWindowMaximized().then(setWinMaximized).catch(() => {})
+    const off = window.electronAPI.onWindowMaximizeChanged((v) => setWinMaximized(!!v))
+    return off
+  }, [])
+  const winRadius = winMaximized ? '' : 'rounded-lg'
 
   // ── Settings view (fullscreen) ──
   if (showSettings) {
-    return <Settings theme={theme} onThemeChange={setTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} autoHideOnCopy={autoHideOnCopy} onAutoHideChange={setAutoHideOnCopy} shortcuts={shortcuts} onShortcutChange={handleShortcutChange} onBack={() => setShowSettings(false)} onDataImported={async () => {
+    return (
+      <div className={`relative h-screen overflow-hidden pt-9 bg-zinc-50 dark:bg-zinc-950 ${winRadius}`}>
+        <TitleBar />
+        <Settings theme={theme} onThemeChange={setTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} autoHideOnCopy={autoHideOnCopy} onAutoHideChange={setAutoHideOnCopy} shortcuts={shortcuts} onShortcutChange={handleShortcutChange} onBack={() => setShowSettings(false)} onToast={showToast} onDataImported={async () => {
             // 导入 JSON 后重新拉取列表
             if (!isElectron) return
             const loaded = await window.electronAPI.getItems({ limit: 500, offset: 0 })
@@ -634,16 +740,49 @@ export default function App() {
               })
             }
           }} />
+      </div>
+  )
   }
 
   // ── Main 3-column view ──
   return (
-    <div className="h-screen flex bg-zinc-50 dark:bg-zinc-950 overflow-hidden">
+    <div className={`relative h-screen flex bg-zinc-50 dark:bg-zinc-950 overflow-hidden pt-9 ${winRadius}`}>
+      <TitleBar />
+      {/* ── 超大文本确认弹窗（完整保留 / 截断保留） ── */}
+      {oversizePending && (
+        <div className="fixed inset-0 z-[999] bg-black/50 backdrop-blur-sm flex items-center justify-center">
+          <div className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 shadow-xl p-6 w-[420px] max-w-[90vw]">
+            <div className="text-sm font-bold text-zinc-800 dark:text-zinc-200 mb-2">{tr('oversize.title')}</div>
+            <div className="text-xs text-zinc-500 dark:text-zinc-400 mb-4 leading-relaxed">
+              {tr('oversize.desc', { kb: oversizePending.kb })}
+              <div className="mt-2 max-h-24 overflow-y-auto rounded-md bg-zinc-100 dark:bg-zinc-800 p-2 font-mono text-[10px] text-zinc-500 dark:text-zinc-400 break-all">
+                {oversizePending.content.slice(0, 300)}{oversizePending.content.length > 300 ? '…' : ''}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => void handleOversizeChoice(false)}
+                className="h-8 px-4 rounded-md text-xs bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-200 transition-colors"
+              >
+                {tr('oversize.keep')}
+              </button>
+              <button
+                onClick={() => void handleOversizeChoice(true)}
+                className="h-8 px-4 rounded-md text-xs text-white transition-colors"
+                style={{ background: 'var(--accent)' }}
+              >
+                {tr('oversize.truncate', { kb: oversizePending.kb })}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Column 1 — global navigation (~52px) */}
       <NavBar onOpenSettings={() => setShowSettings(true)} />
 
       {/* Column 2 — history list (~30%) */}
-      <div className="w-[280px] min-w-[240px] max-w-[320px] flex-shrink-0">
+      <div className="w-[280px] min-w-[240px] max-w-[320px] flex-shrink-0 pr-2 pt-5 pb-4">
         <Sidebar
           items={sidebarItems}
           selectedId={selectedId}
@@ -660,10 +799,11 @@ export default function App() {
       </div>
 
       {/* Column 3 — detail view (~70%) as floating card */}
-      <div className="flex-1 min-w-0 relative p-3 pl-0">
+      <div className="flex-1 min-w-0 relative pl-2 pr-4 pt-5 pb-4">
         <div className="h-full bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-zinc-200/60 dark:border-zinc-800/50 overflow-hidden flex flex-col">
           <DetailView
             item={selectedItem}
+            density={listDensity}
             onCopy={handleCopy}
             onDelete={handleDelete}
             onUpdate={handleUpdate}
@@ -673,6 +813,7 @@ export default function App() {
             onToggleSensitive={handleToggleSensitive}
             onOpenUrl={handleOpenUrl}
             onOpenFile={handleOpenFile}
+            onToast={showToast}
             confirmingDelete={pendingDeleteId === selectedItem?.id}
             shortcuts={shortcuts}
             monospace={useMonospace}
