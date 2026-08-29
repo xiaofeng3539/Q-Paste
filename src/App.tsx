@@ -56,6 +56,15 @@ function normalizeItems(rows: any[]): ClipboardItem[] {
   })) as ClipboardItem[]
 }
 
+/** 金库排序：收藏时间倒序（后收藏的排最前），旧数据无收藏时间按复制时间兜底 */
+function pinTimeOf(it: ClipboardItem): string {
+  return it.pinned_at || it.created_at
+}
+function compareByPinTime(a: ClipboardItem, b: ClipboardItem): number {
+  const byTime = pinTimeOf(b).localeCompare(pinTimeOf(a))
+  return byTime !== 0 ? byTime : b.id - a.id
+}
+
 export default function App() {
   const [items, setItems] = useState<ClipboardItem[]>(isElectron ? [] : mockItems)
   const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -365,14 +374,7 @@ export default function App() {
   const vaultItems = useMemo(() => {
     let list = items
       .filter((it) => it.is_pinned)
-      .sort((a, b) => {
-        const tagA = a.tags.length > 0 ? a.tags[0] : '￿'
-        const tagB = b.tags.length > 0 ? b.tags[0] : '￿'
-        if (tagA !== tagB) return tagA.localeCompare(tagB)
-        const aliasA = a.alias || a.preview
-        const aliasB = b.alias || b.preview
-        return aliasA.localeCompare(aliasB)
-      })
+      .sort(compareByPinTime)
     // 标签过滤
     if (selectedTag) {
       list = list.filter((it) => it.tags.includes(selectedTag))
@@ -397,7 +399,9 @@ export default function App() {
   const sidebarItems = useMemo(() => {
     if (activeTab === 'vault') {
       if (searchResults) {
-        return selectedTag ? searchResults.filter((it) => it.tags.includes(selectedTag)) : searchResults
+        const list = selectedTag ? searchResults.filter((it) => it.tags.includes(selectedTag)) : searchResults
+        // 与金库常规列表一致：按收藏时间倒序
+        return [...list].sort(compareByPinTime)
       }
       return vaultItems
     }
@@ -543,8 +547,9 @@ export default function App() {
         showToast(tr('toast.error', { error: err?.message ?? String(err) }))
         return
       }
+      const now = new Date().toLocaleString('sv-SE').replace('T', ' ').slice(0, 19)
       setItems((prev) =>
-        prev.map((it) => (it.id === id ? { ...it, is_pinned: next } : it))
+        prev.map((it) => (it.id === id ? { ...it, is_pinned: next, pinned_at: next ? now : null } : it))
       )
       showToast(next ? tr('toast.pinned') : tr('toast.unpinned'))
     },

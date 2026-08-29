@@ -49,6 +49,8 @@ export interface ClipboardItem {
   created_at: string
   /** 是否收藏/常驻 */
   is_pinned: boolean
+  /** 收藏时间（金库按此排序；旧数据为 null，按 created_at 兜底） */
+  pinned_at?: string | null
   /** 自定义别名 */
   alias: string
   /** 分类标签 */

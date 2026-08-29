@@ -20,6 +20,7 @@ interface StoredItem {
   storage_size: number
   created_at: string
   is_pinned: number
+  pinned_at: string | null
   alias: string
   tags: string
   is_sensitive: number
@@ -378,10 +379,13 @@ async function initDatabase(): Promise<void> {
     "ALTER TABLE items ADD COLUMN alias TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE items ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE items ADD COLUMN is_sensitive INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE items ADD COLUMN pinned_at TEXT",
   ]
   for (const sql of migrations) {
     try { db!.run(sql) } catch { /* 列已存在，忽略 */ }
   }
+  // 存量收藏没有收藏时间：以复制时间兜底，保证金库可按收藏先后稳定排序
+  db!.run("UPDATE items SET pinned_at = created_at WHERE is_pinned = 1 AND pinned_at IS NULL")
 
   // 回滚迁移：移除优化期新增的 content_hash 冗余列（幂等；未加过该列的库静默跳过）
   try { db!.exec('ALTER TABLE items DROP COLUMN content_hash') } catch { /* 列不存在或已回滚 */ }
@@ -890,7 +894,7 @@ ipcMain.handle('db:get-items', (_event, { limit, offset, search, pinnedOnly }: {
   const q = (search || '').trim()
   // 列表查询：图片 content 置空（大文件落盘后按需读取，避免全量 base64 过 IPC）
   let sql =
-    "SELECT id, type, CASE WHEN type = 'image' THEN '' ELSE content END AS content, preview, char_count, storage_size, created_at, is_pinned, alias, tags, is_sensitive FROM items"
+    "SELECT id, type, CASE WHEN type = 'image' THEN '' ELSE content END AS content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive FROM items"
   const binds: Record<string, any> = { ':limit': limit, ':offset': offset }
   const conditions: string[] = []
   if (q) {
@@ -1113,6 +1117,9 @@ ipcMain.handle('db:update-item-meta', (_event, params: { id: number; isPinned?: 
   if (typeof params.isPinned === 'boolean') {
     sets.push('is_pinned = :isPinned')
     binds[':isPinned'] = params.isPinned ? 1 : 0
+    // 收藏时记录收藏时间（金库按此排序）；取消收藏清空
+    sets.push('pinned_at = :pinnedAt')
+    binds[':pinnedAt'] = params.isPinned ? nowLocal() : null
   }
   if (typeof params.alias === 'string') {
     sets.push('alias = :alias')
@@ -1329,7 +1336,7 @@ ipcMain.handle('data:export-db', async () => {
 function buildBackupPayload(): Record<string, any> {
   const rows: Record<string, any>[] = []
   const stmt = db!.prepare(
-    'SELECT id, type, content, preview, char_count, storage_size, created_at, is_pinned, alias, tags, is_sensitive FROM items ORDER BY id'
+    'SELECT id, type, content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive FROM items ORDER BY id'
   )
   while (stmt.step()) {
     const row = stmt.getAsObject()
@@ -1361,7 +1368,7 @@ ipcMain.handle('data:export-json', async () => {
 
     const rows: Record<string, any>[] = []
     const stmt = db.prepare(
-      'SELECT id, type, content, preview, char_count, storage_size, created_at, is_pinned, alias, tags, is_sensitive FROM items ORDER BY id'
+      'SELECT id, type, content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive FROM items ORDER BY id'
     )
     while (stmt.step()) {
       const row = stmt.getAsObject()
@@ -1442,17 +1449,23 @@ ipcMain.handle('data:import-json', async () => {
         }
 
         const tags = Array.isArray(row.tags) ? row.tags : []
+        const createdAt = typeof row.created_at === 'string' ? row.created_at : nowLocal()
+        // 收藏时间缺失时按复制时间兜底，保证导入后金库排序稳定
+        const pinnedAt = row.is_pinned
+          ? (typeof row.pinned_at === 'string' && row.pinned_at ? row.pinned_at : createdAt)
+          : null
         db.run(
-          `INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_pinned, alias, tags, is_sensitive)
-           VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt, :isPinned, :alias, :tags, :isSensitive)`,
+          `INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive)
+           VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt, :isPinned, :pinnedAt, :alias, :tags, :isSensitive)`,
           {
             ':type': type,
             ':content': content,
             ':preview': typeof row.preview === 'string' ? row.preview : content.slice(0, 100),
             ':charCount': Number(row.char_count) || 0,
             ':storageSize': Number(row.storage_size) || Buffer.byteLength(content, 'utf8'),
-            ':createdAt': typeof row.created_at === 'string' ? row.created_at : nowLocal(),
+            ':createdAt': createdAt,
             ':isPinned': row.is_pinned ? 1 : 0,
+            ':pinnedAt': pinnedAt,
             ':alias': typeof row.alias === 'string' ? row.alias : '',
             ':tags': JSON.stringify(tags),
             ':isSensitive': row.is_sensitive ? 1 : 0,
