@@ -44,6 +44,17 @@ const zh: Record<string, string> = {
   'detail.dblClickZoom': '双击放大查看',
   'detail.dblClickEdit': '双击编辑',
 
+  // DetailView — 工具按钮与弹窗
+  'detail.close': '关闭',
+  'detail.qr': '二维码分享',
+  'detail.saveAsFile': '保存为文件',
+  'detail.savedAsFile': '已保存为文件：{name}',
+  'detail.ocr': 'OCR 文字提取',
+  'detail.ocrLoading': '识别中…',
+  'detail.ocrEmpty': '未识别到文字',
+  'detail.ocrDone': '文字提取完成',
+  'detail.ocrFailed': 'OCR 失败：{error}',
+
   // DetailView — 金库功能
   'detail.pin': '收藏',
   'detail.unpin': '取消收藏',
@@ -215,6 +226,7 @@ const zh: Record<string, string> = {
   'storage.dbCheck': '校验数据库',
   'storage.dbCheckOk': '数据库完好：{count} 条记录，占用 {size} 字节',
   'storage.dbCheckBad': '数据库完整性异常：{integrity}',
+  'storage.dbTool': '数据库工具',
   'storage.exportJson': '导出 JSON 备份',
   'storage.exportJsonHint': '导出全部记录为 JSON 文件，便于迁移与查看',
   'storage.backupOk': '备份成功：{path}',
@@ -325,6 +337,17 @@ const en: Record<string, string> = {
   'detail.dblClickReset': 'Double-click to reset',
   'detail.dblClickZoom': 'Double-click to enlarge',
   'detail.dblClickEdit': 'Double-click to edit',
+
+  // DetailView — tool buttons & dialogs
+  'detail.close': 'Close',
+  'detail.qr': 'Share via QR Code',
+  'detail.saveAsFile': 'Save as File',
+  'detail.savedAsFile': 'Saved as file: {name}',
+  'detail.ocr': 'Extract Text (OCR)',
+  'detail.ocrLoading': 'Recognizing…',
+  'detail.ocrEmpty': 'No text recognized',
+  'detail.ocrDone': 'Text extracted',
+  'detail.ocrFailed': 'OCR failed: {error}',
 
   // DetailView — Vault features
   'detail.pin': 'Pin',
@@ -488,6 +511,7 @@ const en: Record<string, string> = {
   'storage.dbCheck': 'Verify database',
   'storage.dbCheckOk': 'Database healthy: {count} items, {size} bytes',
   'storage.dbCheckBad': 'Database integrity issue: {integrity}',
+  'storage.dbTool': 'Database Tools',
   'storage.exportJson': 'Export JSON backup',
   'storage.exportJsonHint': 'Export all records as a JSON file for migration and inspection',
   'storage.backupOk': 'Backup saved: {path}',
