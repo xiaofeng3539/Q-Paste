@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { ArrowLeft, Monitor, Keyboard, Info, Palette, Database, Minus, Plus, X, RotateCcw, FileClock, HelpCircle, Cloud } from 'lucide-react'
+import { ArrowLeft, Monitor, Keyboard, Info, Palette, Database, Minus, Plus, X, RotateCcw, FileClock, HelpCircle, Cloud, User, Github, Star, AlertCircle, ClipboardList } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { Lang, tr, setLang } from '../i18n'
 import SectionHeader from './SectionHeader'
@@ -350,29 +350,12 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
     }
   }
 
-  // ── 版本号（动态获取，与 package.json 一致）──
-  const [appVersion, setAppVersion] = useState('')
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.electronAPI) return
-    window.electronAPI.getVersion().then(setAppVersion)
-  }, [])
-
-  // ── 自动更新状态 ──
-  const [updateState, setUpdateState] = useState('idle')
-  const [updateVersion, setUpdateVersion] = useState('')
-  const [updatePercent, setUpdatePercent] = useState(0)
-  const [updateMessage, setUpdateMessage] = useState('')
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.electronAPI) return
-    const cleanup = window.electronAPI.onUpdateStatus((status) => {
-      setUpdateState(status.status)
-      if (status.version) setUpdateVersion(status.version)
-      if (typeof status.percent === 'number') setUpdatePercent(status.percent)
-      if (status.message) setUpdateMessage(status.message)
-    })
-    return cleanup
-  }, [])
+  /** 打开外部链接（复用 IPC shell:open-url） */
+  const openUrl = async (url: string) => {
+    if (typeof window !== 'undefined' && window.electronAPI?.openUrl) {
+      await window.electronAPI.openUrl(url)
+    }
+  }
 
   const [shortcutRecording, setShortcutRecording] = useState(false)
   const [toggleShortcut, setToggleShortcut] = useState('Alt+Space')
@@ -1620,78 +1603,66 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
           )}
 
           {activeMenu === 'about' && (
-            <div className="space-y-4">
-              <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-                <SectionHeader className="px-5 pt-5 pb-1 mb-0">{tr('about.diagnostics')}</SectionHeader>
-                <div className="flex items-center justify-between py-4 px-5 border-t border-zinc-200 dark:border-zinc-800">
-                  <div className="flex flex-col">
-                    <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('about.logs')}</span>
-                    <span className="text-[12px] text-zinc-400 dark:text-zinc-500 mt-0.5">{tr('about.logsDesc')}</span>
+            <div className="h-full flex flex-col gap-3">
+              {/* ── 品牌区：图标 + 名称 + 标语（对齐 ElegantClipboard 关于页） ── */}
+              <div className="flex-1 rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-6 flex flex-col justify-center overflow-auto">
+                <div className="flex flex-col items-center text-center space-y-4">
+                  <div className="h-16 w-16 rounded-md overflow-hidden bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center">
+                    <ClipboardList className="w-8 h-8 text-zinc-500 dark:text-zinc-400" />
                   </div>
-                  <button
-                    className="h-7 px-3 rounded-md text-xs bg-zinc-800 dark:bg-zinc-700 hover:bg-zinc-700 dark:hover:bg-zinc-600 text-zinc-200 transition-colors font-medium"
-                    onClick={() => void window.electronAPI.openLogsDir?.()}
-                  >
-                    {tr('about.openLogs')}
-                  </button>
+                  <h3 className="font-semibold text-lg text-zinc-900 dark:text-zinc-100">Q-Paste</h3>
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400 max-w-xs">{tr('about.tagline')}</p>
                 </div>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="w-12 h-12 rounded-xl bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center">
-                  <Monitor className="w-6 h-6 text-zinc-400 dark:text-zinc-500" />
-                </div>
-                <div>
-                  <p className="text-sm font-medium text-zinc-800 dark:text-zinc-300">Q-Paste</p>
-                  <p className="text-xs text-zinc-500 dark:text-zinc-500">{tr('about.version')} {appVersion || '1.2.0'}</p>
-                </div>
-              </div>
-              <p className="text-[13px] text-zinc-500 dark:text-zinc-500 leading-relaxed">{tr('about.description')}</p>
-              <div className="text-[13px] text-zinc-400 dark:text-zinc-600 space-y-1">
-                <p>{tr('about.techStack')}</p>
-                <p>{tr('about.storageEngine')}</p>
               </div>
 
-              {/* ── 检查更新 ── */}
-              <div className="pt-2 border-t border-zinc-200 dark:border-zinc-800/50">
-                <button
-                  onClick={async () => {
-                    if (typeof window === 'undefined' || !window.electronAPI) return
-                    setUpdateState('checking')
-                    const res = await window.electronAPI.checkUpdate()
-                    if (!res.success) {
-                      setUpdateState('error')
-                      setUpdateMessage(res.error || '')
-                    }
-                  }}
-                  disabled={updateState === 'checking' || updateState === 'downloading'}
-                  className="h-8 px-4 rounded-md bg-zinc-800 dark:bg-zinc-700 hover:bg-zinc-700 dark:hover:bg-zinc-600 disabled:opacity-50 text-xs text-zinc-200 transition-colors font-medium"
-                >
-                  {tr('about.checkUpdate')}
-                </button>
-                {updateState !== 'idle' && (
-                  <p className="mt-2 text-[12px] text-zinc-500 dark:text-zinc-400">
-                    {updateState === 'checking' && tr('about.updateChecking')}
-                    {updateState === 'available' && tr('about.updateAvailable', { version: updateVersion || '' })}
-                    {updateState === 'downloading' && tr('about.updateDownloading', { percent: updatePercent })}
-                    {updateState === 'downloaded' && (
-                      <span className="inline-flex items-center gap-2">
-                        {tr('about.updateDownloaded')}
-                        <button
-                          onClick={async () => {
-                            if (typeof window !== 'undefined' && window.electronAPI) {
-                              await window.electronAPI.installUpdate()
-                            }
-                          }}
-                          className="text-[var(--accent)] hover:underline"
-                        >
-                          {tr('about.updateRestart')}
-                        </button>
-                      </span>
-                    )}
-                    {updateState === 'not-available' && tr('about.updateNotAvailable')}
-                    {updateState === 'error' && tr('about.updateError', { error: updateMessage || '' })}
-                  </p>
-                )}
+              {/* ── 作者信息卡片 ── */}
+              <div className="flex-1 rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-4 flex flex-col overflow-auto">
+                <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100 mb-3">{tr('about.authorTitle')}</h3>
+                <div className="space-y-2 flex-1 flex flex-col justify-center">
+                  <div className="flex items-center justify-between py-1.5">
+                    <div className="flex items-center gap-2">
+                      <User className="w-4 h-4 text-zinc-500 dark:text-zinc-400" />
+                      <span className="text-sm text-zinc-500 dark:text-zinc-400">{tr('about.author')}</span>
+                    </div>
+                    <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">潇风风</span>
+                  </div>
+                  <div className="flex items-center justify-between py-1.5">
+                    <div className="flex items-center gap-2">
+                      <Github className="w-4 h-4 text-zinc-500 dark:text-zinc-400" />
+                      <span className="text-sm text-zinc-500 dark:text-zinc-400">GitHub</span>
+                    </div>
+                    <button
+                      onClick={() => openUrl('https://github.com/xiaofeng3539')}
+                      className="text-sm font-medium text-zinc-900 dark:text-zinc-100 hover:underline"
+                    >
+                      @xiaofeng3539
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between py-1.5">
+                    <div className="flex items-center gap-2">
+                      <Star className="w-4 h-4 text-zinc-500 dark:text-zinc-400" />
+                      <span className="text-sm text-zinc-500 dark:text-zinc-400">{tr('about.star')}</span>
+                    </div>
+                    <button
+                      onClick={() => openUrl('https://github.com/xiaofeng3539/Q-Paste')}
+                      className="text-sm font-medium text-zinc-900 dark:text-zinc-100 hover:underline"
+                    >
+                      Q-Paste
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between py-1.5">
+                    <div className="flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 text-zinc-500 dark:text-zinc-400" />
+                      <span className="text-sm text-zinc-500 dark:text-zinc-400">{tr('about.feedback')}</span>
+                    </div>
+                    <button
+                      onClick={() => openUrl('https://github.com/xiaofeng3539/Q-Paste/issues')}
+                      className="text-sm font-medium text-zinc-900 dark:text-zinc-100 hover:underline"
+                    >
+                      {tr('about.submitIssue')}
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           )}

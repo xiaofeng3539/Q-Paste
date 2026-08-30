@@ -106,10 +106,6 @@ const zh: Record<string, string> = {
   'settings.storage': '存储管理',
   'settings.shortcuts': '快捷键',
   'settings.about': '关于',
-  'about.diagnostics': '诊断',
-  'about.logs': '运行日志',
-  'about.logsDesc': '主进程运行日志，用于问题排查',
-  'about.openLogs': '打开日志目录',
 
   // Settings - General
   'general.startup': '启动',
@@ -273,18 +269,14 @@ const zh: Record<string, string> = {
   'shortcuts.hint': '复制 / 删除 / 收藏 / 导航快捷键在应用内生效；「显示 / 隐藏窗口」为系统级全局快捷键，需包含修饰键（Ctrl / Alt / Shift）。',
 
   // Settings - About
-  'about.version': '版本',
-  'about.description': '一款轻量、高效的跨平台剪贴板管理工具。支持文本、链接、图片的自动捕获、分类存储与快速检索。',
-  'about.techStack': '技术栈：Electron + React + TypeScript + Tailwind CSS',
-  'about.storageEngine': '存储引擎：SQLite (WASM)',
-  'about.checkUpdate': '检查更新',
-  'about.updateChecking': '正在检查更新...',
-  'about.updateAvailable': '发现新版本 v{version}，正在下载...',
-  'about.updateDownloading': '正在下载更新... {percent}%',
-  'about.updateDownloaded': '新版本已下载完成',
-  'about.updateRestart': '重启并安装',
-  'about.updateNotAvailable': '当前已是最新版本',
-  'about.updateError': '检查更新失败：{error}',
+  'about.tagline': '轻量・高效・跨平台剪贴板管理工具',
+  'about.authorTitle': '作者信息',
+  'about.author': '作者',
+  'about.star': '给个Star',
+  'about.feedback': '反馈问题',
+  'about.submitIssue': '提交Issue',
+  // 被存储管理「数据库校验」行复用（非关于页）
+  'about.logsDesc': '主进程运行日志，用于问题排查',
 
   // Time
   'time.justNow': '刚刚',
@@ -398,10 +390,6 @@ const en: Record<string, string> = {
   'settings.storage': 'Storage',
   'settings.shortcuts': 'Shortcuts',
   'settings.about': 'About',
-  'about.diagnostics': 'Diagnostics',
-  'about.logs': 'Application logs',
-  'about.logsDesc': 'Main-process runtime logs for troubleshooting',
-  'about.openLogs': 'Open log folder',
 
   'general.startup': 'Startup',
   'general.autoStart': 'Launch at system startup',
@@ -556,18 +544,14 @@ const en: Record<string, string> = {
   'shortcuts.conflict': 'This key combo is already used by "{action}", please choose another',
   'shortcuts.hint': 'Copy / Delete / Pin / Navigate shortcuts work inside the app. "Show / Hide window" is a system-wide global shortcut and requires a modifier (Ctrl / Alt / Shift).',
 
-  'about.version': 'Version',
-  'about.description': 'A lightweight, efficient cross-platform clipboard manager. Supports auto-capture, categorized storage, and quick retrieval of text, links, and images.',
-  'about.techStack': 'Tech stack: Electron + React + TypeScript + Tailwind CSS',
-  'about.storageEngine': 'Storage engine: SQLite (WASM)',
-  'about.checkUpdate': 'Check for Updates',
-  'about.updateChecking': 'Checking for updates...',
-  'about.updateAvailable': 'New version v{version} found, downloading...',
-  'about.updateDownloading': 'Downloading update... {percent}%',
-  'about.updateDownloaded': 'New version downloaded',
-  'about.updateRestart': 'Restart & Install',
-  'about.updateNotAvailable': 'You are up to date',
-  'about.updateError': 'Update check failed: {error}',
+  'about.tagline': 'Lightweight · Efficient · Cross-platform clipboard manager',
+  'about.authorTitle': 'Author Info',
+  'about.author': 'Author',
+  'about.star': 'Give a Star',
+  'about.feedback': 'Feedback',
+  'about.submitIssue': 'Submit Issue',
+  // Reused by the storage "database check" row (not the About page)
+  'about.logsDesc': 'Main-process runtime logs for troubleshooting',
 
   'time.justNow': 'just now',
   'time.minutesAgo': '{n}m ago',
