@@ -7,7 +7,7 @@ import Settings from './components/Settings'
 import { ClipboardItem, ClipboardChangedData } from './types'
 import { mockItems } from './mock'
 import { Lang, loadLang, setLang, tr } from './i18n'
-import { detectSensitive, stripHtml } from './lib/utils'
+import { detectSensitive, stripHtml, cn } from './lib/utils'
 import { loadShortcuts, saveShortcuts, matchShortcut, ShortcutAction } from './lib/shortcuts'
 
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI
@@ -21,6 +21,15 @@ export const ACCENT_MAP: Record<AccentColor, string> = {
   blue: '#3b82f6', purple: '#a855f7', orange: '#f97316',
   green: '#22c55e', rose: '#f43f5e', amber: '#f59e0b',
 }
+
+/** 主界面分栏宽度约束：左侧栏最小 / 右侧详情最小 / 默认宽 */
+const SIDEBAR_MIN_WIDTH = 160
+const DETAIL_MIN_WIDTH = 300
+const SIDEBAR_DEFAULT_WIDTH = 200
+/** 导航列宽度（NavBar w-[52px]） */
+const NAV_WIDTH_PX = 52
+/** 分隔条(6) + 左右两侧内边距（Column2 pr-2 8 + Column3 pl-2/pr-4 24）≈ 38 */
+const RESIZE_GAP_PX = 38
 
 function loadTheme(): Theme {
   try {
@@ -97,6 +106,16 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
     try { return (localStorage.getItem('q-paste-tab') as ActiveTab) || 'history' } catch { return 'history' }
   })
+  /** 主界面左侧栏宽度（可拖拽分隔条调整，持久化 localStorage） */
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    try {
+      const v = Number(localStorage.getItem('q-paste-sidebar-width'))
+      if (v >= SIDEBAR_MIN_WIDTH) return v
+    } catch {}
+    return SIDEBAR_DEFAULT_WIDTH
+  })
+  const [isResizing, setIsResizing] = useState(false)
+  const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
@@ -129,6 +148,50 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem('q-paste-tab', activeTab) } catch {}
   }, [activeTab])
+
+  // 左侧栏宽度持久化
+  useEffect(() => {
+    try { localStorage.setItem('q-paste-sidebar-width', String(sidebarWidth)) } catch {}
+  }, [sidebarWidth])
+
+  // 窗口缩放时校正侧栏宽度上限，防止右侧详情区被挤出
+  useEffect(() => {
+    const onResize = () => {
+      const max = window.innerWidth - NAV_WIDTH_PX - DETAIL_MIN_WIDTH - RESIZE_GAP_PX
+      setSidebarWidth((w) => Math.min(Math.max(SIDEBAR_MIN_WIDTH, w), Math.max(SIDEBAR_MIN_WIDTH, max)))
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  /** 拖拽分隔条开始：记录起始位置与宽度，进入拖拽态 */
+  const handleResizeStart = (e: React.MouseEvent) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    resizeRef.current = { startX: e.clientX, startWidth: sidebarWidth }
+    setIsResizing(true)
+  }
+
+  // 拖拽中：跟随鼠标实时更新宽度（含左右最小宽度限制）
+  useEffect(() => {
+    if (!isResizing) return
+    function onMouseMove(e: MouseEvent) {
+      if (!resizeRef.current) return
+      const next = resizeRef.current.startWidth + (e.clientX - resizeRef.current.startX)
+      const max = window.innerWidth - NAV_WIDTH_PX - DETAIL_MIN_WIDTH - RESIZE_GAP_PX
+      setSidebarWidth(Math.min(Math.max(SIDEBAR_MIN_WIDTH, next), Math.max(SIDEBAR_MIN_WIDTH, max)))
+    }
+    function onMouseUp() {
+      resizeRef.current = null
+      setIsResizing(false)
+    }
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+  }, [isResizing])
 
   useEffect(() => { setLang(language) }, [language])
 
@@ -786,8 +849,8 @@ export default function App() {
       {/* Column 1 — global navigation (~52px) */}
       <NavBar onOpenSettings={() => setShowSettings(true)} />
 
-      {/* Column 2 — history list (~30%) */}
-      <div className="w-[200px] min-w-[160px] max-w-[240px] flex-shrink-0 pr-2 pt-5 pb-4">
+      {/* Column 2 — history list（宽度可拖拽调整） */}
+      <div style={{ width: sidebarWidth, minWidth: SIDEBAR_MIN_WIDTH }} className="flex-shrink-0 pr-2 pt-5 pb-4">
         <Sidebar
           items={sidebarItems}
           selectedId={selectedId}
@@ -803,8 +866,23 @@ export default function App() {
         />
       </div>
 
+      {/* Resize divider — 拖拽调整左右宽度（仅主界面） */}
+      <div
+        onMouseDown={handleResizeStart}
+        className="group relative z-10 flex-shrink-0 w-1.5 cursor-col-resize pt-5 pb-4 flex items-center justify-center select-none"
+      >
+        <div
+          className={cn(
+            'w-0.5 h-full rounded-full transition-colors',
+            isResizing
+              ? 'bg-zinc-500 dark:bg-zinc-200'
+              : 'bg-transparent group-hover:bg-zinc-400 dark:group-hover:bg-zinc-500',
+          )}
+        />
+      </div>
+
       {/* Column 3 — detail view (~70%) as floating card */}
-      <div className="flex-1 min-w-0 relative pl-2 pr-4 pt-5 pb-4">
+      <div style={{ minWidth: DETAIL_MIN_WIDTH }} className="flex-1 min-w-0 relative pl-2 pr-4 pt-5 pb-4">
         <div className="h-full bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-zinc-200/60 dark:border-zinc-800/50 overflow-hidden flex flex-col">
           <DetailView
             item={selectedItem}
