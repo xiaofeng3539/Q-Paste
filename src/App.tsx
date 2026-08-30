@@ -23,8 +23,8 @@ export const ACCENT_MAP: Record<AccentColor, string> = {
 }
 
 /** 主界面分栏宽度约束：左侧栏最小 / 右侧详情最小 / 默认宽 */
-const SIDEBAR_MIN_WIDTH = 160
-const DETAIL_MIN_WIDTH = 300
+const SIDEBAR_MIN_WIDTH = 200
+const DETAIL_MIN_WIDTH = 400
 const SIDEBAR_DEFAULT_WIDTH = 200
 /** 导航列宽度（NavBar w-[52px]） */
 const NAV_WIDTH_PX = 52
@@ -110,7 +110,11 @@ export default function App() {
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     try {
       const v = Number(localStorage.getItem('q-paste-sidebar-width'))
-      if (v >= SIDEBAR_MIN_WIDTH) return v
+      if (v >= SIDEBAR_MIN_WIDTH) {
+        // 启动时同样按窗口宽度收紧上限，防止旧存储值超限撑爆布局
+        const max = window.innerWidth - NAV_WIDTH_PX - DETAIL_MIN_WIDTH - RESIZE_GAP_PX
+        return Math.min(v, Math.max(SIDEBAR_MIN_WIDTH, max))
+      }
     } catch {}
     return SIDEBAR_DEFAULT_WIDTH
   })
