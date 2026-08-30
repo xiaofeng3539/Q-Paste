@@ -787,7 +787,7 @@ export default function App() {
       <NavBar onOpenSettings={() => setShowSettings(true)} />
 
       {/* Column 2 — history list (~30%) */}
-      <div className="w-[280px] min-w-[240px] max-w-[320px] flex-shrink-0 pr-2 pt-5 pb-4">
+      <div className="w-[200px] min-w-[160px] max-w-[240px] flex-shrink-0 pr-2 pt-5 pb-4">
         <Sidebar
           items={sidebarItems}
           selectedId={selectedId}
