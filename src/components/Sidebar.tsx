@@ -1,7 +1,7 @@
-import { useMemo } from 'react'
-import { Virtuoso } from 'react-virtuoso'
+import { useEffect, useMemo, useRef } from 'react'
+import Sortable from 'sortablejs'
 import { ClipboardItem } from '../types'
-import { cn, formatRelativeTime, formatGroupLabel } from '../lib/utils'
+import { cn, formatGroupLabel, formatRelativeTime } from '../lib/utils'
 import { FileText, Link, Image, Search, X, Clock, Star, Pin, FileCode2, FolderOpen } from 'lucide-react'
 import { tr } from '../i18n'
 
@@ -19,6 +19,8 @@ interface SidebarProps {
   allTags: string[]
   selectedTag: string | null
   onTagChange: (tag: string | null) => void
+  onReorder: (ordered: ClipboardItem[]) => void
+  onVaultReorder: (ordered: ClipboardItem[]) => void
 }
 
 function typeIcon(type: string) {
@@ -82,9 +84,11 @@ export default function Sidebar({
   allTags,
   selectedTag,
   onTagChange,
+  onReorder,
+  onVaultReorder,
 }: SidebarProps) {
   const groups = activeTab === 'vault' ? groupedByTag(items) : groupedItems(items)
-  // 虚拟滚动：分组拍平为 [表头, 条目...] 交错序列
+  // 分组拍平为 [表头, 条目...] 交错序列（普通 DOM 渲染，替代虚拟滚动以支持整表拖拽）
   const flatRows = useMemo(
     () =>
       groups.flatMap((group) => [
@@ -95,6 +99,38 @@ export default function Sidebar({
   )
   const itemPy = `py-1.5 transition-all ${density === 'compact' ? 'py-0.5' : 'py-3'}`
   const isVault = activeTab === 'vault'
+  // 拖拽仅在未搜索、未标签过滤时启用（此时 items 即完整列表，可安全重排），历史/金库 tab 均可拖
+  const draggable = !searchQuery.trim() && selectedTag === null
+
+  // ── SortableJS：历史列表整表拖拽排序 ──
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const itemsRef = useRef(items)
+  itemsRef.current = items
+
+  useEffect(() => {
+    if (!draggable || !listRef.current) return
+    const sortable = new Sortable(listRef.current, {
+      draggable: '.js-item',
+      animation: 150,
+      ghostClass: 'qp-drag-ghost',
+      chosenClass: 'qp-drag-chosen',
+      dragClass: 'qp-drag-original',
+      onEnd: () => {
+        const container = listRef.current
+        if (!container) return
+        // 依据 DOM 中条目按钮的实际顺序重组数组（顶部→底部）
+        const nodes = container.querySelectorAll<HTMLElement>('.js-item[data-id]')
+        const byId = new Map(itemsRef.current.map((it) => [it.id, it]))
+        const ordered: ClipboardItem[] = []
+        for (const node of nodes) {
+          const it = byId.get(Number(node.dataset.id))
+          if (it) ordered.push(it)
+        }
+        if (ordered.length > 0) (isVault ? onVaultReorder : onReorder)(ordered)
+      },
+    })
+    return () => sortable.destroy()
+  }, [draggable, onReorder, onVaultReorder, isVault])
 
   return (
     <div className="h-full flex flex-col bg-[#FAFBFC] dark:bg-zinc-900 rounded-2xl border border-zinc-200/60 dark:border-zinc-800/50 shadow-sm overflow-hidden select-none">
@@ -181,7 +217,7 @@ export default function Sidebar({
         </div>
       )}
 
-      {/* Items list — 虚拟滚动（仅渲染可视区行） */}
+      {/* Items list — 普通滚动列表；历史 tab 支持整表拖拽排序 */}
       {(() => {
         if (flatRows.length === 0) {
           const emptyKey = isVault
@@ -231,9 +267,10 @@ export default function Sidebar({
         const renderHistoryItem = (item: ClipboardItem) => (
           <button
             key={item.id}
+            data-id={item.id}
             onClick={() => onSelect(item.id)}
             className={cn(
-              'w-full flex items-center gap-2.5 px-3 text-left transition-all rounded-lg border border-transparent',
+              'js-item w-full flex items-center gap-2.5 px-3 text-left transition-all rounded-lg border border-transparent',
               itemPy,
               item.is_pinned && selectedId !== item.id && 'border-l-2 border-l-amber-400 rounded-l-none',
               selectedId === item.id
@@ -265,16 +302,13 @@ export default function Sidebar({
         )
 
         return (
-          <Virtuoso
-            className="flex-1 min-w-0"
-            style={{ padding: '0 8px', overflowX: 'hidden' }}
-            totalCount={flatRows.length}
-            itemContent={(index) => {
-              const row = flatRows[index]
-              if (row.kind === 'header') return renderHeader(row.label)
-              return isVault ? renderVaultItem(row.item) : renderHistoryItem(row.item)
-            }}
-          />
+          <div
+            ref={listRef}
+            className="flex-1 min-h-0 overflow-y-auto"
+            style={{ padding: '0 8px' }}
+          >
+            {flatRows.map((row) => (row.kind === 'header' ? renderHeader(row.label) : isVault ? renderVaultItem(row.item) : renderHistoryItem(row.item)))}
+          </div>
         )
       })()}
     </div>

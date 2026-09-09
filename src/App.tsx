@@ -73,6 +73,12 @@ function compareByPinTime(a: ClipboardItem, b: ClipboardItem): number {
   const byTime = pinTimeOf(b).localeCompare(pinTimeOf(a))
   return byTime !== 0 ? byTime : b.id - a.id
 }
+function compareByVaultOrder(a: ClipboardItem, b: ClipboardItem): number {
+  const ao = a.vault_sort_order ?? 0
+  const bo = b.vault_sort_order ?? 0
+  if (ao !== bo) return bo - ao
+  return compareByPinTime(a, b)
+}
 
 export default function App() {
   const [items, setItems] = useState<ClipboardItem[]>(isElectron ? [] : mockItems)
@@ -441,7 +447,7 @@ export default function App() {
   const vaultItems = useMemo(() => {
     let list = items
       .filter((it) => it.is_pinned)
-      .sort(compareByPinTime)
+      .sort(compareByVaultOrder)
     // 标签过滤
     if (selectedTag) {
       list = list.filter((it) => it.tags.includes(selectedTag))
@@ -467,8 +473,8 @@ export default function App() {
     if (activeTab === 'vault') {
       if (searchResults) {
         const list = selectedTag ? searchResults.filter((it) => it.tags.includes(selectedTag)) : searchResults
-        // 与金库常规列表一致：按收藏时间倒序
-        return [...list].sort(compareByPinTime)
+        // 与金库常规列表一致：按金库拖拽排序（vault_sort_order 越大越靠前）
+        return [...list].sort(compareByVaultOrder)
       }
       return vaultItems
     }
@@ -479,6 +485,35 @@ export default function App() {
     setSelectedId(id)
     setPendingDeleteId(null)
   }, [])
+
+  /** 历史列表拖拽重排：按拖拽结果重组数组，并立即持久化到本地 DB */
+  const handleReorder = useCallback(async (ordered: ClipboardItem[]) => {
+    setItems(ordered)
+    if (!isElectron) return
+    try {
+      await window.electronAPI.reorderItems(ordered.map((it) => it.id))
+    } catch (err: any) {
+      showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+    }
+  }, [])
+
+  /** 金库列表拖拽重排：重赋收藏条目的 vault_sort_order（越大越靠前），并立即持久化到本地 DB */
+  const handleVaultReorder = useCallback(
+    async (ordered: ClipboardItem[]) => {
+      const n = ordered.length
+      const byId = new Map(ordered.map((it, i) => [it.id, n - i]))
+      setItems((prev) =>
+        prev.map((it) => (it.is_pinned && byId.has(it.id) ? { ...it, vault_sort_order: byId.get(it.id) } : it)),
+      )
+      if (!isElectron) return
+      try {
+        await window.electronAPI.vaultReorderItems(ordered.map((it) => it.id))
+      } catch (err: any) {
+        showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+      }
+    },
+    [],
+  )
 
   const handleCopy = useCallback(
     async (item: ClipboardItem) => {
@@ -867,6 +902,8 @@ export default function App() {
           allTags={allTags}
           selectedTag={selectedTag}
           onTagChange={setSelectedTag}
+          onReorder={handleReorder}
+          onVaultReorder={handleVaultReorder}
         />
       </div>
 

@@ -24,6 +24,8 @@ interface StoredItem {
   alias: string
   tags: string
   is_sensitive: number
+  sort_order?: number | null
+  vault_sort_order?: number | null
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -40,6 +42,8 @@ let configPath = ''
 let clipboardTimer: ReturnType<typeof setInterval> | null = null
 let isQuitting = false
 let dbIntegrityIssue = false // 启动完整性检查发现异常时置位
+let legacyMaxSortOrder = 0 // 迁移回填时历史记录的最大 sort_order，供新条目置顶基准（启动后由实际 MAX 兜底）
+let legacyMaxVaultSortOrder = 0 // 迁移回填时金库记录的最大 vault_sort_order，供新收藏置顶基准
 const BOOT_T0 = Date.now() // 冷启动耗时基线
 
 // ── 自动更新（electron-updater，仅打包后生效；未安装依赖时静默禁用）──
@@ -380,12 +384,45 @@ async function initDatabase(): Promise<void> {
     "ALTER TABLE items ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE items ADD COLUMN is_sensitive INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE items ADD COLUMN pinned_at TEXT",
+    "ALTER TABLE items ADD COLUMN sort_order REAL",
+    "ALTER TABLE items ADD COLUMN vault_sort_order REAL",
   ]
   for (const sql of migrations) {
     try { db!.run(sql) } catch { /* 列已存在，忽略 */ }
   }
   // 存量收藏没有收藏时间：以复制时间兜底，保证金库可按收藏先后稳定排序
   db!.run("UPDATE items SET pinned_at = created_at WHERE is_pinned = 1 AND pinned_at IS NULL")
+  // 自定义拖拽排序：存量数据无 sort_order 时，以复制时间兜底（数值越大越靠前，与默认时间倒序一致）
+  {
+    const stmt = db!.prepare(
+      "SELECT id, created_at FROM items WHERE sort_order IS NULL"
+    )
+    let maxSo = 0
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as { id: number; created_at: string }
+      const so = localDateToMs(row.created_at)
+      if (so > maxSo) maxSo = so
+      db!.run("UPDATE items SET sort_order = :so WHERE id = :id", { ':so': so, ':id': row.id })
+    }
+    stmt.free()
+    // 防止置顶时新条目 sort_order 与旧值碰撞：以当前最大值为基准，首个新条目 +1
+    legacyMaxSortOrder = maxSo
+  }
+  // 金库自定义拖拽排序：存量收藏无 vault_sort_order 时，以收藏时间兜底（与默认收藏倒序一致）
+  {
+    const stmt = db!.prepare(
+      "SELECT id, pinned_at, created_at FROM items WHERE is_pinned = 1 AND vault_sort_order IS NULL"
+    )
+    let maxVso = 0
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as { id: number; pinned_at: string | null; created_at: string }
+      const so = localDateToMs(row.pinned_at || row.created_at)
+      if (so > maxVso) maxVso = so
+      db!.run("UPDATE items SET vault_sort_order = :so WHERE id = :id", { ':so': so, ':id': row.id })
+    }
+    stmt.free()
+    legacyMaxVaultSortOrder = maxVso
+  }
 
   // 回滚迁移：移除优化期新增的 content_hash 冗余列（幂等；未加过该列的库静默跳过）
   try { db!.exec('ALTER TABLE items DROP COLUMN content_hash') } catch { /* 列不存在或已回滚 */ }
@@ -894,7 +931,7 @@ ipcMain.handle('db:get-items', (_event, { limit, offset, search, pinnedOnly }: {
   const q = (search || '').trim()
   // 列表查询：图片 content 置空（大文件落盘后按需读取，避免全量 base64 过 IPC）
   let sql =
-    "SELECT id, type, CASE WHEN type = 'image' THEN '' ELSE content END AS content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive FROM items"
+    "SELECT id, type, CASE WHEN type = 'image' THEN '' ELSE content END AS content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive, sort_order, vault_sort_order FROM items"
   const binds: Record<string, any> = { ':limit': limit, ':offset': offset }
   const conditions: string[] = []
   if (q) {
@@ -912,7 +949,14 @@ ipcMain.handle('db:get-items', (_event, { limit, offset, search, pinnedOnly }: {
     sql += ' WHERE' + conditions.join(' AND')
   }
   // created_at 精度到秒，同秒多条用 id 兜底保证稳定排序
-  sql += ' ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset'
+  // 未搜索、非金库时按历史拖拽排序（sort_order 越大越靠前）；未搜索、金库时按金库拖拽排序（vault_sort_order 越大越靠前）；搜索仍按时间倒序
+  const sortOrder = !q && !pinnedOnly
+  const vaultSortOrder = !q && pinnedOnly
+  sql += sortOrder
+    ? ' ORDER BY sort_order DESC, created_at DESC, id DESC LIMIT :limit OFFSET :offset'
+    : vaultSortOrder
+      ? ' ORDER BY vault_sort_order DESC, created_at DESC, id DESC LIMIT :limit OFFSET :offset'
+      : ' ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset'
   const stmt = db.prepare(sql)
   stmt.bind(binds)
   const items: StoredItem[] = []
@@ -995,6 +1039,32 @@ function insertItemDbWithRetry(item: { type: string; content: string; preview: s
   return null
 }
 
+/** 下一个置顶 sort_order：取当前最大值 +1（越大越靠前），保证新条目排最前 */
+function nextSortOrder(): number {
+  if (!db) return legacyMaxSortOrder + 1
+  const stmt = db.prepare('SELECT MAX(sort_order) AS mx FROM items')
+  let mx: number = legacyMaxSortOrder
+  if (stmt.step()) {
+    const v = Number(stmt.getAsObject().mx)
+    if (Number.isFinite(v)) mx = v
+  }
+  stmt.free()
+  return mx + 1
+}
+
+/** 下一个置顶 vault_sort_order：取当前金库最大值 +1（越大越靠前），新收藏排最前 */
+function nextVaultSortOrder(): number {
+  if (!db) return legacyMaxVaultSortOrder + 1
+  const stmt = db.prepare('SELECT MAX(vault_sort_order) AS mx FROM items WHERE is_pinned = 1')
+  let mx: number = legacyMaxVaultSortOrder
+  if (stmt.step()) {
+    const v = Number(stmt.getAsObject().mx)
+    if (Number.isFinite(v)) mx = v
+  }
+  stmt.free()
+  return mx + 1
+}
+
 /** 入库一条记录（去重置顶 + 裁剪），db:insert-item 与手机推送共用；失败重试请用 insertItemDbWithRetry */
 function insertItemDb(item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }): { id: number | null; updated: boolean } | null {
   if (!db) return null
@@ -1022,7 +1092,8 @@ function insertItemDb(item: { type: string; content: string; preview: string; ch
       if (upgradeId !== null) {
         db.run(
           `UPDATE items SET type = 'html', content = :content, preview = :preview,
-           char_count = :charCount, storage_size = :storageSize, created_at = :createdAt
+           char_count = :charCount, storage_size = :storageSize, created_at = :createdAt,
+           sort_order = :sortOrder
            WHERE id = :id`,
           {
             ':content': item.content,
@@ -1030,6 +1101,7 @@ function insertItemDb(item: { type: string; content: string; preview: string; ch
             ':charCount': item.charCount,
             ':storageSize': item.storageSize,
             ':createdAt': item.createdAt,
+            ':sortOrder': nextSortOrder(),
             ':id': upgradeId,
           }
         )
@@ -1048,13 +1120,14 @@ function insertItemDb(item: { type: string; content: string; preview: string; ch
 
     if (dupId !== null) {
       db.run(
-        `UPDATE items SET preview = :preview, char_count = :charCount, storage_size = :storageSize, created_at = :createdAt WHERE id = :id`,
+        `UPDATE items SET preview = :preview, char_count = :charCount, storage_size = :storageSize, created_at = :createdAt, sort_order = :sortOrder WHERE id = :id`,
         {
           ':id': dupId,
           ':preview': item.preview,
           ':charCount': item.charCount,
           ':storageSize': item.storageSize,
           ':createdAt': item.createdAt,
+          ':sortOrder': nextSortOrder(),
         }
       )
       saveDb()
@@ -1063,8 +1136,8 @@ function insertItemDb(item: { type: string; content: string; preview: string; ch
   }
 
   db.run(
-    `INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_sensitive)
-     VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt, :isSensitive)`,
+    `INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_sensitive, sort_order)
+     VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt, :isSensitive, :sortOrder)`,
     {
       ':type': item.type,
       ':content': storedContent,
@@ -1073,6 +1146,7 @@ function insertItemDb(item: { type: string; content: string; preview: string; ch
       ':storageSize': item.storageSize,
       ':createdAt': item.createdAt,
       ':isSensitive': item.isSensitive ? 1 : 0,
+      ':sortOrder': nextSortOrder(),
     }
   )
   const res = db.exec('SELECT last_insert_rowid()')
@@ -1120,6 +1194,9 @@ ipcMain.handle('db:update-item-meta', (_event, params: { id: number; isPinned?: 
     // 收藏时记录收藏时间（金库按此排序）；取消收藏清空
     sets.push('pinned_at = :pinnedAt')
     binds[':pinnedAt'] = params.isPinned ? nowLocal() : null
+    // 收藏时置顶金库排序（vault_sort_order 取当前最大值+1）；取消收藏清空
+    sets.push('vault_sort_order = :vaultSortOrder')
+    binds[':vaultSortOrder'] = params.isPinned ? nextVaultSortOrder() : null
   }
   if (typeof params.alias === 'string') {
     sets.push('alias = :alias')
@@ -1136,6 +1213,56 @@ ipcMain.handle('db:update-item-meta', (_event, params: { id: number; isPinned?: 
 
   if (sets.length === 0) return false
   db.run(`UPDATE items SET ${sets.join(', ')} WHERE id = :id`, binds)
+  saveDb()
+  return true
+})
+
+/**
+ * 拖拽重排：把当前视图内条目的顺序持久化。
+ * order 为从顶部到底部的 id 数组（视图内完整顺序），
+ * 为该列表中的每条记录重赋 sort_order（值越大越靠前），其余未出现记录保持不变。
+ */
+ipcMain.handle('db:reorder-items', (_event, order: number[]) => {
+  if (!db || !Array.isArray(order) || order.length === 0) return false
+  const ids = order.map((id) => Number(id)).filter((id) => Number.isFinite(id))
+  if (ids.length === 0) return false
+  const n = ids.length
+  db.run('BEGIN')
+  try {
+    // 数组顺序即顶部→底部，index=0 最大（最靠前），其余按 n - index 递减
+    for (let i = 0; i < ids.length; i++) {
+      db.run('UPDATE items SET sort_order = :so WHERE id = :id', { ':so': n - i, ':id': ids[i] })
+    }
+    db.run('COMMIT')
+  } catch (err) {
+    db.run('ROLLBACK')
+    throw err
+  }
+  saveDb()
+  return true
+})
+
+/**
+ * 金库拖拽重排：把金库（收藏）内条目的顺序持久化。
+ * order 为从顶部到底部的收藏 id 数组，为其重赋 vault_sort_order（值越大越靠前），
+ * 与历史列表的 sort_order 相互独立、互不干扰。
+ */
+ipcMain.handle('db:vault-reorder-items', (_event, order: number[]) => {
+  if (!db || !Array.isArray(order) || order.length === 0) return false
+  const ids = order.map((id) => Number(id)).filter((id) => Number.isFinite(id))
+  if (ids.length === 0) return false
+  const n = ids.length
+  db.run('BEGIN')
+  try {
+    // 数组顺序即顶部→底部，index=0 最大（最靠前），其余按 n - index 递减
+    for (let i = 0; i < ids.length; i++) {
+      db.run('UPDATE items SET vault_sort_order = :so WHERE id = :id', { ':so': n - i, ':id': ids[i] })
+    }
+    db.run('COMMIT')
+  } catch (err) {
+    db.run('ROLLBACK')
+    throw err
+  }
   saveDb()
   return true
 })
@@ -1455,8 +1582,8 @@ ipcMain.handle('data:import-json', async () => {
           ? (typeof row.pinned_at === 'string' && row.pinned_at ? row.pinned_at : createdAt)
           : null
         db.run(
-          `INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive)
-           VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt, :isPinned, :pinnedAt, :alias, :tags, :isSensitive)`,
+          `INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive, sort_order)
+           VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt, :isPinned, :pinnedAt, :alias, :tags, :isSensitive, :sortOrder)`,
           {
             ':type': type,
             ':content': content,
@@ -1469,6 +1596,7 @@ ipcMain.handle('data:import-json', async () => {
             ':alias': typeof row.alias === 'string' ? row.alias : '',
             ':tags': JSON.stringify(tags),
             ':isSensitive': row.is_sensitive ? 1 : 0,
+            ':sortOrder': typeof row.sort_order === 'number' ? row.sort_order : localDateToMs(createdAt),
           }
         )
         imported++

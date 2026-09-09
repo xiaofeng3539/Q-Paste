@@ -57,6 +57,10 @@ export interface ClipboardItem {
   tags: string[]
   /** 是否为敏感数据 */
   is_sensitive: boolean
+  /** 历史列表自定义拖拽排序权重（值越大越靠前） */
+  sort_order?: number
+  /** 金库列表自定义拖拽排序权重（值越大越靠前） */
+  vault_sort_order?: number
 }
 
 export interface UpdateMetaParams {
@@ -75,6 +79,8 @@ export interface ElectronAPI {
   forceClearData: (type: 'images' | 'all') => Promise<{ success: boolean; error?: string }>
   updateItem: (params: { id: number; content: string; preview: string; charCount: number; storageSize: number }) => Promise<boolean>
   updateItemMeta: (params: UpdateMetaParams) => Promise<boolean>
+  reorderItems: (order: number[]) => Promise<boolean>
+  vaultReorderItems: (order: number[]) => Promise<boolean>
   getItemCount: () => Promise<number>
   getStorageUsage: () => Promise<{ textBytes: number; imageBytes: number; totalBytes: number }>
   writeText: (text: string) => Promise<boolean>

@@ -52,6 +52,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('db:update-item', params),
   updateItemMeta: (params: { id: number; isPinned?: boolean; alias?: string; tags?: string; isSensitive?: boolean }) =>
     ipcRenderer.invoke('db:update-item-meta', params) as Promise<boolean>,
+  reorderItems: (order: number[]) =>
+    ipcRenderer.invoke('db:reorder-items', order) as Promise<boolean>,
+  vaultReorderItems: (order: number[]) =>
+    ipcRenderer.invoke('db:vault-reorder-items', order) as Promise<boolean>,
   getItemCount: () =>
     ipcRenderer.invoke('db:get-item-count'),
   getStorageUsage: () =>
