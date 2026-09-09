@@ -239,9 +239,10 @@ export default function Sidebar({
         const renderVaultItem = (item: ClipboardItem) => (
           <button
             key={item.id}
+            data-id={item.id}
             onClick={() => onSelect(item.id)}
             className={cn(
-              'w-full flex items-center gap-2.5 px-3 text-left transition-all rounded-lg',
+              'js-item w-full flex items-center gap-2.5 px-3 text-left transition-all rounded-lg',
               itemPy,
               selectedId === item.id
                 ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 text-zinc-900 dark:text-zinc-100'
