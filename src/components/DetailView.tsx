@@ -2,9 +2,70 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { ClipboardItem } from '../types'
 import { formatStorageSize, getTypeLabel, maskSensitive, parseFilePaths, basename } from '../lib/utils'
 import { ShortcutAction } from '../lib/shortcuts'
-import { FileText, Link, Image, Copy, Trash2, Monitor, X, ZoomIn, RotateCcw, Pin, Eye, EyeOff, Shield, Plus, ExternalLink, FolderOpen, FileCode2, QrCode, ScanText, FileDown, Loader2 } from 'lucide-react'
+import { FileText, Link, Image, Copy, Trash2, Monitor, X, ZoomIn, RotateCcw, Pin, Eye, EyeOff, Shield, Plus, ExternalLink, FolderOpen, FileCode2, QrCode, ScanText, FileDown, Loader2, Wand2, Check } from 'lucide-react'
 import { QRCodeCanvas } from 'qrcode.react'
 import { tr } from '../i18n'
+
+export type TextToolId = 'upper' | 'lower' | 'title' | 'json' | 'base64encode' | 'base64decode' | 'urlencode' | 'urldecode' | 'collapse' | 'reverse' | 'extractUrls'
+
+export const TEXT_TOOLS: { id: TextToolId; label: string }[] = [
+  { id: 'upper', label: 'detail.toolUpper' },
+  { id: 'lower', label: 'detail.toolLower' },
+  { id: 'title', label: 'detail.toolTitle' },
+  { id: 'json', label: 'detail.toolJson' },
+  { id: 'base64encode', label: 'detail.toolBase64Encode' },
+  { id: 'base64decode', label: 'detail.toolBase64Decode' },
+  { id: 'urlencode', label: 'detail.toolUrlEncode' },
+  { id: 'urldecode', label: 'detail.toolUrlDecode' },
+  { id: 'collapse', label: 'detail.toolCollapse' },
+  { id: 'reverse', label: 'detail.toolReverse' },
+  { id: 'extractUrls', label: 'detail.toolExtractUrls' },
+]
+
+/** 应用文本工具（均为本地处理，不联网） */
+export function applyTextTool(id: TextToolId, input: string): string {
+  if (!input) return input
+  try {
+    switch (id) {
+      case 'upper': return input.toUpperCase()
+      case 'lower': return input.toLowerCase()
+      case 'title':
+        return input.replace(/\S+/g, (w) => w[0].toUpperCase() + w.slice(1).toLowerCase())
+      case 'json': {
+        try {
+          return JSON.stringify(JSON.parse(input), null, 2)
+        } catch {
+          return tr('detail.toolJsonError')
+        }
+      }
+      case 'base64encode': return btoa(unescape(encodeURIComponent(input)))
+      case 'base64decode': {
+        try {
+          return decodeURIComponent(escape(atob(input.trim())))
+        } catch {
+          return tr('detail.toolBase64Error')
+        }
+      }
+      case 'urlencode': return encodeURIComponent(input)
+      case 'urldecode': {
+        try {
+          return decodeURIComponent(input)
+        } catch {
+          return tr('detail.toolUrlDecodeError')
+        }
+      }
+      case 'collapse': return input.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+      case 'reverse': return [...input].reverse().join('')
+      case 'extractUrls': {
+        const urls = input.match(/https?:\/\/[^\s"'<>]+/g) || []
+        return [...new Set(urls)].join('\n')
+      }
+      default: return input
+    }
+  } catch {
+    return input
+  }
+}
 
 interface DetailViewProps {
   item: ClipboardItem | null
@@ -45,6 +106,8 @@ function typeIcon(type: string, size = 'w-4 h-4') {
 const MIN_SCALE = 0.1
 const MAX_SCALE = 10
 const ZOOM_STEP = 0.1
+
+export const isElectron = typeof window !== 'undefined' && !!window.electronAPI
 
 export default function DetailView({
   item,
@@ -93,6 +156,9 @@ export default function DetailView({
   const [qrOpen, setQrOpen] = useState(false)
   const [ocrBusy, setOcrBusy] = useState(false)
   const [ocrStage, setOcrStage] = useState('')
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const [toolResult, setToolResult] = useState('')
+  const [toolCopied, setToolCopied] = useState(false)
 
   // 选中图片记录时加载完整图片内容
   useEffect(() => {
@@ -112,6 +178,9 @@ export default function DetailView({
     setIsEditingAlias(false)
     setShowTagInput(false)
     setShowSensitive(false)
+    setToolsOpen(false)
+    setToolResult('')
+    setToolCopied(false)
   }, [item?.id])
 
   // Auto-focus textarea when entering edit mode
@@ -377,6 +446,31 @@ export default function DetailView({
     else onToast?.(res.error || 'error')
   }
 
+  /** 运行文本工具并展示结果 */
+  const runTool = (toolId: TextToolId) => {
+    if (!plainText) return
+    setToolResult(applyTextTool(toolId, plainText))
+    setToolsOpen(true)
+    setToolCopied(false)
+  }
+
+  /** 复制工具结果到系统剪贴板 */
+  const copyToolResult = async () => {
+    if (!toolResult) return
+    try {
+      if (isElectron) {
+        await window.electronAPI.writeText(toolResult)
+      } else if (navigator.clipboard) {
+        await navigator.clipboard.writeText(toolResult)
+      }
+      setToolCopied(true)
+      onToast?.(tr('toast.copied'))
+      setTimeout(() => setToolCopied(false), 1200)
+    } catch {
+      onToast?.(tr('detail.toolCopyError'))
+    }
+  }
+
 
   return (
     <div className="h-full flex flex-col bg-transparent">
@@ -614,6 +708,53 @@ export default function DetailView({
         )}
       </div>
 
+      {/* ── 文本工具面板 ── */}
+      {toolsOpen && (
+        <div className="flex-shrink-0 h-[240px] border-t border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950/40 flex flex-col">
+          <div className="flex-shrink-0 flex items-center gap-1.5 px-3 h-9 overflow-x-auto border-b border-zinc-200 dark:border-zinc-800">
+            {TEXT_TOOLS.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => runTool(t.id)}
+                className="flex-shrink-0 px-2 py-1 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-[11px] text-zinc-600 dark:text-zinc-300 transition-colors"
+              >
+                {tr(t.label)}
+              </button>
+            ))}
+            <div className="flex-1" />
+            <button
+              onClick={() => setToolsOpen(false)}
+              className="flex-shrink-0 p-1 rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
+              title={tr('detail.close')}
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <div className="flex-1 min-h-0 px-3 py-2 overflow-auto">
+            {toolResult ? (
+              <pre className={`text-xs text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-words leading-6 ${monoClass}`}>
+                {toolResult}
+              </pre>
+            ) : (
+              <div className="h-full flex items-center justify-center text-[11px] text-zinc-400 dark:text-zinc-500">
+                {tr('detail.toolsHint')}
+              </div>
+            )}
+          </div>
+          {toolResult && (
+            <div className="flex-shrink-0 flex items-center justify-end gap-2 px-3 pb-2">
+              <button
+                onClick={() => void copyToolResult()}
+                className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-[var(--accent)] text-white text-xs transition-colors hover:opacity-90"
+              >
+                {toolCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                {toolCopied ? tr('detail.toolCopied') : tr('detail.toolCopy')}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Bottom action bar */}
       <div className="flex-shrink-0 h-12 flex items-center justify-end gap-2 px-4">
         {item.type === 'url' && (
@@ -656,6 +797,17 @@ export default function DetailView({
             title={tr('detail.saveAsFile')}
           >
             <FileDown className="w-3.5 h-3.5" />
+          </button>
+        )}
+
+        {!isImage && plainText.length > 0 && (
+          <button
+            onClick={() => setToolsOpen((v) => !v)}
+            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
+            title={tr('detail.tools')}
+          >
+            <Wand2 className="w-3.5 h-3.5" />
+            {toolsOpen && <span>{tr('detail.tools')}</span>}
           </button>
         )}
 

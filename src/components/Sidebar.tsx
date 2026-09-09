@@ -1,11 +1,21 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Sortable from 'sortablejs'
-import { ClipboardItem } from '../types'
+import { ClipboardItem, ItemType } from '../types'
 import { cn, formatGroupLabel, formatRelativeTime } from '../lib/utils'
-import { FileText, Link, Image, Search, X, Clock, Star, Pin, FileCode2, FolderOpen } from 'lucide-react'
+import { highlightSegments } from '../lib/search'
+import { FileText, Link, Image, Search, X, Clock, Star, Pin, FileCode2, FolderOpen, CheckSquare } from 'lucide-react'
 import { tr } from '../i18n'
 
 type ActiveTab = 'history' | 'vault'
+
+export const TYPE_FILTERS: { value: ItemType | 'all'; label: string }[] = [
+  { value: 'all', label: 'detail.typeAll' },
+  { value: 'text', label: 'detail.typeText' },
+  { value: 'url', label: 'detail.typeUrl' },
+  { value: 'image', label: 'detail.typeImage' },
+  { value: 'html', label: 'detail.typeHtml' },
+  { value: 'files', label: 'detail.typeFiles' },
+]
 
 interface SidebarProps {
   items: ClipboardItem[]
@@ -21,6 +31,16 @@ interface SidebarProps {
   onTagChange: (tag: string | null) => void
   onReorder: (ordered: ClipboardItem[]) => void
   onVaultReorder: (ordered: ClipboardItem[]) => void
+  typeFilter: ItemType | 'all'
+  onTypeFilterChange: (t: ItemType | 'all') => void
+  selectedIds?: ReadonlySet<number>
+  onToggleSelect?: (id: number) => void
+  onSelectAll?: () => void
+  onClearSelection?: () => void
+  onBatchCopy?: () => void
+  onBatchPin?: () => void
+  onBatchDelete?: () => void
+  onBatchAddTag?: (tag: string) => void
 }
 
 function typeIcon(type: string) {
@@ -86,6 +106,16 @@ export default function Sidebar({
   onTagChange,
   onReorder,
   onVaultReorder,
+  typeFilter,
+  onTypeFilterChange,
+  selectedIds,
+  onToggleSelect,
+  onSelectAll,
+  onClearSelection,
+  onBatchCopy,
+  onBatchPin,
+  onBatchDelete,
+  onBatchAddTag,
 }: SidebarProps) {
   const groups = activeTab === 'vault' ? groupedByTag(items) : groupedItems(items)
   // 分组拍平为 [表头, 条目...] 交错序列（普通 DOM 渲染，替代虚拟滚动以支持整表拖拽）
@@ -99,6 +129,7 @@ export default function Sidebar({
   )
   const itemPy = `py-1.5 transition-all ${density === 'compact' ? 'py-0.5' : 'py-3'}`
   const isVault = activeTab === 'vault'
+  const [batchTagDraft, setBatchTagDraft] = useState('')
   // 拖拽仅在未搜索、未标签过滤时启用（此时 items 即完整列表，可安全重排），历史/金库 tab 均可拖
   const draggable = !searchQuery.trim() && selectedTag === null
 
@@ -111,6 +142,7 @@ export default function Sidebar({
     if (!draggable || !listRef.current) return
     const sortable = new Sortable(listRef.current, {
       draggable: '.js-item',
+      filter: '.no-drag',
       animation: 150,
       ghostClass: 'qp-drag-ghost',
       chosenClass: 'qp-drag-chosen',
@@ -186,6 +218,24 @@ export default function Sidebar({
         </div>
       </div>
 
+      {/* Type filter chips */}
+      <div className="flex-shrink-0 px-3 pb-2 flex items-center gap-1 overflow-x-auto">
+        {TYPE_FILTERS.map((f) => (
+          <button
+            key={f.value}
+            onClick={() => onTypeFilterChange(typeFilter === f.value ? 'all' : f.value)}
+            className={cn(
+              'flex-shrink-0 px-2 py-0.5 rounded-full text-[11px] border transition-colors',
+              typeFilter === f.value
+                ? 'bg-[var(--accent)]/15 text-[var(--accent)] border-[var(--accent)]/40'
+                : 'bg-zinc-100 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500 border-transparent hover:text-zinc-600 dark:hover:text-zinc-300'
+            )}
+          >
+            {tr(f.label)}
+          </button>
+        ))}
+      </div>
+
       {/* Tag filter chips */}
       {allTags.length > 0 && (
         <div className="flex-shrink-0 px-3 pb-2 flex items-center gap-1 overflow-x-auto">
@@ -217,6 +267,65 @@ export default function Sidebar({
         </div>
       )}
 
+      {/* 批量操作工具栏（有多选时显示） */}
+      {selectedIds && selectedIds.size > 0 && (
+        <div className="flex-shrink-0 px-3 pb-2 flex flex-wrap items-center gap-1.5">
+          <span className="flex-shrink-0 text-[11px] text-zinc-500 dark:text-zinc-400">
+            {tr('sidebar.selectedCount', { n: selectedIds.size })}
+          </span>
+          <button
+            onClick={onSelectAll}
+            className="flex-shrink-0 px-2 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-[11px] text-zinc-600 dark:text-zinc-300 transition-colors"
+          >
+            {tr('sidebar.selectAll')}
+          </button>
+          <button
+            onClick={onBatchCopy}
+            className="flex-shrink-0 px-2 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-[11px] text-zinc-600 dark:text-zinc-300 transition-colors"
+          >
+            {tr('sidebar.batchCopy')}
+          </button>
+          <button
+            onClick={onBatchPin}
+            className="flex-shrink-0 px-2 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-[11px] text-zinc-600 dark:text-zinc-300 transition-colors"
+          >
+            {tr('sidebar.batchPin')}
+          </button>
+          <button
+            onClick={onBatchDelete}
+            className="flex-shrink-0 px-2 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-red-100 dark:hover:bg-red-900/50 hover:text-red-600 dark:hover:text-red-400 text-[11px] text-zinc-600 dark:text-zinc-300 transition-colors"
+          >
+            {tr('sidebar.batchDelete')}
+          </button>
+          <div className="flex items-center gap-1">
+            <input
+              type="text"
+              value={batchTagDraft}
+              onChange={(e) => setBatchTagDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  const t = batchTagDraft.trim()
+                  if (t) {
+                    onBatchAddTag?.(t)
+                    setBatchTagDraft('')
+                  }
+                }
+              }}
+              placeholder={tr('sidebar.batchAddTag')}
+              className="w-16 h-6 px-1.5 text-[11px] bg-zinc-100 dark:bg-zinc-900 border border-transparent rounded-md text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 outline-none focus:border-zinc-300 dark:focus:border-zinc-700 transition-colors"
+            />
+          </div>
+          <button
+            onClick={onClearSelection}
+            className="flex-shrink-0 px-1.5 py-0.5 rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
+            title={tr('sidebar.clearSelection')}
+          >
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+      )}
+
       {/* Items list — 普通滚动列表；历史 tab 支持整表拖拽排序 */}
       {(() => {
         if (flatRows.length === 0) {
@@ -236,70 +345,122 @@ export default function Sidebar({
           </div>
         )
 
+        const renderHighlighted = (text: string) => {
+          if (!searchQuery.trim()) return text
+          return highlightSegments(text, searchQuery).map((seg, i) =>
+            seg.hit ? (
+              <mark key={i} className="bg-amber-200/70 dark:bg-amber-400/40 text-inherit rounded-[2px] px-px">
+                {seg.text}
+              </mark>
+            ) : (
+              <span key={i}>{seg.text}</span>
+            ),
+          )
+        }
+
+        const renderCheckbox = (item: ClipboardItem) => {
+          if (!onToggleSelect) return null
+          const checked = selectedIds?.has(item.id) ?? false
+          return (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                onToggleSelect(item.id)
+              }}
+              className={cn(
+                'no-drag flex-shrink-0 flex items-center justify-center w-4 h-4 rounded border transition-colors',
+                checked
+                  ? 'bg-[var(--accent)] border-[var(--accent)] text-white'
+                  : 'border-zinc-300 dark:border-zinc-600 text-transparent hover:border-zinc-400 dark:hover:border-zinc-500',
+              )}
+              title={tr('sidebar.toggleSelect')}
+            >
+              <CheckSquare className="w-3 h-3" />
+            </button>
+          )
+        }
+
         const renderVaultItem = (item: ClipboardItem) => (
-          <button
+          <div
             key={item.id}
             data-id={item.id}
-            onClick={() => onSelect(item.id)}
             className={cn(
-              'js-item w-full flex items-center gap-2.5 px-3 text-left transition-all rounded-lg',
+              'js-item w-full flex items-center gap-2 px-3 rounded-lg transition-all',
               itemPy,
-              selectedId === item.id
-                ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 text-zinc-900 dark:text-zinc-100'
-                : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50 border border-transparent',
+              selectedIds?.has(item.id)
+                ? 'bg-amber-100 dark:bg-amber-900/40 ring-1 ring-amber-300 dark:ring-amber-700/40'
+                : '',
             )}
           >
-            <span className="flex-shrink-0 mt-0.5 text-amber-500">
-              <Pin className="w-3.5 h-3.5" />
-            </span>
-            <span className="flex-1 min-w-0 text-left">
-              <span className="block truncate text-[13px] leading-tight">
-                {item.alias || item.preview || (item.type === 'image' ? tr('detail.image') : tr('detail.emptyContent'))}
-              </span>
-              {item.alias && (
-                <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">
-                  {item.preview}
-                </span>
+            {renderCheckbox(item)}
+            <button
+              onClick={() => onSelect(item.id)}
+              className={cn(
+                'flex-1 min-w-0 flex items-center gap-2.5 text-left transition-all rounded-lg',
+                selectedId === item.id
+                  ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 text-zinc-900 dark:text-zinc-100'
+                  : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50 border border-transparent',
               )}
-            </span>
-          </button>
+            >
+              <span className="flex-shrink-0 mt-0.5 text-amber-500">
+                <Pin className="w-3.5 h-3.5" />
+              </span>
+              <span className="flex-1 min-w-0 text-left">
+                <span className="block truncate text-[13px] leading-tight">
+                  {renderHighlighted(item.alias || item.preview || (item.type === 'image' ? tr('detail.image') : tr('detail.emptyContent')))}
+                </span>
+                {item.alias && item.preview && (
+                  <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">
+                    {renderHighlighted(item.preview)}
+                  </span>
+                )}
+              </span>
+            </button>
+          </div>
         )
 
         const renderHistoryItem = (item: ClipboardItem) => (
-          <button
+          <div
             key={item.id}
             data-id={item.id}
-            onClick={() => onSelect(item.id)}
             className={cn(
-              'js-item w-full flex items-center gap-2.5 px-3 text-left transition-all rounded-lg border border-transparent',
+              'js-item w-full flex items-center gap-2 rounded-lg transition-all border border-transparent',
               itemPy,
               item.is_pinned && selectedId !== item.id && 'border-l-2 border-l-amber-400 rounded-l-none',
-              selectedId === item.id
-                ? 'bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 border-l-2 border-l-[var(--accent)] dark:border-l-transparent'
-                : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50',
+              selectedIds?.has(item.id)
+                ? 'bg-[color-mix(in_srgb,var(--accent)_15%,transparent)] dark:bg-zinc-800/80'
+                : selectedId === item.id
+                  ? 'bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100'
+                  : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50',
             )}
           >
-            <span className="flex-shrink-0 mt-0.5">
-              {item.is_pinned ? (
-                <Pin className="w-4 h-4 text-amber-500" />
-              ) : (
-                typeIcon(item.type)
-              )}
-            </span>
-            <span className="flex-1 min-w-0 text-left">
-              <span className="block truncate text-[13px] leading-tight">
-                {item.alias || item.preview || (item.type === 'image' ? tr('detail.image') : tr('detail.emptyContent'))}
+            {renderCheckbox(item)}
+            <button
+              onClick={() => onSelect(item.id)}
+              className="flex-1 min-w-0 flex items-center gap-2.5 text-left"
+            >
+              <span className="flex-shrink-0 mt-0.5">
+                {item.is_pinned ? (
+                  <Pin className="w-4 h-4 text-amber-500" />
+                ) : (
+                  typeIcon(item.type)
+                )}
               </span>
-              {item.alias && item.preview && (
-                <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">
-                  {item.preview}
+              <span className="flex-1 min-w-0 text-left">
+                <span className="block truncate text-[13px] leading-tight">
+                  {renderHighlighted(item.alias || item.preview || (item.type === 'image' ? tr('detail.image') : tr('detail.emptyContent')))}
                 </span>
-              )}
-            </span>
-            <span className="flex-shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600">
-              {formatRelativeTime(item.created_at)}
-            </span>
-          </button>
+                {item.alias && item.preview && (
+                  <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">
+                    {renderHighlighted(item.preview)}
+                  </span>
+                )}
+              </span>
+              <span className="flex-shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600">
+                {formatRelativeTime(item.created_at)}
+              </span>
+            </button>
+          </div>
         )
 
         return (

@@ -16,6 +16,7 @@
     "electron-log": "^5.4.4",
     "electron-updater": "6.3.9",
     "lucide-react": "^0.468.0",
+    "pinyin-pro": "^3.29.3",
     "qrcode.react": "^4.2.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

@@ -76,6 +76,7 @@ export interface ElectronAPI {
   getItemContent: (id: number) => Promise<string>
   insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) => Promise<{ id: number; updated: boolean }>
   deleteItem: (id: number) => Promise<boolean>
+  deleteItems: (ids: number[]) => Promise<boolean>
   forceClearData: (type: 'images' | 'all') => Promise<{ success: boolean; error?: string }>
   updateItem: (params: { id: number; content: string; preview: string; charCount: number; storageSize: number }) => Promise<boolean>
   updateItemMeta: (params: UpdateMetaParams) => Promise<boolean>

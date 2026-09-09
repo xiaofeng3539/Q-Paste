@@ -1173,6 +1173,25 @@ ipcMain.handle('db:delete-item', (_event, id: number) => {
   return true
 })
 
+ipcMain.handle('db:delete-items', (_event, ids: number[]) => {
+  if (!db || !Array.isArray(ids) || ids.length === 0) return false
+  const clean = ids.map((n) => Number(n)).filter((n) => Number.isFinite(n))
+  if (!clean.length) return false
+  db.run('BEGIN')
+  try {
+    for (const id of clean) {
+      db.run('DELETE FROM items WHERE id = :id', { ':id': id })
+    }
+    db.run('COMMIT')
+  } catch (err) {
+    db.run('ROLLBACK')
+    throw err
+  }
+  saveDb()
+  cleanupOrphanImages()
+  return true
+})
+
 ipcMain.handle('db:update-item', (_event, { id, content, preview, charCount, storageSize }: { id: number; content: string; preview: string; charCount: number; storageSize: number }) => {
   if (!db) return false
   db.run(

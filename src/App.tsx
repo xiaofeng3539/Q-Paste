@@ -4,10 +4,12 @@ import TitleBar from './components/TitleBar'
 import Sidebar from './components/Sidebar'
 import DetailView from './components/DetailView'
 import Settings from './components/Settings'
-import { ClipboardItem, ClipboardChangedData } from './types'
+import { ClipboardItem, ClipboardChangedData, ItemType } from './types'
 import { mockItems } from './mock'
 import { Lang, loadLang, setLang, tr } from './i18n'
 import { detectSensitive, stripHtml, cn } from './lib/utils'
+import { searchIncludes } from './lib/search'
+import { useDialog } from './components/DialogProvider'
 import { loadShortcuts, saveShortcuts, matchShortcut, ShortcutAction } from './lib/shortcuts'
 
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI
@@ -106,6 +108,10 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<ClipboardItem[] | null>(null)
   /** 标签过滤：非空时只显示带该标签的记录 */
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
+  /** 类型过滤：非 all 时只显示该类型的记录 */
+  const [typeFilter, setTypeFilter] = useState<ItemType | 'all'>('all')
+  /** 批量多选：选中的记录 id 集合（空集合表示未进入多选态） */
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<number>>(new Set())
   /** 收藏项删除确认态：记录等待二次确认删除的 id（按两次 D / 点两次删除按钮） */
   const [pendingDeleteId, setPendingDeleteId] = useState<number | null>(null)
   const pendingDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -127,6 +133,7 @@ export default function App() {
   const [isResizing, setIsResizing] = useState(false)
   const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const { confirm } = useDialog()
 
   useEffect(() => {
     document.documentElement.style.setProperty('--accent', ACCENT_MAP[accentColor])
@@ -258,11 +265,21 @@ export default function App() {
       return
     }
     const timer = setTimeout(async () => {
-      const loaded = await window.electronAPI.getItems({ limit: 300, offset: 0, search: q, pinnedOnly: activeTab === 'vault' })
-      setSearchResults(normalizeItems(loaded))
+      let loaded: ClipboardItem[] = []
+      if (isElectron) {
+        const dbRes = await window.electronAPI.getItems({ limit: 300, offset: 0, search: q, pinnedOnly: activeTab === 'vault' })
+        loaded = normalizeItems(dbRes)
+      }
+      // 拼音搜索：对本地已加载条目（最近 500 条）额外做拼音/子串匹配，与 DB 结果去重合并
+      const known = new Set(loaded.map((it) => it.id))
+      const localHits = items.filter(
+        (it) => !known.has(it.id) && (it.is_pinned || activeTab !== 'vault') && searchIncludes(it.preview + '\n' + it.content, q),
+      )
+      if (localHits.length) loaded = [...loaded, ...localHits]
+      setSearchResults(loaded)
     }, 250)
     return () => clearTimeout(timer)
-  }, [searchQuery, activeTab])
+  }, [searchQuery, activeTab, items])
 
   useEffect(() => {
     if (!isElectron) return
@@ -425,35 +442,39 @@ export default function App() {
   const filteredItems = useMemo(() => {
     // 搜索模式下优先展示 DB 搜索结果（非 Electron 环境退回本地过滤）
     let list: ClipboardItem[]
-    if (searchResults) {
+    const q = searchQuery.trim()
+    if (searchResults && isElectron) {
       list = searchResults
-    } else if (!searchQuery.trim()) {
+    } else if (!q) {
       list = items
     } else {
-      const q = searchQuery.toLowerCase()
-      list = items.filter(
-        (it) =>
-          it.preview.toLowerCase().includes(q) ||
-          it.content.toLowerCase().includes(q)
-      )
+      list = items.filter((it) => searchIncludes(it.preview + '\n' + it.content, q))
+    }
+    // 类型过滤
+    if (typeFilter !== 'all') {
+      list = list.filter((it) => it.type === typeFilter)
     }
     // 标签过滤
     if (selectedTag) {
       list = list.filter((it) => it.tags.includes(selectedTag))
     }
     return list
-  }, [items, searchQuery, searchResults, selectedTag])
+  }, [items, searchQuery, searchResults, selectedTag, typeFilter, isElectron])
 
   const vaultItems = useMemo(() => {
     let list = items
       .filter((it) => it.is_pinned)
       .sort(compareByVaultOrder)
+    // 类型过滤
+    if (typeFilter !== 'all') {
+      list = list.filter((it) => it.type === typeFilter)
+    }
     // 标签过滤
     if (selectedTag) {
       list = list.filter((it) => it.tags.includes(selectedTag))
     }
     return list
-  }, [items, selectedTag])
+  }, [items, selectedTag, typeFilter])
 
   /** 全部标签（用于标签过滤 chips），按出现次数降序 */
   const allTags = useMemo(() => {
@@ -468,23 +489,42 @@ export default function App() {
       .map(([tag]) => tag)
   }, [items])
 
-  // 金库搜索时优先展示 DB 搜索结果（pinnedOnly），且搜索结果同样应用标签过滤；否则展示本地收藏列表
+  // 金库搜索时优先展示 DB 搜索结果（pinnedOnly），且搜索结果同样应用标签/类型过滤；否则展示本地收藏列表
   const sidebarItems = useMemo(() => {
     if (activeTab === 'vault') {
       if (searchResults) {
-        const list = selectedTag ? searchResults.filter((it) => it.tags.includes(selectedTag)) : searchResults
+        let list = searchResults
+        if (typeFilter !== 'all') list = list.filter((it) => it.type === typeFilter)
+        if (selectedTag) list = list.filter((it) => it.tags.includes(selectedTag))
         // 与金库常规列表一致：按金库拖拽排序（vault_sort_order 越大越靠前）
         return [...list].sort(compareByVaultOrder)
       }
       return vaultItems
     }
     return filteredItems
-  }, [activeTab, searchResults, vaultItems, filteredItems, selectedTag])
+  }, [activeTab, searchResults, vaultItems, filteredItems, selectedTag, typeFilter])
 
   const handleSelect = useCallback((id: number) => {
     setSelectedId(id)
     setPendingDeleteId(null)
   }, [])
+
+  /** 切换多选：点击条目时若已进入多选态则切换勾选，否则作为常规选中 */
+  const toggleSelect = useCallback((id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), [])
+
+  /** 全选当前视图（无关键词/标签/类型过滤时全选全部可见项） */
+  const selectAll = useCallback(() => {
+    setSelectedIds(new Set(sidebarItems.map((it) => it.id)))
+  }, [sidebarItems])
 
   /** 历史列表拖拽重排：按拖拽结果重组数组，并立即持久化到本地 DB */
   const handleReorder = useCallback(async (ordered: ClipboardItem[]) => {
@@ -714,6 +754,104 @@ export default function App() {
     [items]
   )
 
+  /** 批量复制：依次复制所有选中记录的文本/链接内容 */
+  const handleBatchCopy = useCallback(async () => {
+    if (selectedIds.size === 0) return
+    const list = sidebarItems.filter((it) => selectedIds.has(it.id))
+    if (!list.length) return
+    const texts = list
+      .filter((it) => it.type !== 'image')
+      .map((it) => (it.type === 'html' ? stripHtml(it.content) : it.content))
+      .filter((t) => t && t.trim())
+    if (texts.length) {
+      try {
+        if (isElectron) await window.electronAPI.writeText(texts.join('\n\n'))
+        else if (navigator.clipboard) await navigator.clipboard.writeText(texts.join('\n\n'))
+      } catch (err: any) {
+        showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+        return
+      }
+    }
+    showToast(tr('toast.batchCopied', { n: texts.length }))
+    if (autoHideOnCopy && isElectron) window.electronAPI.closeWindow()
+  }, [selectedIds, sidebarItems, isElectron, autoHideOnCopy])
+
+  /** 批量收藏/取消收藏：全选中均收藏则取消，否则全部收藏 */
+  const handleBatchPin = useCallback(async () => {
+    if (selectedIds.size === 0) return
+    const list = sidebarItems.filter((it) => selectedIds.has(it.id))
+    if (!list.length) return
+    const allPinned = list.length > 0 && list.every((it) => it.is_pinned)
+    let ok = true
+    for (const it of list) {
+      if (it.is_pinned === allPinned) continue
+      try {
+        if (isElectron) await window.electronAPI.updateItemMeta({ id: it.id, isPinned: !allPinned })
+      } catch (err: any) {
+        ok = false
+        showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+        break
+      }
+    }
+    if (!ok) return
+    const now = new Date().toLocaleString('sv-SE').replace('T', ' ').slice(0, 19)
+    setItems((prev) =>
+      prev.map((it) =>
+        selectedIds.has(it.id) ? { ...it, is_pinned: !allPinned, pinned_at: !allPinned ? now : null } : it,
+      ),
+    )
+    showToast(allPinned ? tr('toast.batchUnpinned', { n: list.length }) : tr('toast.batchPinned', { n: list.length }))
+  }, [selectedIds, sidebarItems, isElectron])
+
+  /** 批量加标签：为所有选中记录追加同一标签 */
+  const handleBatchAddTag = useCallback(async (tag: string) => {
+    if (selectedIds.size === 0) return
+    const list = sidebarItems.filter((it) => selectedIds.has(it.id))
+    if (!list.length) return
+    let ok = true
+    for (const it of list) {
+      if (it.tags.includes(tag)) continue
+      const next = [...it.tags, tag]
+      try {
+        if (isElectron) await window.electronAPI.updateItemMeta({ id: it.id, tags: JSON.stringify(next) })
+      } catch (err: any) {
+        ok = false
+        showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+        break
+      }
+    }
+    if (!ok) return
+    setItems((prev) => prev.map((it) => (selectedIds.has(it.id) && !it.tags.includes(tag) ? { ...it, tags: [...it.tags, tag] } : it)))
+    showToast(tr('toast.batchTagged', { n: list.length, tag }))
+  }, [selectedIds, sidebarItems, isElectron])
+
+  /** 批量删除：若含收藏项先二次确认，再批量删除 */
+  const handleBatchDelete = useCallback(async () => {
+    if (selectedIds.size === 0) return
+    const list = sidebarItems.filter((it) => selectedIds.has(it.id))
+    if (!list.length) return
+    const hasPinned = list.some((it) => it.is_pinned)
+    if (hasPinned) {
+      const ok = await confirm(tr('toast.batchConfirmDelete', { n: list.length }), { danger: true })
+      if (!ok) return
+    }
+    try {
+      if (isElectron) await window.electronAPI.deleteItems(list.map((it) => it.id))
+    } catch (err: any) {
+      showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+      return
+    }
+    setItems((prev) => {
+      const removed = new Set(list.map((it) => it.id))
+      const next = prev.filter((it) => !removed.has(it.id))
+      if (next.length === 0) setSelectedId(null)
+      else if (selectedId !== null && removed.has(selectedId)) setSelectedId(next[0].id)
+      return next
+    })
+    setSelectedIds(new Set())
+    showToast(tr('toast.batchDeleted', { n: list.length }))
+  }, [selectedIds, sidebarItems, isElectron, selectedId, confirm])
+
   // ── Local keyboard shortcuts（可自定义）──
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -722,7 +860,7 @@ export default function App() {
       const inInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
       const sc = shortcuts
 
-      // Escape / 自定义清空搜索键：先清搜索 → 再清标签 → 再取消选中
+      // Escape / 自定义清空搜索键：先清搜索 → 再清标签 → 再取消多选 → 再取消选中
       if (matchShortcut(e, sc.clearSearch)) {
         if (searchQuery) {
           setSearchQuery('')
@@ -730,6 +868,10 @@ export default function App() {
         }
         if (selectedTag) {
           setSelectedTag(null)
+          return
+        }
+        if (selectedIds.size > 0) {
+          setSelectedIds(new Set())
           return
         }
         if (pendingDeleteId !== null) {
@@ -740,6 +882,13 @@ export default function App() {
           setSelectedId(null)
           return
         }
+      }
+
+      // Ctrl/Cmd + A：全选当前视图（进入多选态）
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && !inInput && e.key.toLowerCase() === 'a') {
+        e.preventDefault()
+        if (sidebarItems.length > 0) selectAll()
+        return
       }
 
       // Ctrl/Cmd + 1..9：按列表位置快捷复制（写入剪贴板，遵循复制后自动隐藏设置）
@@ -804,7 +953,7 @@ export default function App() {
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selectedItem, selectedId, sidebarItems, searchQuery, selectedTag, pendingDeleteId, shortcuts, handleCopy, handleDelete, handleTogglePin, filteredItems])
+  }, [selectedItem, selectedId, sidebarItems, searchQuery, selectedTag, pendingDeleteId, shortcuts, handleCopy, handleDelete, handleTogglePin, filteredItems, selectedIds, selectAll])
 
   // 窗口最大化时取消内容圆角（透明窗口四角不再透出桌面缺口）
   const [winMaximized, setWinMaximized] = useState(false)
@@ -904,6 +1053,16 @@ export default function App() {
           onTagChange={setSelectedTag}
           onReorder={handleReorder}
           onVaultReorder={handleVaultReorder}
+          typeFilter={typeFilter}
+          onTypeFilterChange={setTypeFilter}
+          selectedIds={selectedIds.size > 0 ? selectedIds : undefined}
+          onToggleSelect={toggleSelect}
+          onSelectAll={selectAll}
+          onClearSelection={clearSelection}
+          onBatchCopy={handleBatchCopy}
+          onBatchPin={handleBatchPin}
+          onBatchDelete={handleBatchDelete}
+          onBatchAddTag={handleBatchAddTag}
         />
       </div>
 

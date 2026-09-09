@@ -46,6 +46,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('db:insert-item', item),
   deleteItem: (id: number) =>
     ipcRenderer.invoke('db:delete-item', id),
+  deleteItems: (ids: number[]) =>
+    ipcRenderer.invoke('db:delete-items', ids) as Promise<boolean>,
   forceClearData: (type: string) =>
     ipcRenderer.invoke('force-clear-data', type) as Promise<{ success: boolean; error?: string }>,
   updateItem: (params: { id: number; content: string; preview: string; charCount: number; storageSize: number }) =>
