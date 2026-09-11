@@ -25,7 +25,6 @@ const zh: Record<string, string> = {
   'sidebar.batchDelete': '删除',
   'sidebar.batchAddTag': '加标签',
   'sidebar.clearSelection': '取消多选',
-  'sidebar.toggleSelect': '选择',
   'detail.typeAll': '全部',
 
   // DetailView
@@ -63,27 +62,6 @@ const zh: Record<string, string> = {
   'detail.ocrEmpty': '未识别到文字',
   'detail.ocrDone': '文字提取完成',
   'detail.ocrFailed': 'OCR 失败：{error}',
-
-  // DetailView — 文本工具
-  'detail.tools': '文本工具',
-  'detail.toolsHint': '选择上方工具对文本进行处理，结果展示在这里',
-  'detail.toolUpper': '大写',
-  'detail.toolLower': '小写',
-  'detail.toolTitle': '首字母大写',
-  'detail.toolJson': '格式化 JSON',
-  'detail.toolBase64Encode': 'Base64 编码',
-  'detail.toolBase64Decode': 'Base64 解码',
-  'detail.toolUrlEncode': 'URL 编码',
-  'detail.toolUrlDecode': 'URL 解码',
-  'detail.toolCollapse': '去除多余空行',
-  'detail.toolReverse': '反转文本',
-  'detail.toolExtractUrls': '提取链接',
-  'detail.toolJsonError': '内容不是有效的 JSON',
-  'detail.toolBase64Error': '无法解码 Base64',
-  'detail.toolUrlDecodeError': '无法解码 URL',
-  'detail.toolCopy': '复制结果',
-  'detail.toolCopied': '已复制',
-  'detail.toolCopyError': '复制失败',
 
   // DetailView — 金库功能
   'detail.pin': '收藏',
@@ -348,7 +326,6 @@ const en: Record<string, string> = {
   'sidebar.batchDelete': 'Delete',
   'sidebar.batchAddTag': 'Tag',
   'sidebar.clearSelection': 'Clear selection',
-  'sidebar.toggleSelect': 'Select',
   'detail.typeAll': 'All',
 
   'detail.empty': 'Select an item to view details',
@@ -385,27 +362,6 @@ const en: Record<string, string> = {
   'detail.ocrEmpty': 'No text recognized',
   'detail.ocrDone': 'Text extracted',
   'detail.ocrFailed': 'OCR failed: {error}',
-
-  // DetailView — Text tools
-  'detail.tools': 'Text Tools',
-  'detail.toolsHint': 'Pick a tool above to process the text',
-  'detail.toolUpper': 'UPPERCASE',
-  'detail.toolLower': 'lowercase',
-  'detail.toolTitle': 'Title Case',
-  'detail.toolJson': 'Format JSON',
-  'detail.toolBase64Encode': 'Base64 Encode',
-  'detail.toolBase64Decode': 'Base64 Decode',
-  'detail.toolUrlEncode': 'URL Encode',
-  'detail.toolUrlDecode': 'URL Decode',
-  'detail.toolCollapse': 'Collapse blank lines',
-  'detail.toolReverse': 'Reverse',
-  'detail.toolExtractUrls': 'Extract URLs',
-  'detail.toolJsonError': 'Not valid JSON',
-  'detail.toolBase64Error': 'Invalid Base64',
-  'detail.toolUrlDecodeError': 'Invalid URL encoding',
-  'detail.toolCopy': 'Copy Result',
-  'detail.toolCopied': 'Copied',
-  'detail.toolCopyError': 'Copy failed',
 
   // DetailView — Vault features
   'detail.pin': 'Pin',

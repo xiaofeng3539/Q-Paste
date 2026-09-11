@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest'
 import { searchIndexOf, searchIncludes, highlightSegments, pinyinFull, pinyinAbbr } from '../src/lib/search'
-import { applyTextTool } from '../src/components/DetailView'
 
 describe('拼音搜索', () => {
   it('支持子串匹配（大小写不敏感）', () => {
@@ -34,34 +33,5 @@ describe('搜索高亮', () => {
   it('无命中时整体返回非高亮', () => {
     const segs = highlightSegments('abc', 'zzz')
     expect(segs).toEqual([{ text: 'abc', hit: false }])
-  })
-})
-
-describe('文本工具', () => {
-  it('大小写转换', () => {
-    expect(applyTextTool('upper', 'abc')).toBe('ABC')
-    expect(applyTextTool('lower', 'ABC')).toBe('abc')
-    expect(applyTextTool('title', 'hello world')).toBe('Hello World')
-  })
-
-  it('JSON 格式化', () => {
-    expect(applyTextTool('json', '{"a":1}')).toBe('{\n  "a": 1\n}')
-    expect(applyTextTool('json', 'not json')).toBe('内容不是有效的 JSON')
-  })
-
-  it('Base64 编解码（含中文）', () => {
-    const encoded = applyTextTool('base64encode', '你好')
-    expect(encoded).toBe('5L2g5aW9')
-    expect(applyTextTool('base64decode', encoded)).toBe('你好')
-  })
-
-  it('URL 编解码', () => {
-    expect(applyTextTool('urlencode', 'a b')).toBe('a%20b')
-    expect(applyTextTool('urldecode', 'a%20b')).toBe('a b')
-  })
-
-  it('提取链接与反转', () => {
-    expect(applyTextTool('extractUrls', 'see https://a.com and https://b.com/xx')).toBe('https://a.com\nhttps://b.com/xx')
-    expect(applyTextTool('reverse', 'abc')).toBe('cba')
   })
 })

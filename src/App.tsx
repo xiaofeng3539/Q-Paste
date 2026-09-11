@@ -28,6 +28,11 @@ export const ACCENT_MAP: Record<AccentColor, string> = {
 const SIDEBAR_MIN_WIDTH = 200
 const DETAIL_MIN_WIDTH = 400
 const SIDEBAR_DEFAULT_WIDTH = 200
+/** 长按 W/S 连续翻动的两次移动之间的最小间隔（毫秒）
+ *  仅用于给键盘自动重复限速：系统重复率最高可达 ~30 次/秒，
+ *  不限速时详情面板来不及重绘，选中项会“跳过”若干条。 */
+const NAV_REPEAT_MIN_INTERVAL = 55
+
 /** 导航列宽度（NavBar w-[52px]） */
 const NAV_WIDTH_PX = 52
 /** 分隔条(6) + 左右两侧内边距（Column2 pr-2 8 + Column3 pl-2/pr-4 24）≈ 38 */
@@ -133,6 +138,8 @@ export default function App() {
   const [isResizing, setIsResizing] = useState(false)
   const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** 长按 W/S 时最后一次自动重复导航的时间戳，用于限速 */
+  const lastNavRepeatAt = useRef(0)
   const { confirm } = useDialog()
 
   useEffect(() => {
@@ -855,10 +862,20 @@ export default function App() {
   // ── Local keyboard shortcuts（可自定义）──
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.repeat) return
       const target = e.target as HTMLElement
       const inInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
       const sc = shortcuts
+
+      // 长按连续翻动：只放行上一条/下一条导航的键盘自动重复（e.repeat），
+      // 复制 / 删除 / 收藏等其余动作仍只响应首次按下，避免长按误触发（尤其是长按删除）。
+      const isNavRepeat =
+        !inInput && selectedItem !== null && (matchShortcut(e, sc.prev) || matchShortcut(e, sc.next))
+      if (e.repeat) {
+        if (!isNavRepeat) return
+        const now = Date.now()
+        if (now - lastNavRepeatAt.current < NAV_REPEAT_MIN_INTERVAL) return
+        lastNavRepeatAt.current = now
+      }
 
       // Escape / 自定义清空搜索键：先清搜索 → 再清标签 → 再取消多选 → 再取消选中
       if (matchShortcut(e, sc.clearSearch)) {
@@ -933,21 +950,27 @@ export default function App() {
       }
 
       // 上一条 / 下一条导航（在当前视图实际显示的列表中切换：历史用 filteredItems，金库用 vaultItems/搜索结果）
+      // 用函数式更新：长按自动重复时，闭包里的 selectedId 可能还是上一帧的值，
+      // 直接写 setSelectedId(list[idx±1].id) 会让连续的重复事件都算到同一个基准上（表现为“按住只走一步”）。
       if (matchShortcut(e, sc.prev) && !inInput) {
         e.preventDefault()
-        const list = sidebarItems
-        const idx = list.findIndex((it) => it.id === selectedId)
-        if (idx === -1) return
         setPendingDeleteId(null)
-        setSelectedId(list[Math.max(idx - 1, 0)].id)
+        setSelectedId((prev) => {
+          if (prev === null) return prev
+          const idx = sidebarItems.findIndex((it) => it.id === prev)
+          if (idx === -1) return prev
+          return sidebarItems[Math.max(idx - 1, 0)].id
+        })
       }
       if (matchShortcut(e, sc.next) && !inInput) {
         e.preventDefault()
-        const list = sidebarItems
-        const idx = list.findIndex((it) => it.id === selectedId)
-        if (idx === -1) return
         setPendingDeleteId(null)
-        setSelectedId(list[Math.min(idx + 1, list.length - 1)].id)
+        setSelectedId((prev) => {
+          if (prev === null) return prev
+          const idx = sidebarItems.findIndex((it) => it.id === prev)
+          if (idx === -1) return prev
+          return sidebarItems[Math.min(idx + 1, sidebarItems.length - 1)].id
+        })
       }
     }
 

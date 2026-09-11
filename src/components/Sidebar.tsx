@@ -3,7 +3,7 @@ import Sortable from 'sortablejs'
 import { ClipboardItem, ItemType } from '../types'
 import { cn, formatGroupLabel, formatRelativeTime } from '../lib/utils'
 import { highlightSegments } from '../lib/search'
-import { FileText, Link, Image, Search, X, Clock, Star, Pin, FileCode2, FolderOpen, CheckSquare } from 'lucide-react'
+import { FileText, Link, Image, Search, X, Clock, Star, Pin, FileCode2, FolderOpen } from 'lucide-react'
 import { tr } from '../i18n'
 
 type ActiveTab = 'history' | 'vault'
@@ -142,7 +142,6 @@ export default function Sidebar({
     if (!draggable || !listRef.current) return
     const sortable = new Sortable(listRef.current, {
       draggable: '.js-item',
-      filter: '.no-drag',
       animation: 150,
       ghostClass: 'qp-drag-ghost',
       chosenClass: 'qp-drag-chosen',
@@ -163,6 +162,34 @@ export default function Sidebar({
     })
     return () => sortable.destroy()
   }, [draggable, onReorder, onVaultReorder, isVault])
+
+  // ── 键盘导航跟随滚动 ──
+  // W/S 切换选中项时，若目标条目已滑出列表可视区域，就把列表滚到刚好能完整显示它的位置。
+  // 已在视野内的条目不做任何滚动，避免连续按 W/S 时列表来回抖动。
+  useEffect(() => {
+    if (selectedId === null) return
+    const container = listRef.current
+    if (!container || container.clientHeight === 0) return
+    const node = container.querySelector<HTMLElement>(`.js-item[data-id="${selectedId}"]`)
+    if (!node) return
+
+    // 用相对滚动容器的几何位置计算，不依赖 offsetParent（容器本身不是定位元素）
+    const cRect = container.getBoundingClientRect()
+    const nRect = node.getBoundingClientRect()
+    const viewTop = container.scrollTop
+    const viewBottom = viewTop + container.clientHeight
+    const itemTop = nRect.top - cRect.top + viewTop
+    const itemBottom = itemTop + nRect.height
+    const margin = 8 // 上下各留 8px 呼吸空间，避免选中项紧贴列表边缘
+
+    // 完整落在视野内 → 保持不动
+    if (itemTop >= viewTop + margin && itemBottom <= viewBottom - margin) return
+
+    container.scrollTop =
+      itemTop < viewTop + margin
+        ? Math.max(0, itemTop - margin)
+        : itemBottom - container.clientHeight + margin
+  }, [selectedId, activeTab])
 
   return (
     <div className="h-full flex flex-col bg-[#FAFBFC] dark:bg-zinc-900 rounded-2xl border border-zinc-200/60 dark:border-zinc-800/50 shadow-sm overflow-hidden select-none">
@@ -219,7 +246,7 @@ export default function Sidebar({
       </div>
 
       {/* Type filter chips */}
-      <div className="flex-shrink-0 px-3 pb-2 flex items-center gap-1 overflow-x-auto">
+      <div className="qp-type-filter-scroll flex-shrink-0 px-3 pb-2 flex items-center gap-1 overflow-x-auto">
         {TYPE_FILTERS.map((f) => (
           <button
             key={f.value}
@@ -267,65 +294,6 @@ export default function Sidebar({
         </div>
       )}
 
-      {/* 批量操作工具栏（有多选时显示） */}
-      {selectedIds && selectedIds.size > 0 && (
-        <div className="flex-shrink-0 px-3 pb-2 flex flex-wrap items-center gap-1.5">
-          <span className="flex-shrink-0 text-[11px] text-zinc-500 dark:text-zinc-400">
-            {tr('sidebar.selectedCount', { n: selectedIds.size })}
-          </span>
-          <button
-            onClick={onSelectAll}
-            className="flex-shrink-0 px-2 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-[11px] text-zinc-600 dark:text-zinc-300 transition-colors"
-          >
-            {tr('sidebar.selectAll')}
-          </button>
-          <button
-            onClick={onBatchCopy}
-            className="flex-shrink-0 px-2 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-[11px] text-zinc-600 dark:text-zinc-300 transition-colors"
-          >
-            {tr('sidebar.batchCopy')}
-          </button>
-          <button
-            onClick={onBatchPin}
-            className="flex-shrink-0 px-2 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-[11px] text-zinc-600 dark:text-zinc-300 transition-colors"
-          >
-            {tr('sidebar.batchPin')}
-          </button>
-          <button
-            onClick={onBatchDelete}
-            className="flex-shrink-0 px-2 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-red-100 dark:hover:bg-red-900/50 hover:text-red-600 dark:hover:text-red-400 text-[11px] text-zinc-600 dark:text-zinc-300 transition-colors"
-          >
-            {tr('sidebar.batchDelete')}
-          </button>
-          <div className="flex items-center gap-1">
-            <input
-              type="text"
-              value={batchTagDraft}
-              onChange={(e) => setBatchTagDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault()
-                  const t = batchTagDraft.trim()
-                  if (t) {
-                    onBatchAddTag?.(t)
-                    setBatchTagDraft('')
-                  }
-                }
-              }}
-              placeholder={tr('sidebar.batchAddTag')}
-              className="w-16 h-6 px-1.5 text-[11px] bg-zinc-100 dark:bg-zinc-900 border border-transparent rounded-md text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 outline-none focus:border-zinc-300 dark:focus:border-zinc-700 transition-colors"
-            />
-          </div>
-          <button
-            onClick={onClearSelection}
-            className="flex-shrink-0 px-1.5 py-0.5 rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
-            title={tr('sidebar.clearSelection')}
-          >
-            <X className="w-3 h-3" />
-          </button>
-        </div>
-      )}
-
       {/* Items list — 普通滚动列表；历史 tab 支持整表拖拽排序 */}
       {(() => {
         if (flatRows.length === 0) {
@@ -358,54 +326,44 @@ export default function Sidebar({
           )
         }
 
-        const renderCheckbox = (item: ClipboardItem) => {
-          if (!onToggleSelect) return null
-          const checked = selectedIds?.has(item.id) ?? false
-          return (
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                onToggleSelect(item.id)
-              }}
-              className={cn(
-                'no-drag flex-shrink-0 flex items-center justify-center w-4 h-4 rounded border transition-colors',
-                checked
-                  ? 'bg-[var(--accent)] border-[var(--accent)] text-white'
-                  : 'border-zinc-300 dark:border-zinc-600 text-transparent hover:border-zinc-400 dark:hover:border-zinc-500',
-              )}
-              title={tr('sidebar.toggleSelect')}
-            >
-              <CheckSquare className="w-3 h-3" />
-            </button>
-          )
-        }
-
+        // 金库条目：DOM 结构与 class 序列与 renderHistoryItem 完全对齐，仅配色保留金库的琥珀色标识。
         const renderVaultItem = (item: ClipboardItem) => (
           <div
             key={item.id}
             data-id={item.id}
             className={cn(
-              'js-item w-full flex items-center gap-2 px-3 rounded-lg transition-all',
+              // 与历史视图同构：外层不再有 px-3（历史条目靠列表容器的 padding: 0 8px 定位），
+              // 并渲染 2px 的完全透明左边框作为黄色时间线的等宽占位，
+              // 使 Pin 图标距左边缘的像素值与历史视图分毫不差。
+              'js-item w-full flex items-center gap-2 rounded-lg transition-all border border-transparent',
               itemPy,
-              selectedIds?.has(item.id)
-                ? 'bg-amber-100 dark:bg-amber-900/40 ring-1 ring-amber-300 dark:ring-amber-700/40'
-                : '',
+              'border-l-2 border-l-transparent rounded-l-none',
+              // 选中态配色（金库＝琥珀）：多选用低透明度色块，当前项用约双倍浓度强调。
+              // 浅色下不再是刺眼的 amber-100 实色块；深色下用 amber-400 透明叠加，替代发闷的 amber-900/40。
+              // 当前项判定优先于多选态，这样全选时仍能看出右侧详情对应的是哪一条。
+              // 底色浓度整体压暗一档：浅色 20%/10% → 10%/5%，深色 20%/10% → 15%/8%。
+              selectedId === item.id
+                ? 'bg-amber-500/10 dark:bg-amber-400/15 text-zinc-900 dark:text-zinc-100'
+                : selectedIds?.has(item.id)
+                  ? 'bg-amber-500/5 dark:bg-amber-400/8'
+                  : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50',
             )}
           >
-            {renderCheckbox(item)}
             <button
-              onClick={() => onSelect(item.id)}
-              className={cn(
-                'flex-1 min-w-0 flex items-center gap-2.5 text-left transition-all rounded-lg',
-                selectedId === item.id
-                  ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 text-zinc-900 dark:text-zinc-100'
-                  : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50 border border-transparent',
-              )}
+              onClick={(e) => {
+                if (e.ctrlKey || e.metaKey) onToggleSelect?.(item.id)
+                else {
+                  if (selectedIds && selectedIds.size > 0) onClearSelection?.()
+                  onSelect(item.id)
+                }
+              }}
+              className="flex-1 min-w-0 flex items-center gap-2.5 text-left"
             >
               <span className="flex-shrink-0 mt-0.5 text-amber-500">
-                <Pin className="w-3.5 h-3.5" />
+                <Pin className="w-4 h-4" />
               </span>
-              <span className="flex-1 min-w-0 text-left">
+              {/* 中间文本：flex:1 + min-width:0 + overflow:hidden，配合内部 truncate 触发省略号 */}
+              <span className="flex-1 min-w-0 overflow-hidden text-left">
                 <span className="block truncate text-[13px] leading-tight">
                   {renderHighlighted(item.alias || item.preview || (item.type === 'image' ? tr('detail.image') : tr('detail.emptyContent')))}
                 </span>
@@ -414,6 +372,17 @@ export default function Sidebar({
                     {renderHighlighted(item.preview)}
                   </span>
                 )}
+              </span>
+              {/*
+                右侧时间标签隐形占位：复用历史视图的时间标签（同样的 class 与同样的字符串），
+                仅用 visibility: hidden 隐藏。这样占位宽度与该条目在历史视图中的真实标签宽度逐像素相同，
+                中间文本的截断点才能与历史视图完全一致——固定 w-[50px] 会因“刚刚/5分钟前/11个月前”宽度不一而错位。
+              */}
+              <span
+                aria-hidden="true"
+                className="invisible flex-shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600"
+              >
+                {formatRelativeTime(item.created_at)}
               </span>
             </button>
           </div>
@@ -427,16 +396,24 @@ export default function Sidebar({
               'js-item w-full flex items-center gap-2 rounded-lg transition-all border border-transparent',
               itemPy,
               item.is_pinned && selectedId !== item.id && 'border-l-2 border-l-amber-400 rounded-l-none',
-              selectedIds?.has(item.id)
-                ? 'bg-[color-mix(in_srgb,var(--accent)_15%,transparent)] dark:bg-zinc-800/80'
-                : selectedId === item.id
-                  ? 'bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100'
+              // 选中态配色（历史＝跟随主题强调色）：多选降到 5%/10%，浅色下不再刺眼；
+              // 深色下用强调色透明叠加替代一片死灰的 zinc-800；当前项约双倍浓度强调且优先于多选态。
+              // 底色浓度整体压暗一档：浅色 16%/8% → 10%/5%，深色 32%/15% → 20%/10%。
+              selectedId === item.id
+                ? 'bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] dark:bg-[color-mix(in_srgb,var(--accent)_20%,transparent)] text-zinc-900 dark:text-zinc-100'
+                : selectedIds?.has(item.id)
+                  ? 'bg-[color-mix(in_srgb,var(--accent)_5%,transparent)] dark:bg-[color-mix(in_srgb,var(--accent)_10%,transparent)]'
                   : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50',
             )}
           >
-            {renderCheckbox(item)}
             <button
-              onClick={() => onSelect(item.id)}
+              onClick={(e) => {
+                if (e.ctrlKey || e.metaKey) onToggleSelect?.(item.id)
+                else {
+                  if (selectedIds && selectedIds.size > 0) onClearSelection?.()
+                  onSelect(item.id)
+                }
+              }}
               className="flex-1 min-w-0 flex items-center gap-2.5 text-left"
             >
               <span className="flex-shrink-0 mt-0.5">
@@ -446,7 +423,7 @@ export default function Sidebar({
                   typeIcon(item.type)
                 )}
               </span>
-              <span className="flex-1 min-w-0 text-left">
+              <span className="flex-1 min-w-0 overflow-hidden text-left">
                 <span className="block truncate text-[13px] leading-tight">
                   {renderHighlighted(item.alias || item.preview || (item.type === 'image' ? tr('detail.image') : tr('detail.emptyContent')))}
                 </span>
@@ -464,11 +441,11 @@ export default function Sidebar({
         )
 
         return (
-          <div
-            ref={listRef}
-            className="flex-1 min-h-0 overflow-y-auto"
-            style={{ padding: '0 8px' }}
-          >
+<div
+              ref={listRef}
+              className="qp-list-scroll flex-1 min-h-0 min-w-0 max-w-full overflow-y-auto overflow-x-hidden"
+              style={{ padding: '0 8px' }}
+            >
             {flatRows.map((row) => (row.kind === 'header' ? renderHeader(row.label) : isVault ? renderVaultItem(row.item) : renderHistoryItem(row.item)))}
           </div>
         )

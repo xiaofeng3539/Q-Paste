@@ -60,6 +60,40 @@
   }
 }
 
+/* ── 左侧剪贴板历史列表滚动容器 ──
+   只保留垂直滚动，彻底禁止横向滚动并隐藏水平滚动条。
+   注意：scrollbar-width / -ms-overflow-style 会同时隐藏纵向滚动条，故不使用；
+   仅通过 overflow-x:hidden（标准）+ ::-webkit-scrollbar:horizontal（WebKit）双引擎覆盖。 */
+
+.qp-list-scroll {
+  overflow-x: hidden !important;
+  overflow-y: auto;
+  max-width: 100%;
+}
+/* WebKit/Blink：一行隐藏水平滚动条 */
+.qp-list-scroll::-webkit-scrollbar:horizontal {
+  display: none;
+}
+/* 所有直接子元素（header / item / 空状态）统一约束宽度，禁止横向撑开 */
+.qp-list-scroll > * {
+  max-width: 100%;
+  min-width: 0;
+}
+/* 文本溢出：nowrap + ellipsis 截断，禁止文字撑开横向滚动 */
+.qp-list-scroll .truncate,
+.qp-list-scroll [class*="truncate"] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* 类型筛选标签保留横向滚动，但不显示底部水平滚动条。 */
+.qp-type-filter-scroll::-webkit-scrollbar:horizontal {
+  display: none;
+}
+
 @layer utilities {
   .drag-region {
     -webkit-app-region: drag;
