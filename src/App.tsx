@@ -7,8 +7,10 @@ import Settings from './components/Settings'
 import { ClipboardItem, ClipboardChangedData, ItemType } from './types'
 import { mockItems } from './mock'
 import { Lang, loadLang, setLang, tr } from './i18n'
-import { detectSensitive, stripHtml, cn } from './lib/utils'
+import { stripHtml, cn } from './lib/utils'
 import { searchIncludes } from './lib/search'
+import { selectRangeIds } from './lib/selection-range'
+import { assignVaultSortOrders } from './lib/vault-order'
 import { useDialog } from './components/DialogProvider'
 import { loadShortcuts, saveShortcuts, matchShortcut, ShortcutAction } from './lib/shortcuts'
 
@@ -25,9 +27,10 @@ export const ACCENT_MAP: Record<AccentColor, string> = {
 }
 
 /** 主界面分栏宽度约束：左侧栏最小 / 右侧详情最小 / 默认宽 */
-const SIDEBAR_MIN_WIDTH = 200
+const SIDEBAR_MIN_WIDTH = 220
+const SIDEBAR_MAX_WIDTH = 380
 const DETAIL_MIN_WIDTH = 400
-const SIDEBAR_DEFAULT_WIDTH = 200
+const SIDEBAR_DEFAULT_WIDTH = 260
 /** 长按 W/S 连续翻动的两次移动之间的最小间隔（毫秒）
  *  仅用于给键盘自动重复限速：系统重复率最高可达 ~30 次/秒，
  *  不限速时详情面板来不及重绘，选中项会“跳过”若干条。 */
@@ -35,8 +38,8 @@ const NAV_REPEAT_MIN_INTERVAL = 55
 
 /** 导航列宽度（NavBar w-[52px]） */
 const NAV_WIDTH_PX = 52
-/** 分隔条(6) + 左右两侧内边距（Column2 pr-2 8 + Column3 pl-2/pr-4 24）≈ 38 */
-const RESIZE_GAP_PX = 38
+/** 分隔条(6) + 分栏留白（Column2 pr-1 4 + Column3 pl-1/pr-4 20）= 30 */
+const RESIZE_GAP_PX = 30
 
 function loadTheme(): Theme {
   try {
@@ -117,6 +120,7 @@ export default function App() {
   const [typeFilter, setTypeFilter] = useState<ItemType | 'all'>('all')
   /** 批量多选：选中的记录 id 集合（空集合表示未进入多选态） */
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<number>>(new Set())
+  const selectionAnchorRef = useRef<number | null>(null)
   /** 收藏项删除确认态：记录等待二次确认删除的 id（按两次 D / 点两次删除按钮） */
   const [pendingDeleteId, setPendingDeleteId] = useState<number | null>(null)
   const pendingDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -129,7 +133,7 @@ export default function App() {
       const v = Number(localStorage.getItem('q-paste-sidebar-width'))
       if (v >= SIDEBAR_MIN_WIDTH) {
         // 启动时同样按窗口宽度收紧上限，防止旧存储值超限撑爆布局
-        const max = window.innerWidth - NAV_WIDTH_PX - DETAIL_MIN_WIDTH - RESIZE_GAP_PX
+        const max = Math.min(SIDEBAR_MAX_WIDTH, window.innerWidth - NAV_WIDTH_PX - DETAIL_MIN_WIDTH - RESIZE_GAP_PX)
         return Math.min(v, Math.max(SIDEBAR_MIN_WIDTH, max))
       }
     } catch {}
@@ -181,7 +185,7 @@ export default function App() {
   // 窗口缩放时校正侧栏宽度上限，防止右侧详情区被挤出
   useEffect(() => {
     const onResize = () => {
-      const max = window.innerWidth - NAV_WIDTH_PX - DETAIL_MIN_WIDTH - RESIZE_GAP_PX
+      const max = Math.min(SIDEBAR_MAX_WIDTH, window.innerWidth - NAV_WIDTH_PX - DETAIL_MIN_WIDTH - RESIZE_GAP_PX)
       setSidebarWidth((w) => Math.min(Math.max(SIDEBAR_MIN_WIDTH, w), Math.max(SIDEBAR_MIN_WIDTH, max)))
     }
     window.addEventListener('resize', onResize)
@@ -202,7 +206,7 @@ export default function App() {
     function onMouseMove(e: MouseEvent) {
       if (!resizeRef.current) return
       const next = resizeRef.current.startWidth + (e.clientX - resizeRef.current.startX)
-      const max = window.innerWidth - NAV_WIDTH_PX - DETAIL_MIN_WIDTH - RESIZE_GAP_PX
+      const max = Math.min(SIDEBAR_MAX_WIDTH, window.innerWidth - NAV_WIDTH_PX - DETAIL_MIN_WIDTH - RESIZE_GAP_PX)
       setSidebarWidth(Math.min(Math.max(SIDEBAR_MIN_WIDTH, next), Math.max(SIDEBAR_MIN_WIDTH, max)))
     }
     function onMouseUp() {
@@ -290,7 +294,31 @@ export default function App() {
 
   useEffect(() => {
     if (!isElectron) return
-    const cleanup = window.electronAPI.onClipboardChanged(async (data: ClipboardChangedData & { fromFt?: boolean; fromOversize?: boolean; id?: number }) => {
+    const cleanup = window.electronAPI.onClipboardChanged((data: ClipboardChangedData) => {
+      if (data.fromCapture && data.id !== undefined) {
+        const id = data.id
+        setItems((prev) => {
+          const existing = prev.find((it) => it.id === id)
+          const item: ClipboardItem = {
+            id,
+            type: data.type,
+            content: data.content,
+            preview: data.preview,
+            char_count: data.charCount ?? 0,
+            storage_size: data.storageSize ?? 0,
+            created_at: data.createdAt,
+            is_pinned: existing?.is_pinned ?? false,
+            alias: existing?.alias ?? '',
+            tags: existing?.tags ?? [],
+            is_sensitive: data.isSensitive ?? existing?.is_sensitive ?? false,
+          }
+          return [item, ...prev.filter((it) => it.id !== id)]
+        })
+        setSelectedId(id)
+        setPendingDeleteId(null)
+        showToast(data.updated ? tr('toast.repinned') : data.isSensitive ? tr('toast.sensitiveDetected') : tr('toast.captured'))
+        return
+      }
       // 来自文件传输/超大文本确认入库的内容已在主进程入库，直接更新列表，不再重复插入
       if ((data.fromFt || data.fromOversize) && data.id !== undefined) {
         const newItem: ClipboardItem = {
@@ -313,68 +341,6 @@ export default function App() {
         return
       }
 
-      // 敏感检测：HTML 先转纯文本再检测（避免标签干扰），图片/文件列表不检测
-      const contentForCheck = data.type === 'html' ? stripHtml(data.content) : data.content
-      const isSensitive = (data.type === 'text' || data.type === 'url' || data.type === 'html') && detectSensitive(contentForCheck)
-      let res: { id: number; updated: boolean } | null = null
-      try {
-        res = await window.electronAPI.insertItem({
-          type: data.type,
-          content: data.content,
-          preview: data.preview,
-          charCount: data.charCount ?? 0,
-          storageSize: data.storageSize ?? 0,
-          createdAt: data.createdAt,
-          isSensitive,
-        })
-      } catch (err: any) {
-        console.error('[Q-Paste] 插入记录失败:', err)
-        return
-      }
-      if (!res) return
-      const id = res.id
-      if (res.updated) {
-        // 内容去重/富文本归一：复用已有记录并置顶（类型与内容同步更新，如 text 升级为 html）
-        setItems((prev) => {
-          const existing = prev.find((it) => it.id === id)
-          if (!existing) return prev
-          const updated: ClipboardItem = {
-            ...existing,
-            type: data.type,
-            content: data.content,
-            preview: data.preview,
-            char_count: data.charCount ?? 0,
-            storage_size: data.storageSize ?? 0,
-            created_at: data.createdAt,
-          }
-          return [updated, ...prev.filter((it) => it.id !== id)]
-        })
-        setSelectedId(id)
-        setPendingDeleteId(null)
-        showToast(tr('toast.repinned'))
-        return
-      }
-      const newItem: ClipboardItem = {
-        id,
-        type: data.type,
-        content: data.content,
-        preview: data.preview,
-        char_count: data.charCount ?? 0,
-        storage_size: data.storageSize ?? 0,
-        created_at: data.createdAt,
-        is_pinned: false,
-        alias: '',
-        tags: [],
-        is_sensitive: isSensitive,
-      }
-      setItems((prev) => [newItem, ...prev])
-      setSelectedId(id)
-      setPendingDeleteId(null)
-      if (isSensitive) {
-        showToast(tr('toast.sensitiveDetected'))
-      } else {
-        showToast(tr('toast.captured'))
-      }
     })
     return cleanup
   }, [])
@@ -412,14 +378,15 @@ export default function App() {
   const [oversizePending, setOversizePending] = useState<{ content: string; kb: number } | null>(null)
   useEffect(() => {
     if (!isElectron) return
-    const cleanup = window.electronAPI.onOversizeConfirm?.((info) => setOversizePending(info))
+    void window.electronAPI.getPendingOversize().then((info) => setOversizePending((current) => current ?? info))
+    const cleanup = window.electronAPI.onOversizeConfirm?.((info) => setOversizePending((current) => current ?? info))
     return cleanup
   }, [])
 
   async function handleOversizeChoice(truncate: boolean) {
     if (!oversizePending) return
     const res = await window.electronAPI.insertOversize(oversizePending.content, truncate)
-    setOversizePending(null)
+    setOversizePending(await window.electronAPI.getPendingOversize())
     if (res?.id) setSelectedId(res.id)
   }
 
@@ -512,12 +479,14 @@ export default function App() {
   }, [activeTab, searchResults, vaultItems, filteredItems, selectedTag, typeFilter])
 
   const handleSelect = useCallback((id: number) => {
+    selectionAnchorRef.current = id
     setSelectedId(id)
     setPendingDeleteId(null)
   }, [])
 
   /** 切换多选：点击条目时若已进入多选态则切换勾选，否则作为常规选中 */
   const toggleSelect = useCallback((id: number) => {
+    selectionAnchorRef.current = id
     setSelectedIds((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
@@ -526,12 +495,30 @@ export default function App() {
     })
   }, [])
 
-  const clearSelection = useCallback(() => setSelectedIds(new Set()), [])
+  const selectRange = useCallback((id: number, additive: boolean) => {
+    const ids = sidebarItems.map((item) => item.id)
+    const anchor = selectionAnchorRef.current
+    const effectiveAnchor = anchor !== null && ids.includes(anchor)
+      ? anchor
+      : selectedId !== null && ids.includes(selectedId) ? selectedId : null
+    setSelectedIds((current) => selectRangeIds(ids, effectiveAnchor, id, current, additive))
+    selectionAnchorRef.current = effectiveAnchor ?? id
+  }, [sidebarItems, selectedId])
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set())
+    selectionAnchorRef.current = selectedId
+  }, [selectedId])
 
   /** 全选当前视图（无关键词/标签/类型过滤时全选全部可见项） */
   const selectAll = useCallback(() => {
     setSelectedIds(new Set(sidebarItems.map((it) => it.id)))
+    selectionAnchorRef.current = sidebarItems[0]?.id ?? null
   }, [sidebarItems])
+
+  useEffect(() => {
+    if (selectedIds.size === 0) selectionAnchorRef.current = selectedId
+  }, [selectedId, selectedIds])
 
   /** 历史列表拖拽重排：按拖拽结果重组数组，并立即持久化到本地 DB */
   const handleReorder = useCallback(async (ordered: ClipboardItem[]) => {
@@ -697,9 +684,14 @@ export default function App() {
         return
       }
       const now = new Date().toLocaleString('sv-SE').replace('T', ' ').slice(0, 19)
-      setItems((prev) =>
-        prev.map((it) => (it.id === id ? { ...it, is_pinned: next, pinned_at: next ? now : null } : it))
-      )
+      setItems((prev) => {
+        const updated = prev.map((it) =>
+          it.id === id
+            ? { ...it, is_pinned: next, pinned_at: next ? now : null, vault_sort_order: next ? it.vault_sort_order : undefined }
+            : it,
+        )
+        return next ? assignVaultSortOrders(updated, [id]) : updated
+      })
       showToast(next ? tr('toast.pinned') : tr('toast.unpinned'))
     },
     [items]
@@ -790,7 +782,8 @@ export default function App() {
     if (!list.length) return
     const allPinned = list.length > 0 && list.every((it) => it.is_pinned)
     let ok = true
-    for (const it of list) {
+    // 反向提交让主进程分配的排序值与列表从上到下的顺序一致。
+    for (const it of [...list].reverse()) {
       if (it.is_pinned === allPinned) continue
       try {
         if (isElectron) await window.electronAPI.updateItemMeta({ id: it.id, isPinned: !allPinned })
@@ -802,11 +795,14 @@ export default function App() {
     }
     if (!ok) return
     const now = new Date().toLocaleString('sv-SE').replace('T', ' ').slice(0, 19)
-    setItems((prev) =>
-      prev.map((it) =>
-        selectedIds.has(it.id) ? { ...it, is_pinned: !allPinned, pinned_at: !allPinned ? now : null } : it,
-      ),
-    )
+    setItems((prev) => {
+      const updated = prev.map((it) =>
+        selectedIds.has(it.id)
+          ? { ...it, is_pinned: !allPinned, pinned_at: !allPinned ? now : null, vault_sort_order: !allPinned ? it.vault_sort_order : undefined }
+          : it,
+      )
+      return allPinned ? updated : assignVaultSortOrders(updated, list.map((it) => it.id))
+    })
     showToast(allPinned ? tr('toast.batchUnpinned', { n: list.length }) : tr('toast.batchPinned', { n: list.length }))
   }, [selectedIds, sidebarItems, isElectron])
 
@@ -1061,7 +1057,7 @@ export default function App() {
       <NavBar onOpenSettings={() => setShowSettings(true)} />
 
       {/* Column 2 — history list（宽度可拖拽调整） */}
-      <div style={{ width: sidebarWidth, minWidth: SIDEBAR_MIN_WIDTH }} className="flex-shrink-0 pr-2 pt-5 pb-4">
+      <div style={{ width: sidebarWidth, minWidth: SIDEBAR_MIN_WIDTH }} className="flex-shrink-0 pr-1 pt-5 pb-4">
         <Sidebar
           items={sidebarItems}
           selectedId={selectedId}
@@ -1080,6 +1076,7 @@ export default function App() {
           onTypeFilterChange={setTypeFilter}
           selectedIds={selectedIds.size > 0 ? selectedIds : undefined}
           onToggleSelect={toggleSelect}
+          onRangeSelect={selectRange}
           onSelectAll={selectAll}
           onClearSelection={clearSelection}
           onBatchCopy={handleBatchCopy}
@@ -1096,16 +1093,16 @@ export default function App() {
       >
         <div
           className={cn(
-            'w-0.5 h-full rounded-full transition-colors',
+            'w-px h-full rounded-full transition-colors',
             isResizing
-              ? 'bg-zinc-500 dark:bg-zinc-200'
-              : 'bg-transparent group-hover:bg-zinc-400 dark:group-hover:bg-zinc-500',
+              ? 'bg-[var(--accent)]'
+              : 'bg-transparent group-hover:bg-[var(--accent)]',
           )}
         />
       </div>
 
       {/* Column 3 — detail view (~70%) as floating card */}
-      <div style={{ minWidth: DETAIL_MIN_WIDTH }} className="flex-1 min-w-0 relative pl-2 pr-4 pt-5 pb-4">
+      <div style={{ minWidth: DETAIL_MIN_WIDTH }} className="flex-1 min-w-0 relative pl-1 pr-4 pt-5 pb-4">
         <div className="h-full bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-zinc-200/60 dark:border-zinc-800/50 overflow-hidden flex flex-col">
           <DetailView
             item={selectedItem}

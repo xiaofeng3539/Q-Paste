@@ -37,11 +37,31 @@ export interface CloudSyncPulledItem {
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  switchAppMode: (mode: 'clipboard' | 'floral', deleteShortcut?: string) =>
+    ipcRenderer.invoke('app:switch-mode', mode, deleteShortcut) as Promise<{ success: boolean; error?: string }>,
+  getSharedDeleteShortcut: () => ipcRenderer.invoke('app:get-q-paste-delete-shortcut') as Promise<string>,
+  floralInvoke: (command: string, args?: unknown, options?: unknown) =>
+    ipcRenderer.invoke('floral:invoke', command, args, options),
+  floralListen: (name: string, callback: (payload: any) => void) => {
+    const handler = (_event: any, payload: any) => callback({ payload })
+    const channel = `floral:event:${name}`
+    ipcRenderer.on(channel, handler)
+    return Promise.resolve(() => ipcRenderer.removeListener(channel, handler))
+  },
+  floralEmit: (name: string, payload?: unknown) => ipcRenderer.invoke('floral:emit', name, payload),
+  floralDialog: (kind: 'open' | 'save' | 'message', options?: unknown) => ipcRenderer.invoke('floral:dialog', kind, options),
+  floralClipboard: (kind: 'read' | 'write', text?: string) => ipcRenderer.invoke('floral:clipboard', kind, text),
+  floralOpenUrl: (url: string) => ipcRenderer.invoke('floral:open-url', url),
+  floralWindow: (method: string, ...args: unknown[]) => ipcRenderer.invoke('floral:window', method, ...args),
+  floralVersion: () => ipcRenderer.invoke('app:get-version'),
+  floralAssetUrl: (filePath: string) => ipcRenderer.invoke('floral:asset-url', filePath),
   // Database
   getItems: (params: { limit: number; offset: number; search?: string; pinnedOnly?: boolean }) =>
     ipcRenderer.invoke('db:get-items', params),
   getItemContent: (id: number) =>
     ipcRenderer.invoke('db:get-item-content', id) as Promise<string>,
+  getOcrConfig: () =>
+    ipcRenderer.invoke('ocr:get-config') as Promise<{ langPath: string; workerPath: string; corePath: string }>,
   insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) =>
     ipcRenderer.invoke('db:insert-item', item),
   deleteItem: (id: number) =>
@@ -66,6 +86,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Clipboard
   writeText: (text: string) =>
     ipcRenderer.invoke('clipboard:write-text', text),
+  readText: () =>
+    ipcRenderer.invoke('clipboard:read-text') as Promise<string>,
   writeImage: (dataUrl: string) =>
     ipcRenderer.invoke('clipboard:write-image', dataUrl),
   writeHtml: (html: string) =>
@@ -87,11 +109,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Window control (for frameless macOS)
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
+  restoreDefaultWindowSize: () => ipcRenderer.invoke('window:restore-default-size') as Promise<boolean>,
+  moveWindowByDrag: (dx: number, dy: number) => ipcRenderer.send('window:drag-move', { dx, dy }),
   getWindowMaximized: () => ipcRenderer.invoke('window:is-maximized') as Promise<boolean>,
   showWindowSystemMenu: () => ipcRenderer.invoke('window:system-menu') as Promise<boolean>,
   getAppIcon: () => ipcRenderer.invoke('app:get-icon') as Promise<string>,
   insertOversize: (content: string, truncate: boolean) =>
     ipcRenderer.invoke('clipboard:insert-oversize', { content, truncate }) as Promise<{ id: number | null; updated: boolean } | null>,
+  getPendingOversize: () =>
+    ipcRenderer.invoke('clipboard:get-pending-oversize') as Promise<{ content: string; kb: number } | null>,
   checkDatabase: () =>
     ipcRenderer.invoke('db:check') as Promise<{ ok: boolean; integrity: string; count: number; size: number }>,
   onOversizeConfirm: (callback: (info: { content: string; kb: number }) => void) => {
@@ -134,6 +160,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('storage:change-path', newPath) as Promise<{ success: boolean; error?: string }>,
   getConfigPath: () =>
     ipcRenderer.invoke('config:get-path') as Promise<string>,
+  getStorageFolders: () =>
+    ipcRenderer.invoke('storage:get-folders') as Promise<{ root: string; transfers: string; exports: string; logs: string }>,
 
   // Retention rules
   getRetention: () =>
@@ -172,6 +200,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ftGetAvailableIps: () => ipcRenderer.invoke('ft:get-available-ips') as Promise<string[]>,
   ftSetDisplayIp: (ip: string) => ipcRenderer.invoke('ft:set-display-ip', ip) as Promise<void>,
   ftGetChatHistory: () => ipcRenderer.invoke('ft:get-chat-history') as Promise<FtMessage[]>,
+  ftGetOnlineDevices: () => ipcRenderer.invoke('ft:get-online-devices') as Promise<FtDeviceInfo[]>,
   ftSendChatText: (content: string) => ipcRenderer.invoke('ft:send-chat-text', content) as Promise<boolean>,
   ftSendFile: (filePath: string) =>
     ipcRenderer.invoke('ft:send-file', filePath) as Promise<{ success: boolean; error?: string }>,
@@ -212,6 +241,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Auto-update (electron-updater)
   checkUpdate: () =>
     ipcRenderer.invoke('update:check') as Promise<{ success: boolean; error?: string }>,
+  getUpdateStatus: () =>
+    ipcRenderer.invoke('update:get-status') as Promise<{ status: string; version?: string; percent?: number; message?: string }>,
   installUpdate: () =>
     ipcRenderer.invoke('update:install') as Promise<{ success: boolean; error?: string }>,
   onUpdateStatus: (callback: (status: any) => void) => {

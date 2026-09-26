@@ -2,18 +2,20 @@
  * 局域网文件传输服务回归测试：配对码鉴权、分块上传（追加续传）、Range 下载、路由保护。
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileTransferServer } from '../electron/file-transfer/server'
 
 const saveDir = join(tmpdir(), `qp-ft-test-${Date.now()}`)
+const tempDir = join(saveDir, 'temp')
 let server: FileTransferServer
 let port = 0
 
 beforeAll(async () => {
   server = new FileTransferServer({
-    getSaveDir: () => saveDir,
+    getTransfersDir: () => saveDir,
+    getTempDir: () => tempDir,
     getColorMode: () => 'system',
     getLogoBase64: () => '',
     onReceiveText: () => {},
@@ -61,10 +63,10 @@ describe('文件传输服务', () => {
     const b = Buffer.from('B'.repeat(1000))
     const c = Buffer.from('C'.repeat(500))
     expect((await chunkRequest(id, 0, 3, a)).status).toBe(200)
-    expect(existsSync(join(saveDir, `.tmp_${id}`))).toBe(true)
+    expect(existsSync(join(tempDir, `.tmp_${id}`))).toBe(true)
     expect((await chunkRequest(id, 1, 3, b)).status).toBe(200)
     expect((await chunkRequest(id, 2, 3, c)).status).toBe(200)
-    expect(existsSync(join(saveDir, `.tmp_${id}`))).toBe(false)
+    expect(existsSync(join(tempDir, `.tmp_${id}`))).toBe(false)
     const file = readdirSync(saveDir).find((f) => f.endsWith('_f.bin'))
     expect(file).toBeDefined()
     const buf = readFileSync(join(saveDir, file!))
@@ -75,6 +77,7 @@ describe('文件传输服务', () => {
   })
 
   it('PC→手机下载代理支持 Range 206 断点续传，且受配对码保护', async () => {
+    mkdirSync(saveDir, { recursive: true })
     const src = join(saveDir, 'range.txt')
     writeFileSync(src, '0123456789ABCDEF')
     server.sendFileToClient(src)
@@ -88,4 +91,3 @@ describe('文件传输服务', () => {
     expect((await part.arrayBuffer()).byteLength).toBe(10)
   })
 })
-

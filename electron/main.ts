@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, clipboard, nativeImage, dialog, shell, protocol, net, nativeTheme, safeStorage } from 'electron'
+import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, clipboard, nativeImage, dialog, shell, protocol, net, nativeTheme, safeStorage, screen } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import os from 'node:os'
@@ -10,6 +10,16 @@ import { SyncEngine } from '../src/main/sync/SyncEngine'
 import { WebDavService, verifyWebDav } from '../src/main/sync/WebDavService'
 import type { ClipboardSyncItem, ClipboardSyncType, CloudSyncStatus, WebDavToggleResult } from '../src/main/sync/types'
 import { FileTransferServer, getAvailableIps, guessMime, FILE_TRANSFER_DEFAULT_PORT, type FtStatus } from './file-transfer/server'
+import { ensureStorageLayout, getStorageLayout, type StorageLayout } from '../src/main/storage-layout'
+import { prepareStorageRoot, writeStorageRootPointer } from '../src/main/storage-migration'
+import { cleanupStaleTempFiles } from '../src/main/temp-cleanup'
+import { resolveAppMode, type AppMode } from '../src/lib/app-mode'
+import { persistClipboardCapture, type ClipboardCapture } from '../src/main/clipboard-capture'
+import { FloralNotesStore } from './floral/notes-store'
+import { copyExistingFloralData } from './floral/data-migration'
+import { findFloralSurfaceWindow } from './floral/surface-window'
+import { broadcastFloralEvent } from './floral/event-broadcast'
+import { toFloralUpdateState, type HostUpdateStatus } from './floral/host-update'
 
 interface StoredItem {
   id: number
@@ -30,6 +40,7 @@ interface StoredItem {
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
+const pendingInstallReports = new Map<string, Map<number, (ready: boolean) => void>>()
 
 // 文件传输聊天视图的本地文件流式预览（等价 Tiez convertFileSrc；须在 app ready 前注册）
 protocol.registerSchemesAsPrivileged([
@@ -39,7 +50,13 @@ let db: SqlJsDatabase | null = null
 let sqlModule: SqlJsStatic | null = null
 let dbPath = ''
 let configPath = ''
+let storageLayout: StorageLayout | null = null
+let floralStore: FloralNotesStore | null = null
+let floralDataRoot = ''
+const floralSurfaceWindows = new Map<string, BrowserWindow>()
+let floralNoteShortcut = ''
 let clipboardTimer: ReturnType<typeof setInterval> | null = null
+const pendingOversizeCaptures: Array<{ content: string; kb: number }> = []
 let isQuitting = false
 let dbIntegrityIssue = false // 启动完整性检查发现异常时置位
 let legacyMaxSortOrder = 0 // 迁移回填时历史记录的最大 sort_order，供新条目置顶基准（启动后由实际 MAX 兜底）
@@ -61,6 +78,9 @@ try {
 
 interface AppConfig {
   toggleShortcut: string
+  activeMode?: AppMode
+  qPasteDeleteShortcut?: string
+  floralDataDir?: string
   storagePath?: string
   autoStart?: boolean
   startMinimized?: boolean
@@ -101,6 +121,7 @@ interface AppConfig {
 
 const defaultConfig: AppConfig = {
   toggleShortcut: 'Alt+Space',
+  qPasteDeleteShortcut: 'D',
   autoStart: true,
   startMinimized: true,
   retentionDays: 'forever',
@@ -185,9 +206,9 @@ function enforceRetentionRules(): void {
 function startRetentionTimer(): void {
   if (retentionTimer) clearInterval(retentionTimer)
   retentionTimer = setInterval(() => {
-    // 主进程日志落盘（console.error/log 重定向到 userData/logs/main.log）
+    // 主进程日志落盘（console.error/log 重定向到统一目录 logs/main.log）
     try {
-      log.transports.file.resolvePathFn = () => path.join(app.getPath('userData'), 'logs', 'main.log')
+      log.transports.file.resolvePathFn = () => path.join(getStorageLayoutOrThrow().logsDir, 'main.log')
       log.transports.file.maxSize = 5 * 1024 * 1024
       const origError = console.error.bind(console)
       console.error = (...args: unknown[]) => {
@@ -213,16 +234,40 @@ function stopRetentionTimer(): void {
   }
 }
 
-/** 当前数据目录：配置的自定义路径或 userData */
-function getDataDir(): string {
-  return config.storagePath || app.getPath('userData')
+function getStorageLayoutOrThrow(): StorageLayout {
+  if (!storageLayout) throw new Error('存储目录尚未初始化')
+  return storageLayout
+}
+
+function getOcrConfig(): { langPath: string; workerPath: string; corePath: string } {
+  const ocrDir = app.isPackaged
+    ? path.join(process.resourcesPath, 'ocr')
+    : path.join(app.getAppPath(), 'build', 'ocr')
+  const workerFile = path.join(ocrDir, 'worker.min.js')
+  const coreDir = path.join(ocrDir, 'core')
+  const requiredFiles = [
+    path.join(ocrDir, 'chi_sim.traineddata.gz'),
+    path.join(ocrDir, 'eng.traineddata.gz'),
+    workerFile,
+    path.join(coreDir, 'tesseract-core.wasm.js'),
+    path.join(coreDir, 'tesseract-core-simd.wasm.js'),
+    path.join(coreDir, 'tesseract-core-lstm.wasm.js'),
+    path.join(coreDir, 'tesseract-core-simd-lstm.wasm.js'),
+  ]
+  const missing = requiredFiles.find((file) => !fs.existsSync(file))
+  if (missing) throw new Error(`OCR 本地资源缺失：${path.basename(missing)}`)
+  return {
+    langPath: pathToFileURL(ocrDir).toString(),
+    workerPath: pathToFileURL(workerFile).toString(),
+    corePath: pathToFileURL(coreDir).toString(),
+  }
 }
 
 // ── 图片落盘：DB 只存相对路径（images/xxx.png），避免 SQLite 存 base64 无限膨胀 ──
 
 /** 图片目录（数据目录下） */
 function getImagesDir(): string {
-  return path.join(getDataDir(), 'images')
+  return getStorageLayoutOrThrow().imagesDir
 }
 
 /** 保存 dataURL 图片到磁盘，返回相对路径（如 images/img_xxx.png）；失败返回 null */
@@ -290,15 +335,22 @@ function cleanupOrphanImages(): void {
 
 async function initDatabase(): Promise<void> {
   const userDataPath = app.getPath('userData')
-  configPath = path.join(userDataPath, 'q-paste-config.json')
+  const legacyConfigPath = path.join(userDataPath, 'q-paste-config.json')
+  const pointerPath = path.join(userDataPath, 'q-paste-storage-root.json')
+  const prepared = prepareStorageRoot({ pointerPath, legacyConfigPath, userDataPath })
+  storageLayout = prepared.layout
+  configPath = storageLayout.configPath
   loadConfig()
-
-  // Use custom storage path if set, otherwise fallback to default
-  const dataDir = getDataDir()
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true })
+  config.storagePath = storageLayout.rootDir
+  floralDataRoot = config.floralDataDir ? path.join(config.floralDataDir, 'floral') : storageLayout.floralDir
+  if (!config.floralDataDir) {
+    try {
+      const legacyFloral = path.join(app.getPath('documents'), '花笺')
+      if (await copyExistingFloralData(legacyFloral, floralDataRoot)) console.log('[Q-Paste] 已复制现有花笺数据，源目录保留:', legacyFloral)
+    } catch (error) { log.error('Failed to copy existing Floral data:', error) }
   }
-  dbPath = path.join(dataDir, 'q-paste.db')
+  dbPath = storageLayout.dbPath
+  ensureStorageLayout(storageLayout)
   // 缓存 sql.js 模块实例，避免重复加载 WASM
   const SQL = sqlModule ?? (sqlModule = await initSqlJs({
     locateFile: (file: string) => {
@@ -316,11 +368,11 @@ async function initDatabase(): Promise<void> {
   const bakPath = dbPath + '.bak'
   const candidates = new Set<string>([
     dbPath, bakPath, dbPath + '.pre-rollback',
-    path.join(dataDir, 'history.db'), path.join(dataDir, 'history.bak'),
+    path.join(storageLayout.databaseDir, 'history.db'), path.join(storageLayout.databaseDir, 'history.bak'),
   ])
   try {
-    for (const f of fs.readdirSync(dataDir)) {
-      if (/(?:^|\/)history\.(?:db|bak)$|\.db\.tmp$|\.pre-rollback$/.test(f)) candidates.add(path.join(dataDir, f))
+    for (const f of fs.readdirSync(storageLayout.databaseDir)) {
+      if (/(?:^|\/)history\.(?:db|bak)$|\.db\.tmp$|\.pre-rollback$/.test(f)) candidates.add(path.join(storageLayout.databaseDir, f))
     }
   } catch {}
   const evaluate = (file: string): { ok: boolean; count: number } => {
@@ -447,7 +499,7 @@ async function initDatabase(): Promise<void> {
 
   // 启动补录：上次运行中入库失败进入待写队列的记录（数据零丢失兜底）
   try {
-    const qPath = path.join(getDataDir(), 'pending-inserts.json')
+    const qPath = path.join(storageLayout.databaseDir, 'pending-inserts.json')
     if (fs.existsSync(qPath)) {
       const arr = JSON.parse(fs.readFileSync(qPath, 'utf-8')) as Array<Record<string, unknown>>
       let ok = 0
@@ -466,6 +518,7 @@ async function initDatabase(): Promise<void> {
   }
 
   saveDb()
+  if (prepared.isNewPointer) writeStorageRootPointer(pointerPath, storageLayout.rootDir)
 }
 
 /**
@@ -569,6 +622,15 @@ function htmlToText(html: string): string {
     .trim()
 }
 
+function recordClipboardCapture(capture: ClipboardCapture): void {
+  const result = persistClipboardCapture(
+    capture,
+    insertItemDbWithRetry,
+    (item) => mainWindow?.webContents.send('clipboard-changed', item),
+  )
+  if (result) void pushCaptureToCloud(capture)
+}
+
 function checkClipboard(): void {
   if (!mainWindow) return
 
@@ -601,10 +663,11 @@ function checkClipboard(): void {
     const relPath = saveImageToDisk(image.toDataURL(), hash)
     const size = image.getSize()
     const createdAt = nowLocal()
-    mainWindow.webContents.send('clipboard-changed', {
+    recordClipboardCapture({
       type: 'image',
       content: relPath || '', // 相对路径；落盘失败时为空（渲染层不再收到 base64）
       preview: `图片 ${size.width}×${size.height}`,
+      charCount: 0,
       storageSize: buf.length,
       createdAt,
     })
@@ -621,7 +684,7 @@ function checkClipboard(): void {
 
     const first = filePaths[0].replace(/\\/g, '/').split('/').pop() || filePaths[0]
     const createdAt = nowLocal()
-    mainWindow.webContents.send('clipboard-changed', {
+    recordClipboardCapture({
       type: 'files',
       content: JSON.stringify(filePaths),
       preview: `文件 ${filePaths.length} 个：${first}`,
@@ -647,7 +710,7 @@ function checkClipboard(): void {
         lastTextContent = plain
         const preview = plain.length > 100 ? plain.slice(0, 100) + '...' : plain
         const createdAt = nowLocal()
-        mainWindow.webContents.send('clipboard-changed', {
+        recordClipboardCapture({
           type: 'html',
           content: html,
           preview,
@@ -667,10 +730,13 @@ function checkClipboard(): void {
   const maxBytes = (config.maxCaptureKb ?? 1024) * 1024
   lastTextContent = text
   if (maxBytes > 0 && Buffer.byteLength(text, 'utf8') > maxBytes) {
-    mainWindow?.webContents.send('clipboard:oversize-confirm', {
+    pendingOversizeCaptures.push({
       content: text,
       kb: Math.round(maxBytes / 1024),
     })
+    if (pendingOversizeCaptures.length === 1 && resolveAppMode(config.activeMode) === 'clipboard') {
+      mainWindow?.webContents.send('clipboard:oversize-confirm', pendingOversizeCaptures[0])
+    }
     return
   }
 
@@ -684,7 +750,7 @@ function checkClipboard(): void {
   const preview = text.length > 100 ? text.slice(0, 100) + '...' : text
   const createdAt = nowLocal()
 
-  mainWindow.webContents.send('clipboard-changed', {
+  recordClipboardCapture({
     type: isUrl ? 'url' : 'text',
     content: text,
     preview,
@@ -784,6 +850,10 @@ function createTray(): void {
         mainWindow?.webContents.send('open-settings')
       },
     },
+    {
+      label: '新建花笺便签',
+      click: () => openFloralSurface('notepad'),
+    },
     { type: 'separator' },
     {
       label: monitoringPaused ? '恢复监听剪贴板' : '暂停监听剪贴板',
@@ -867,13 +937,31 @@ function updateGlobalShortcut(newShortcut: string): boolean {
 
 // ── Window ──
 
+const MAIN_WINDOW_DEFAULT_WIDTH = 1180
+const MAIN_WINDOW_DEFAULT_HEIGHT = 760
+
+function restoreMainWindowDefaultSize(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const workArea = screen.getDisplayMatching(mainWindow.getBounds()).workArea
+  const width = Math.min(MAIN_WINDOW_DEFAULT_WIDTH, workArea.width)
+  const height = Math.min(MAIN_WINDOW_DEFAULT_HEIGHT, workArea.height)
+  if (mainWindow.isMaximized()) mainWindow.unmaximize()
+  mainWindow.setBounds({
+    x: workArea.x + Math.round((workArea.width - width) / 2),
+    y: workArea.y + Math.round((workArea.height - height) / 2),
+    width,
+    height,
+  })
+}
+
 function createWindow(): void {
   // 「启动后最小化到系统托盘」：开启时窗口驻留托盘不弹出，关闭时正常显示并前置
   const startMinimizedToTray = config.startMinimized === true
+  const workArea = screen.getPrimaryDisplay().workArea
 
   mainWindow = new BrowserWindow({
-    width: 960,
-    height: 640,
+    width: Math.min(MAIN_WINDOW_DEFAULT_WIDTH, workArea.width),
+    height: Math.min(MAIN_WINDOW_DEFAULT_HEIGHT, workArea.height),
     minWidth: 700,
     minHeight: 450,
     // 真实透明：仅标题栏区域透出桌面/后方窗口，内容区由页面自绘不透明背景承接
@@ -890,7 +978,29 @@ function createWindow(): void {
     },
   })
 
-  if (process.env.VITE_DEV_SERVER_URL) {
+  if (process.platform === 'win32') {
+    // 拖动区域的双击由 Windows 作为标题栏消息处理，页面不一定收到双击事件。
+    mainWindow.hookWindowMessage(0x00a3, (wParam) => {
+      if (wParam.readUInt32LE(0) !== 2) return // WM_NCLBUTTONDBLCLK / HTCAPTION
+      const window = mainWindow
+      if (!window || window.isDestroyed()) return
+      let restored = false
+      const restore = () => {
+        if (restored) return
+        restored = true
+        window.removeListener('maximize', restore)
+        window.removeListener('unmaximize', restore)
+        if (window === mainWindow) setImmediate(restoreMainWindowDefaultSize)
+      }
+      window.once('maximize', restore)
+      window.once('unmaximize', restore)
+      setTimeout(restore, 100)
+    })
+  }
+
+  if (resolveAppMode(config.activeMode) === 'floral') {
+    void mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'floral', 'index.html'))
+  } else if (process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
@@ -925,6 +1035,356 @@ function createWindow(): void {
 }
 
 // ── IPC handlers ──
+
+ipcMain.handle('app:switch-mode', async (event, requestedMode: unknown, requestedDeleteShortcut?: unknown) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return { success: false, error: 'invalid-window' }
+  const mode = resolveAppMode(requestedMode)
+  if (requestedMode !== mode) return { success: false, error: 'invalid-mode' }
+  const previousMode = resolveAppMode(config.activeMode)
+  try {
+    if (mode === 'floral') {
+      await mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'floral', 'index.html'))
+    } else if (process.env.VITE_DEV_SERVER_URL) {
+      await mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
+    } else {
+      await mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'))
+    }
+    if (mode === 'floral' && typeof requestedDeleteShortcut === 'string' && requestedDeleteShortcut.trim()) {
+      config.qPasteDeleteShortcut = requestedDeleteShortcut.trim()
+    }
+    config.activeMode = mode
+    saveConfig()
+    return { success: true }
+  } catch (error) {
+    log.error('Failed to switch application mode:', error)
+    try {
+      if (previousMode === 'floral') await mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'floral', 'index.html'))
+      else if (process.env.VITE_DEV_SERVER_URL) await mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
+      else await mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'))
+    } catch (rollbackError) {
+      log.error('Failed to restore previous application mode:', rollbackError)
+    }
+    return { success: false, error: 'load-failed' }
+  }
+})
+
+ipcMain.handle('app:get-q-paste-delete-shortcut', (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return 'D'
+  return config.qPasteDeleteShortcut || 'D'
+})
+
+function getFloralStore(): FloralNotesStore {
+  if (!storageLayout) throw new Error('Floral storage is not initialized')
+  if (!floralDataRoot) floralDataRoot = storageLayout.floralDir
+  if (!floralStore || floralStore.root !== floralDataRoot) floralStore = new FloralNotesStore(floralDataRoot)
+  return floralStore
+}
+
+function assertFloralSender(event: Electron.IpcMainInvokeEvent): void {
+  if (mainWindow && event.sender === mainWindow.webContents) return
+  if ([...floralSurfaceWindows.values()].some((window) => !window.isDestroyed() && event.sender === window.webContents)) return
+  throw new Error('Invalid Floral IPC sender')
+}
+
+function openFloralSurface(kind: 'notepad' | 'tile', noteId?: string, bounds?: { x: number; y: number; width: number; height: number } | null): string {
+  if (!mainWindow) throw new Error('Main window is not available')
+  const key = kind === 'tile' ? `tile:${noteId}` : `notepad:${noteId || 'new'}`
+  const existing = floralSurfaceWindows.get(key)
+  if (existing && !existing.isDestroyed()) {
+    existing.show()
+    existing.focus()
+    if (kind === 'notepad') existing.webContents.send('floral:event:notepad:activate', 'main')
+    return key
+  }
+  const child = new BrowserWindow({
+    parent: mainWindow,
+    width: Math.max(kind === 'tile' ? 180 : 260, Math.min(1600, Number(bounds?.width) || (kind === 'tile' ? 220 : 360))),
+    height: Math.max(kind === 'tile' ? 180 : 320, Math.min(1400, Number(bounds?.height) || (kind === 'tile' ? 220 : 440))),
+    x: Number.isFinite(bounds?.x) ? bounds!.x : undefined,
+    y: Number.isFinite(bounds?.y) ? bounds!.y : undefined,
+    frame: false,
+    transparent: kind === 'tile',
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false,
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
+  })
+  floralSurfaceWindows.set(key, child)
+  child.once('ready-to-show', () => child.show())
+  child.on('closed', () => { if (floralSurfaceWindows.get(key) === child) floralSurfaceWindows.delete(key) })
+  void child.loadFile(path.join(app.getAppPath(), 'dist', 'floral', 'index.html'), {
+    query: { view: kind, ...(noteId ? { noteId } : {}) },
+  })
+  return key
+}
+
+function applyFloralShortcuts(saved: { globalShortcut?: string }): void {
+  if (floralNoteShortcut) globalShortcut.unregister(floralNoteShortcut)
+  floralNoteShortcut = ''
+  const noteShortcut = String(saved.globalShortcut ?? '')
+  if (noteShortcut && noteShortcut !== config.toggleShortcut && globalShortcut.register(noteShortcut, () => { openFloralSurface('notepad') })) {
+    floralNoteShortcut = noteShortcut
+  }
+}
+
+ipcMain.handle('floral:invoke', async (event, command: string, input?: any, options?: any) => {
+  assertFloralSender(event)
+  const store = getFloralStore()
+  let result: unknown
+  let changedEvent: 'notes-changed' | 'config-changed' | null = null
+  switch (command) {
+    case 'notes_list': result = await store.listNotes(); break
+    case 'notes_get': result = await store.getNote(input?.id); break
+    case 'notes_create': result = await store.createNote(input?.request); changedEvent = 'notes-changed'; break
+    case 'notes_update': result = await store.updateNote(input?.id, input?.request); changedEvent = 'notes-changed'; break
+    case 'notes_delete': result = await store.deleteNote(input?.id); changedEvent = 'notes-changed'; break
+    case 'notes_move_category': result = await store.moveCategory(input?.id, input?.category); changedEvent = 'notes-changed'; break
+    case 'notes_reorder': result = await store.reorderNotes(input?.category, input?.orderedIds); changedEvent = 'notes-changed'; break
+    case 'categories_list': result = await store.listCategories(); break
+    case 'categories_create': result = await store.createCategory(input?.name); changedEvent = 'notes-changed'; break
+    case 'categories_rename': result = await store.renameCategory(input?.oldName, input?.newName); changedEvent = 'notes-changed'; break
+    case 'categories_delete': result = await store.deleteCategory(input?.name); changedEvent = 'notes-changed'; break
+    case 'config_get': result = { ...(await store.getConfig()), toggleVisibilityShortcut: config.toggleShortcut }; break
+    case 'config_save': {
+      result = await store.saveConfig({ ...input?.config, toggleVisibilityShortcut: config.toggleShortcut })
+      applyFloralShortcuts(result as { globalShortcut?: string })
+      changedEvent = 'config-changed'
+      break
+    }
+    case 'config_migrate_data_dir': {
+      const selected = path.resolve(String(input?.newDataDir ?? ''))
+      if (!path.isAbsolute(selected) || selected === path.parse(selected).root) throw new Error('Invalid Floral data directory')
+      const nextRoot = path.join(selected, 'floral')
+      if (path.resolve(nextRoot) !== path.resolve(store.root)) {
+        if (!await copyExistingFloralData(store.root, nextRoot)) throw new Error('目标目录已存在或原花笺数据无效，未覆盖')
+        floralDataRoot = nextRoot
+        floralStore = new FloralNotesStore(nextRoot)
+        config.floralDataDir = selected
+        saveConfig()
+      }
+      result = { ...(await getFloralStore().getConfig()), dataDir: selected, toggleVisibilityShortcut: config.toggleShortcut }
+      changedEvent = 'config-changed'
+      break
+    }
+    case 'images_save': {
+      const bytes = input instanceof Uint8Array ? input : Array.isArray(input) ? Uint8Array.from(input) : null
+      if (!bytes || bytes.byteLength > 25 * 1024 * 1024) throw new Error('Invalid or oversized image data')
+      const headers = options?.headers ?? {}
+      result = await store.saveImage(String(headers['x-note-id'] ?? ''), bytes, String(headers['x-image-ext'] ?? ''))
+      break
+    }
+    case 'images_save_from_path': {
+      const ext = path.extname(String(input?.filePath ?? '')).slice(1)
+      if (!['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'].includes(ext.toLowerCase())) throw new Error('Unsupported image format')
+      const stat = await fs.promises.stat(input.filePath)
+      if (stat.size > 25 * 1024 * 1024) throw new Error('Image file is too large')
+      result = await store.saveImage(String(input.noteId), await fs.promises.readFile(input.filePath), ext)
+      break
+    }
+    case 'images_get_base_dir': result = store.root; break
+    case 'copy_background_image': {
+      const source = String(input?.sourcePath ?? '')
+      const ext = path.extname(source).slice(1).toLowerCase()
+      if (!['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) throw new Error('Unsupported background image format')
+      const stat = await fs.promises.stat(source)
+      if (stat.size > 30 * 1024 * 1024) throw new Error('Background image is too large')
+      const dir = path.join(store.root, 'backgrounds')
+      await fs.promises.mkdir(dir, { recursive: true })
+      const destination = path.join(dir, `background-${randomUUID()}.${ext}`)
+      await fs.promises.copyFile(source, destination)
+      result = destination; break
+    }
+    case 'images_clean_unused': {
+      const dir = path.join(store.root, 'images', String(input?.noteId ?? ''))
+      if (!path.resolve(dir).startsWith(path.resolve(store.root) + path.sep)) throw new Error('Invalid image directory')
+      const removed: string[] = []
+      for (const name of await fs.promises.readdir(dir).catch(() => [] as string[])) {
+        if (!String(input?.content ?? '').includes(`images/${input.noteId}/${name}`)) {
+          await fs.promises.rm(path.join(dir, name), { force: true }); removed.push(name)
+        }
+      }
+      result = removed; break
+    }
+    case 'notes_import_markdown': result = await store.importMarkdown(input?.path, input?.category ?? ''); changedEvent = 'notes-changed'; break
+    case 'notes_export_markdown': result = await store.exportMarkdown(input?.id, input?.path); break
+    case 'read_external_file': {
+      const file = String(input?.path ?? '')
+      if (path.extname(file).toLowerCase() !== '.md') throw new Error('Only Markdown files are supported')
+      if ((await fs.promises.stat(file)).size > 20 * 1024 * 1024) throw new Error('Markdown file is too large')
+      result = await fs.promises.readFile(file, 'utf8'); break
+    }
+    case 'save_external_file': {
+      const file = String(input?.path ?? '')
+      if (path.extname(file).toLowerCase() !== '.md') throw new Error('Only Markdown files are supported')
+      await fs.promises.mkdir(path.dirname(file), { recursive: true }); await fs.promises.writeFile(file, String(input?.content ?? ''), 'utf8'); result = undefined; break
+    }
+    case 'get_file_modified_time': result = (await fs.promises.stat(String(input?.path ?? ''))).mtimeMs; break
+    case 'global_shortcut_check': {
+      const shortcut = String(input?.shortcut ?? '')
+      const valid = /^[A-Za-z]+\+(?:[A-Za-z]+\+)*[A-Za-z0-9]+$/.test(shortcut)
+      const current = floralNoteShortcut === shortcut
+      const conflicts = shortcut === config.toggleShortcut || (globalShortcut.isRegistered(shortcut) && !current)
+      result = { available: valid && (!conflicts || current), conflictType: !valid ? 'invalid' : current ? 'current' : conflicts ? 'registered' : 'none', message: '' }
+      break
+    }
+    case 'shared_visibility_shortcut_check': {
+      const shortcut = String(input?.shortcut ?? '')
+      const valid = /^[A-Za-z]+\+(?:[A-Za-z]+\+)*[A-Za-z0-9]+$/.test(shortcut)
+      const current = shortcut === config.toggleShortcut
+      const conflicts = shortcut === floralNoteShortcut || (globalShortcut.isRegistered(shortcut) && !current)
+      result = { available: valid && (!conflicts || current), conflictType: !valid ? 'invalid' : current ? 'current' : conflicts ? 'registered' : 'none', message: '' }
+      break
+    }
+    case 'shared_visibility_shortcut_update': {
+      const shortcut = String(input?.shortcut ?? '')
+      const valid = /^[A-Za-z]+\+(?:[A-Za-z]+\+)*[A-Za-z0-9]+$/.test(shortcut)
+      const success = valid && (shortcut === config.toggleShortcut || (shortcut !== floralNoteShortcut && updateGlobalShortcut(shortcut)))
+      result = { success, shortcut: config.toggleShortcut }
+      break
+    }
+    case 'start_shortcut_recording':
+    case 'stop_shortcut_recording':
+      result = undefined; break
+    case 'start_window_drag_with_offset': {
+      const dx = Number(input?.dx)
+      const dy = Number(input?.dy)
+      if (Number.isFinite(dx) && Number.isFinite(dy)) {
+        const targetWindow = BrowserWindow.fromWebContents(event.sender)
+        if (targetWindow && !targetWindow.isDestroyed()) {
+          const bounds = targetWindow.getBounds()
+          targetWindow.setBounds({
+            ...bounds,
+            x: Math.round(bounds.x + dx),
+            y: Math.round(bounds.y + dy),
+          })
+        }
+      }
+      result = undefined; break
+    }
+    case 'take_startup_file': result = null; break
+    case 'update_status': result = toFloralUpdateState(currentUpdateStatus, app.getVersion()); break
+    case 'update_install_prepare_report': {
+      const reports = pendingInstallReports.get(String(input?.requestId ?? ''))
+      const report = reports?.get(event.sender.id)
+      if (report) {
+        reports!.delete(event.sender.id)
+        report(input?.status === 'ready')
+      }
+      result = undefined; break
+    }
+    case 'open_notepad_window': result = openFloralSurface('notepad', input?.noteId ?? undefined, input?.bounds); break
+    case 'open_tile_window': result = openFloralSurface('tile', input?.noteId, input?.bounds); break
+    case 'toggle_tile_window': {
+      const key = `tile:${input?.noteId}`
+      const current = floralSurfaceWindows.get(key)
+      if (current && !current.isDestroyed()) { current.close(); result = false }
+      else { openFloralSurface('tile', input?.noteId, input?.bounds); result = true }
+      break
+    }
+    case 'open_note_in_editor':
+      if (mainWindow) {
+        if (resolveAppMode(config.activeMode) !== 'floral') await mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'floral', 'index.html'))
+        config.activeMode = 'floral'; saveConfig()
+        mainWindow.webContents.send('floral:event:open-note', String(input?.noteId ?? ''))
+        mainWindow.show(); mainWindow.focus()
+      }
+      result = undefined; break
+    case 'recycle_notepad_window': {
+      const window = findFloralSurfaceWindow(floralSurfaceWindows.values(), event.sender)
+      window?.hide(); result = undefined; break
+    }
+    default: throw new Error(`Unsupported Floral command: ${command}`)
+  }
+  if (changedEvent === 'config-changed') {
+    broadcastFloralEvent(floralSurfaceWindows.values(), mainWindow, changedEvent, result)
+  } else if (changedEvent) {
+    mainWindow?.webContents.send(`floral:event:${changedEvent}`, null)
+  }
+  return result
+})
+
+ipcMain.handle('floral:emit', (event, name: string, payload: unknown) => {
+  assertFloralSender(event)
+  if (name !== 'config-changed' && name !== 'notes-changed' && name !== 'open-about-panel') throw new Error('Unsupported Floral event')
+  if (name === 'config-changed') {
+    broadcastFloralEvent(floralSurfaceWindows.values(), mainWindow, name, payload)
+  } else {
+    mainWindow?.webContents.send(`floral:event:${name}`, payload)
+  }
+})
+
+ipcMain.handle('floral:dialog', async (event, kind: string, rawOptions?: any) => {
+  assertFloralSender(event)
+  const options = rawOptions ?? {}
+  if (kind === 'open') {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      properties: [ ...(options.multiple ? ['multiSelections' as const] : []), ...(options.directory ? ['openDirectory' as const] : ['openFile' as const]) ],
+      defaultPath: options.defaultPath,
+      filters: (options.filters ?? []).map((filter: any) => ({ name: filter.name, extensions: filter.extensions })),
+    })
+    return result.canceled ? null : options.multiple ? result.filePaths : result.filePaths[0] ?? null
+  }
+  if (kind === 'save') {
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      defaultPath: options.defaultPath,
+      filters: (options.filters ?? []).map((filter: any) => ({ name: filter.name, extensions: filter.extensions })),
+    })
+    return result.canceled ? null : result.filePath ?? null
+  }
+  if (kind === 'message') {
+    await dialog.showMessageBox(mainWindow!, { message: String(options.message ?? ''), title: String(options.title ?? '花笺'), type: options.kind === 'error' ? 'error' : 'info', buttons: ['确定'] })
+    return
+  }
+  throw new Error('Unsupported Floral dialog')
+})
+
+ipcMain.handle('floral:clipboard', (event, kind: string, text?: string) => {
+  assertFloralSender(event)
+  if (kind === 'read') return clipboard.readText()
+  if (kind === 'write') { clipboard.writeText(String(text ?? '')); return }
+  throw new Error('Unsupported Floral clipboard operation')
+})
+
+ipcMain.handle('floral:open-url', async (event, url: string) => {
+  assertFloralSender(event)
+  const parsed = new URL(url)
+  if (!['https:', 'http:', 'mailto:'].includes(parsed.protocol)) throw new Error('Unsupported URL protocol')
+  await shell.openExternal(url)
+})
+
+ipcMain.handle('floral:asset-url', (event, filePath: string) => {
+  assertFloralSender(event)
+  const root = path.resolve(getFloralStore().root)
+  const resolved = path.resolve(path.isAbsolute(filePath) ? filePath : path.join(root, filePath))
+  if (!resolved.startsWith(root + path.sep)) throw new Error('Invalid Floral asset path')
+  return pathToFileURL(resolved).href
+})
+
+ipcMain.handle('floral:window', (event, method: string, ...args: any[]) => {
+  assertFloralSender(event)
+  const targetWindow = BrowserWindow.fromWebContents(event.sender)
+  if (!targetWindow || targetWindow.isDestroyed()) return undefined
+  const bounds = targetWindow.getBounds()
+  switch (method) {
+    case 'show': targetWindow.show(); return
+    case 'hide': targetWindow.hide(); return
+    case 'close': targetWindow.close(); return
+    case 'minimize': targetWindow.minimize(); return
+    case 'toggleMaximize': targetWindow.isMaximized() ? targetWindow.unmaximize() : targetWindow.maximize(); return
+    case 'restoreDefaultSize':
+      if (targetWindow !== mainWindow) throw new Error('Only the main window can restore its default size')
+      restoreMainWindowDefaultSize(); return
+    case 'isMaximized': return targetWindow.isMaximized()
+    case 'focus': targetWindow.focus(); return
+    case 'setAlwaysOnTop': targetWindow.setAlwaysOnTop(Boolean(args[0])); return
+    case 'startDragging': return
+    case 'outerPosition': return { x: bounds.x, y: bounds.y }
+    case 'innerSize': return { width: bounds.width, height: bounds.height }
+    case 'setPosition': targetWindow.setPosition(Number(args[0]?.x), Number(args[0]?.y)); return
+    case 'setSize': targetWindow.setSize(Number(args[0]?.width), Number(args[0]?.height)); return
+    default: throw new Error('Unsupported Floral window operation')
+  }
+})
 
 ipcMain.handle('db:get-items', (_event, { limit, offset, search, pinnedOnly }: { limit: number; offset: number; search?: string; pinnedOnly?: boolean }) => {
   if (!db) return []
@@ -967,6 +1427,8 @@ ipcMain.handle('db:get-items', (_event, { limit, offset, search, pinnedOnly }: {
   return items
 })
 
+ipcMain.handle('ocr:get-config', () => getOcrConfig())
+
 /** 按 id 取完整 content：图片返回 dataURL（兼容旧 base64 与新落盘路径） */
 ipcMain.handle('db:get-item-content', (_event, id: number) => {
   if (!db) return ''
@@ -987,8 +1449,9 @@ ipcMain.handle('db:get-item-content', (_event, id: number) => {
   if (content.startsWith('texts/')) {
     // 大文本引用：content 是 texts/xxx.txt 相对路径，读取正文返回
     try {
-      const abs = path.resolve(path.join(getDataDir(), content))
-      if (abs.startsWith(path.resolve(getDataDir()) + path.sep) && fs.existsSync(abs)) {
+      const root = getStorageLayoutOrThrow().rootDir
+      const abs = path.resolve(path.join(root, content))
+      if (abs.startsWith(path.resolve(root) + path.sep) && fs.existsSync(abs)) {
         return fs.readFileSync(abs, 'utf-8')
       }
     } catch {}
@@ -1003,7 +1466,7 @@ const TEXT_OFFLOAD_BYTES = 64 * 1024
 function offloadLargeText(type: string, content: string): string {
   if ((type === 'text' || type === 'html') && Buffer.byteLength(content, 'utf8') > TEXT_OFFLOAD_BYTES) {
     try {
-      const dir = path.join(getDataDir(), 'texts')
+      const dir = getStorageLayoutOrThrow().textsDir
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
       const name = `txt_${Date.now()}_${Math.floor(Math.random() * 1e6)}.txt`
       fs.writeFileSync(path.join(dir, name), content, 'utf-8')
@@ -1028,7 +1491,7 @@ function insertItemDbWithRetry(item: { type: string; content: string; preview: s
     }
   }
   try {
-    const qPath = path.join(getDataDir(), 'pending-inserts.json')
+    const qPath = path.join(getStorageLayoutOrThrow().databaseDir, 'pending-inserts.json')
     const arr = fs.existsSync(qPath) ? JSON.parse(fs.readFileSync(qPath, 'utf-8')) : []
     arr.push(item)
     fs.writeFileSync(qPath, JSON.stringify(arr), 'utf-8')
@@ -1398,9 +1861,18 @@ ipcMain.handle('app:get-version', () => app.getVersion())
 // ── 自动更新（electron-updater）──
 
 /** 推送更新状态给渲染层 */
+let currentUpdateStatus: HostUpdateStatus = { status: 'idle' }
 function sendUpdateStatus(status: string, payload?: any): void {
-  mainWindow?.webContents.send('update-status', { status, ...payload })
+  currentUpdateStatus = { status, ...payload }
+  mainWindow?.webContents.send('update-status', currentUpdateStatus)
+  const eventName = status === 'checking' ? 'checking'
+    : status === 'downloaded' ? 'download-finished'
+    : status === 'error' ? 'error'
+    : status === 'available' || status === 'not-available' ? 'checked' : null
+  if (eventName) mainWindow?.webContents.send(`floral:event:update://${eventName}`, toFloralUpdateState(currentUpdateStatus, app.getVersion()))
 }
+
+ipcMain.handle('update:get-status', () => currentUpdateStatus)
 
 function setupAutoUpdater(): void {
   if (!autoUpdater) return
@@ -1441,9 +1913,32 @@ ipcMain.handle('update:check', () => {
   }
 })
 
-ipcMain.handle('update:install', () => {
+async function prepareFloralInstall(): Promise<boolean> {
+  const windows = [mainWindow, ...[...floralSurfaceWindows.entries()]
+    .filter(([key, window]) => key.startsWith('notepad:') && !window.isDestroyed())
+    .map(([, window]) => window)].filter((window): window is BrowserWindow => Boolean(window && !window.isDestroyed()))
+  if (windows.length === 0) return false
+  const requestId = randomUUID()
+  const reports = new Map<number, (ready: boolean) => void>()
+  const responses = windows.map((window) => new Promise<boolean>((resolve) => reports.set(window.webContents.id, resolve)))
+  pendingInstallReports.set(requestId, reports)
+  let timer: NodeJS.Timeout | undefined
+  try {
+    const timeout = new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 15000) })
+    for (const window of windows) window.webContents.send('floral:event:update://prepare-install', { requestId })
+    return await Promise.race([Promise.all(responses).then((values) => values.every(Boolean)), timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+    pendingInstallReports.delete(requestId)
+  }
+}
+
+ipcMain.handle('update:install', async () => {
   if (!autoUpdater) return { success: false, error: '自动更新不可用' }
   try {
+    if (resolveAppMode(config.activeMode) === 'floral' && !(await prepareFloralInstall())) {
+      return { success: false, error: '花笺笔记未能全部保存，安装已取消' }
+    }
     autoUpdater.quitAndInstall()
     return { success: true }
   } catch (err: any) {
@@ -1459,7 +1954,7 @@ ipcMain.handle('data:export-db', async () => {
     saveDb() // 确保导出的是最新数据
     const result = await dialog.showSaveDialog(mainWindow, {
       title: '备份数据库文件',
-      defaultPath: `q-paste-backup-${new Date().toISOString().slice(0, 10)}.db`,
+      defaultPath: path.join(getStorageLayoutOrThrow().exportsDir, `q-paste-backup-${new Date().toISOString().slice(0, 10)}.db`),
       filters: [{ name: 'SQLite Database', extensions: ['db'] }],
     })
     if (result.canceled || !result.filePath) return { success: false, canceled: true }
@@ -1507,7 +2002,7 @@ ipcMain.handle('data:export-json', async () => {
     if (!mainWindow) throw new Error('窗口未就绪')
     const result = await dialog.showSaveDialog(mainWindow, {
       title: '导出 JSON 备份',
-      defaultPath: `q-paste-backup-${new Date().toISOString().slice(0, 10)}.json`,
+      defaultPath: path.join(getStorageLayoutOrThrow().exportsDir, `q-paste-backup-${new Date().toISOString().slice(0, 10)}.json`),
       filters: [{ name: 'JSON', extensions: ['json'] }],
     })
     if (result.canceled || !result.filePath) return { success: false, canceled: true }
@@ -1640,6 +2135,8 @@ ipcMain.handle('clipboard:write-text', (_event, text: string) => {
   selfWriteUntil = Date.now() + 1000
   return true
 })
+
+ipcMain.handle('clipboard:read-text', () => clipboard.readText())
 
 ipcMain.handle('clipboard:write-image', (_event, content: string) => {
   // 兼容两种来源：旧数据 dataURL / 新数据相对路径（images/xxx.png）
@@ -1818,7 +2315,7 @@ async function applyCloudSyncConfig(): Promise<CloudSyncStatus> {
     config.cloudSyncDeviceId = cfg.deviceId
     saveConfig()
   }
-  const statePath = path.join(app.getPath('userData'), 'cloud-sync-state.json')
+  const statePath = getStorageLayoutOrThrow().syncStatePath
   await syncEngine.init(cfg, statePath)
   return syncEngine.status
 }
@@ -1964,8 +2461,7 @@ ipcMain.handle('cloud-sync:sync-now', async (): Promise<{ ok: boolean; error?: s
 // ── 局域网文件传输（手机 ↔ PC，1:1 移植自 Tiez file_transfer）──
 
 function ftSaveDir(): string {
-  const custom = (config.fileTransferPath ?? '').trim()
-  return custom || app.getPath('downloads')
+  return getStorageLayoutOrThrow().transfersDir
 }
 
 function ftLogoBase64(): string {
@@ -2036,7 +2532,8 @@ function queueBatchFileCopy(p: string): void {
 }
 
 const ftServer = new FileTransferServer({
-  getSaveDir: ftSaveDir,
+  getTransfersDir: ftSaveDir,
+  getTempDir: () => getStorageLayoutOrThrow().tempDir,
   getClipboardText: () => clipboard.readText(),
   getColorMode: () => 'system',
   getLogoBase64: ftLogoBase64,
@@ -2128,6 +2625,7 @@ ipcMain.handle('ft:status', (): FtStatus => ftServer.status)
 ipcMain.handle('ft:get-available-ips', () => getAvailableIps())
 ipcMain.handle('ft:set-display-ip', (_event, ip: string) => ftServer.setDisplayIp(ip))
 ipcMain.handle('ft:get-chat-history', () => ftServer.getChatHistory())
+ipcMain.handle('ft:get-online-devices', () => ftServer.getOnlineDevices())
 ipcMain.handle('ft:send-chat-text', (_event, content: string) => {
   ftServer.sendChatText(content)
   return true
@@ -2139,11 +2637,7 @@ ipcMain.handle('ft:send-file', (_event, filePath: string): { success: boolean; e
 })
 ipcMain.handle('ft:get-active-path', () => ftSaveDir())
 ipcMain.handle('ft:choose-save-path', async () => {
-  const result = await dialog.showOpenDialog(mainWindow!, { properties: ['openDirectory'] })
-  if (result.canceled || result.filePaths.length === 0) return { canceled: true }
-  config.fileTransferPath = result.filePaths[0]
-  saveConfig()
-  return { canceled: false, path: config.fileTransferPath }
+  return { canceled: false, path: ftSaveDir() }
 })
 ipcMain.handle('ft:set-setting', (_event, key: 'fileTransferAutoOpen' | 'fileTransferAutoClose' | 'fileTransferAutoCopy' | 'fileTransferBindIp', value: boolean | string) => {
   if (key === 'fileTransferBindIp') {
@@ -2164,7 +2658,7 @@ ipcMain.handle('ft:set-setting', (_event, key: 'fileTransferAutoOpen' | 'fileTra
 ipcMain.handle('ft:get-settings', () => ({
   enabled: config.fileTransferEnabled ?? false,
   port: config.fileTransferPort ?? FILE_TRANSFER_DEFAULT_PORT,
-  path: config.fileTransferPath ?? '',
+  path: ftSaveDir(),
   autoOpen: config.fileTransferAutoOpen ?? false,
   autoClose: config.fileTransferAutoClose ?? false,
   autoCopy: config.fileTransferAutoCopy ?? true,
@@ -2172,7 +2666,7 @@ ipcMain.handle('ft:get-settings', () => ({
 }))
 ipcMain.handle('ft:save-temp-image', (_event, base64Data: string): string => {
   const b64 = base64Data.includes(',') ? base64Data.slice(base64Data.indexOf(',') + 1) : base64Data
-  const dir = app.getPath('downloads')
+  const dir = ftSaveDir()
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   const file = path.join(dir, `paste_${Date.now()}.png`)
   fs.writeFileSync(file, Buffer.from(b64, 'base64'))
@@ -2181,6 +2675,8 @@ ipcMain.handle('ft:save-temp-image', (_event, base64Data: string): string => {
 ipcMain.handle('ft:get-app-logo', () => ftLogoBase64())
 
 // 超大文本用户确认后的入库入口（完整保留 / 截断保留）
+ipcMain.handle('clipboard:get-pending-oversize', () => pendingOversizeCaptures[0] ?? null)
+
 ipcMain.handle('clipboard:insert-oversize', (_event, { content, truncate }: { content: string; truncate: boolean }) => {
   const maxBytes = (config.maxCaptureKb ?? 1024) * 1024
   let text = content
@@ -2194,6 +2690,7 @@ ipcMain.handle('clipboard:insert-oversize', (_event, { content, truncate }: { co
     storageSize: Buffer.byteLength(text, 'utf8'),
     createdAt: nowLocal(),
   })
+  if (inserted && pendingOversizeCaptures[0]?.content === content) pendingOversizeCaptures.shift()
   if (inserted?.id) notifyRendererItem('text', text, preview, inserted.id, 'oversize')
   return inserted
 })
@@ -2282,6 +2779,25 @@ ipcMain.handle('window:maximize', () => {
 
 ipcMain.handle('window:is-maximized', () => mainWindow?.isMaximized() ?? false)
 
+ipcMain.on('window:drag-move', (event, input: { dx?: number; dy?: number }) => {
+  const targetWindow = BrowserWindow.fromWebContents(event.sender)
+  if (!targetWindow || targetWindow.isDestroyed()) return
+  const isMainWindow = targetWindow === mainWindow
+  const isFloralSurface = findFloralSurfaceWindow(floralSurfaceWindows.values(), event.sender) === targetWindow
+  if (!isMainWindow && !isFloralSurface) return
+  const dx = Number(input?.dx)
+  const dy = Number(input?.dy)
+  if (!Number.isFinite(dx) || !Number.isFinite(dy) || Math.abs(dx) > 500 || Math.abs(dy) > 500) return
+  const bounds = targetWindow.getBounds()
+  targetWindow.setPosition(Math.round(bounds.x + dx), Math.round(bounds.y + dy))
+})
+
+ipcMain.handle('window:restore-default-size', (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return false
+  restoreMainWindowDefaultSize()
+  return true
+})
+
 // 无边框透明窗口的自定义关闭按钮：走 close 事件，保留「关闭即隐藏到托盘」
 ipcMain.handle('window:close', () => {
   mainWindow?.close()
@@ -2325,7 +2841,7 @@ ipcMain.handle('db:check', () => {
 })
 
 ipcMain.handle('app:open-logs', async () => {
-  const dir = path.join(app.getPath('userData'), 'logs')
+  const dir = getStorageLayoutOrThrow().logsDir
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   return (await shell.openPath(dir)) === ''
 })
@@ -2360,7 +2876,12 @@ ipcMain.handle('shortcut:update', (_event, newShortcut: string) => {
 })
 
 ipcMain.handle('config:get-path', () => {
-  return config.storagePath || app.getPath('userData')
+  return getStorageLayoutOrThrow().rootDir
+})
+
+ipcMain.handle('storage:get-folders', () => {
+  const layout = getStorageLayoutOrThrow()
+  return { root: layout.rootDir, transfers: layout.transfersDir, exports: layout.exportsDir, logs: layout.logsDir }
 })
 
 ipcMain.handle('dialog:select-directory', async () => {
@@ -2378,48 +2899,31 @@ ipcMain.handle('shell:open-folder', (_event, dirPath: string) => {
 
 ipcMain.handle('storage:change-path', async (_event, newPath: string) => {
   try {
-    // 旧数据目录：当前配置的自定义路径或默认 userData
-    const oldDataDir = getDataDir()
-    const newDataDir = path.resolve(newPath)
-
-    // 选择的目录与当前数据目录相同：无需迁移，直接成功返回
-    if (path.resolve(oldDataDir) === newDataDir) {
+    const oldLayout = getStorageLayoutOrThrow()
+    const newRoot = path.resolve(newPath)
+    if (oldLayout.rootDir === newRoot) {
       return { success: true }
     }
-
-    // 1. 停止监听并落盘当前数据库（先停监听避免迁移期间新增内容，保证拷贝的是最新数据）
     stopClipboardMonitor()
     if (db) saveDb()
-
-    // 2. 拷贝数据库与图片目录到新位置（源 = 旧数据目录，而非写死 userData）
-    //    配置文件始终固定在 userData/q-paste-config.json，无需迁移
-    if (!fs.existsSync(newDataDir)) {
-      fs.mkdirSync(newDataDir, { recursive: true })
+    const target = getStorageLayout(newRoot)
+    ensureStorageLayout(target)
+    if (fs.existsSync(oldLayout.dbPath)) fs.copyFileSync(oldLayout.dbPath, target.dbPath)
+    for (const [from, to] of [
+      [oldLayout.imagesDir, target.imagesDir], [oldLayout.textsDir, target.textsDir], [oldLayout.transfersDir, target.transfersDir],
+      [oldLayout.exportsDir, target.exportsDir], [oldLayout.logsDir, target.logsDir],
+      [oldLayout.syncDir, target.syncDir],
+    ] as const) {
+      if (fs.existsSync(from)) fs.cpSync(from, to, { recursive: true, force: false })
     }
-    const srcDb = path.join(oldDataDir, 'q-paste.db')
-    const dstDb = path.join(newDataDir, 'q-paste.db')
-    if (fs.existsSync(srcDb)) {
-      fs.copyFileSync(srcDb, dstDb)
+    if (fs.existsSync(target.dbPath)) {
+      if (fs.statSync(target.dbPath).size === 0 || !sqlModule) throw new Error('数据库文件迁移失败')
+      const probe = new sqlModule.Database(fs.readFileSync(target.dbPath))
+      try { probe.exec('SELECT COUNT(*) FROM sqlite_master') } finally { probe.close() }
     }
-    // 迁移图片目录（图片落盘后 DB 只存相对路径，图片文件必须跟随迁移）
-    const srcImages = path.join(oldDataDir, 'images')
-    const dstImages = path.join(newDataDir, 'images')
-    if (fs.existsSync(srcImages)) {
-      fs.cpSync(srcImages, dstImages, { recursive: true })
-    }
-
-    // 3. 校验数据库文件确实迁移成功，失败则回滚配置，不重启
-    const hadDb = fs.existsSync(srcDb)
-    const dbMigrated = fs.existsSync(dstDb)
-    if (hadDb && !dbMigrated) {
-      throw new Error('数据库文件迁移失败')
-    }
-
-    // 4. 迁移成功后才更新配置，确保下次启动读取新路径
-    config.storagePath = newDataDir
-    saveConfig()
-
-    // 5. 关闭当前数据库并强制重启
+    config.storagePath = target.rootDir
+    fs.writeFileSync(target.configPath, JSON.stringify(config, null, 2), 'utf8')
+    writeStorageRootPointer(path.join(app.getPath('userData'), 'q-paste-storage-root.json'), target.rootDir)
     if (db) { db.close(); db = null }
     isQuitting = true
     app.relaunch()
@@ -2456,7 +2960,7 @@ if (!gotTheLock) {
 
     // 主进程日志落盘（最早初始化，后续所有报错可追溯）
     try {
-      log.transports.file.resolvePathFn = () => path.join(app.getPath('userData'), 'logs', 'main.log')
+      log.transports.file.resolvePathFn = () => path.join(getStorageLayoutOrThrow().logsDir, 'main.log')
       log.transports.file.maxSize = 5 * 1024 * 1024
       const origError = console.error.bind(console)
       console.error = (...args: unknown[]) => {
@@ -2472,6 +2976,11 @@ if (!gotTheLock) {
 
     // 数据库加载是一切功能的前提：必须先于窗口/监听/任何写操作
     await initDatabase()
+    try {
+      log.transports.file.resolvePathFn = () => path.join(getStorageLayoutOrThrow().logsDir, 'main.log')
+      log.transports.file.maxSize = 5 * 1024 * 1024
+      cleanupStaleTempFiles(getStorageLayoutOrThrow().tempDir)
+    } catch {}
 
     // 应用自启设置（Windows 注册表）
     app.setLoginItemSettings({ openAtLogin: config.autoStart ?? true })
@@ -2480,6 +2989,7 @@ if (!gotTheLock) {
     createWindow()
     createTray()
     registerGlobalShortcut()
+    void getFloralStore().getConfig().then(applyFloralShortcuts).catch((error) => log.warn('Floral shortcuts unavailable:', error))
     startClipboardMonitor()
 
     // ft-file:// → 本地文件流（带 Range 支持，供聊天视图图片/视频预览）

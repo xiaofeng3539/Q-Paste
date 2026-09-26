@@ -5,6 +5,10 @@ import { ShortcutAction } from '../lib/shortcuts'
 import { FileText, Link, Image, Copy, Trash2, Monitor, X, ZoomIn, RotateCcw, Pin, Eye, EyeOff, Shield, Plus, ExternalLink, FolderOpen, FileCode2, QrCode, ScanText, FileDown, Loader2, Check } from 'lucide-react'
 import { QRCodeCanvas } from 'qrcode.react'
 import { tr } from '../i18n'
+import OcrRegionSelector from './OcrRegionSelector'
+import OcrResultPanel from './OcrResultPanel'
+import { canSaveOcrResult, cropImageForOcr, invalidateOcrTask, isValidOcrRegion, mapViewportOcrRegionToImage, normalizeOcrText, ocrActionErrorMessage, ocrErrorMessage, openOcrSelection, shouldApplyOcrResult, type OcrRegion } from '../lib/ocr'
+import { appendRichTextPasteValue, appendTextContextPasteValue, getTextContextCopyValue, insertTextAtSelection, supportsTextContextMenu } from '../lib/text-context-menu'
 
 interface DetailViewProps {
   item: ClipboardItem | null
@@ -76,6 +80,8 @@ export default function DetailView({
   const [isEditing, setIsEditing] = useState(false)
   const [editContent, setEditContent] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const htmlPreviewRef = useRef<HTMLIFrameElement>(null)
+  const [textContextMenu, setTextContextMenu] = useState<{ x: number; y: number; selection: string; editing: boolean; selectionStart: number; selectionEnd: number } | null>(null)
 
   // Alias editing
   const [isEditingAlias, setIsEditingAlias] = useState(false)
@@ -95,6 +101,16 @@ export default function DetailView({
   const [qrOpen, setQrOpen] = useState(false)
   const [ocrBusy, setOcrBusy] = useState(false)
   const [ocrStage, setOcrStage] = useState('')
+  const [ocrSelecting, setOcrSelecting] = useState(false)
+  const [ocrRegion, setOcrRegion] = useState<OcrRegion | null>(null)
+  const [ocrCropRegion, setOcrCropRegion] = useState<OcrRegion | null>(null)
+  const [ocrImageLayout, setOcrImageLayout] = useState<{ naturalWidth: number; naturalHeight: number; displayedWidth: number; displayedHeight: number } | null>(null)
+  const [ocrResult, setOcrResult] = useState('')
+  const [ocrError, setOcrError] = useState<string | null>(null)
+  const [ocrActionError, setOcrActionError] = useState<string | null>(null)
+  const ocrTaskIdRef = useRef(0)
+  const currentItemIdRef = useRef<number | null>(item?.id ?? null)
+  const ocrWorkerRef = useRef<{ terminate: () => Promise<void> } | null>(null)
 
   // 选中图片记录时加载完整图片内容
   useEffect(() => {
@@ -110,11 +126,42 @@ export default function DetailView({
 
   // Reset edit modes when item changes
   useEffect(() => {
+    ocrTaskIdRef.current = invalidateOcrTask(ocrTaskIdRef.current)
+    const activeWorker = ocrWorkerRef.current
+    ocrWorkerRef.current = null
+    if (activeWorker) void activeWorker.terminate().catch(() => {})
+    currentItemIdRef.current = item?.id ?? null
     setIsEditing(false)
     setIsEditingAlias(false)
     setShowTagInput(false)
     setShowSensitive(false)
+    setOcrSelecting(false)
+    setOcrRegion(null)
+    setOcrCropRegion(null)
+    setOcrImageLayout(null)
+    setOcrResult('')
+    setOcrError(null)
+    setOcrActionError(null)
+    setOcrBusy(false)
+    setOcrStage('')
   }, [item?.id])
+
+  useEffect(() => {
+    if (!ocrRegion || !ocrImageLayout) return
+    setOcrCropRegion(mapViewportOcrRegionToImage(
+      ocrRegion,
+      { width: ocrImageLayout.naturalWidth, height: ocrImageLayout.naturalHeight },
+      { width: ocrImageLayout.displayedWidth, height: ocrImageLayout.displayedHeight },
+      scale,
+      pos,
+    ))
+  }, [ocrRegion, ocrImageLayout, scale, pos])
+
+  useEffect(() => () => {
+    const activeWorker = ocrWorkerRef.current
+    ocrWorkerRef.current = null
+    if (activeWorker) void activeWorker.terminate().catch(() => {})
+  }, [])
 
   // Auto-focus textarea when entering edit mode
   useEffect(() => {
@@ -123,6 +170,30 @@ export default function DetailView({
       textareaRef.current.select()
     }
   }, [isEditing])
+
+  useEffect(() => {
+    if (!textContextMenu) return
+    const close = () => setTextContextMenu(null)
+    document.addEventListener('click', close)
+    return () => document.removeEventListener('click', close)
+  }, [textContextMenu])
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== htmlPreviewRef.current?.contentWindow || event.data?.type !== 'qpaste-html-context-menu') return
+      const rect = htmlPreviewRef.current.getBoundingClientRect()
+      setTextContextMenu({
+        x: rect.left + event.data.x,
+        y: rect.top + event.data.y,
+        selection: event.data.selection || '',
+        editing: false,
+        selectionStart: 0,
+        selectionEnd: 0,
+      })
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
 
   // Auto-focus alias input
   useEffect(() => {
@@ -156,6 +227,45 @@ export default function DetailView({
 
   function cancelEdit() {
     setIsEditing(false)
+  }
+
+  async function copyTextContext() {
+    if (!item || !textContextMenu) return
+    const source = textContextMenu.editing ? editContent : item.type === 'html' ? plainText : item.content
+    const content = getTextContextCopyValue(source, textContextMenu.selection)
+    try {
+      await window.electronAPI.writeText(content)
+      onToast?.('已复制文本')
+    } catch {
+      onToast?.('复制失败，请重试')
+    }
+    setTextContextMenu(null)
+  }
+
+  async function pasteTextContext() {
+    if (!item) return
+    try {
+      const pasted = await window.electronAPI.readText()
+      if (!pasted) {
+        onToast?.('剪贴板中没有文本')
+        setTextContextMenu(null)
+        return
+      }
+      if (item.type === 'html') {
+        onUpdate(item.id, appendRichTextPasteValue(item.content, pasted))
+        onToast?.('已粘贴到富文本')
+      } else if (textContextMenu?.editing) {
+        const next = insertTextAtSelection(editContent, pasted, textContextMenu.selectionStart, textContextMenu.selectionEnd)
+        setEditContent(next.value)
+        requestAnimationFrame(() => textareaRef.current?.setSelectionRange(next.cursor, next.cursor))
+      } else {
+        setEditContent(appendTextContextPasteValue(item.content, pasted))
+        setIsEditing(true)
+      }
+    } catch {
+      onToast?.('粘贴失败，请重试')
+    }
+    setTextContextMenu(null)
   }
 
   function startEditAlias() {
@@ -202,14 +312,31 @@ export default function DetailView({
     setLightboxOpen(false)
   }, [])
 
+  const startOcrSelection = () => {
+    const next = openOcrSelection()
+    setOcrSelecting(next.selecting)
+    setScale(1)
+    setPos({ x: 0, y: 0 })
+    setLightboxOpen(next.lightboxOpen)
+    setOcrError(null)
+  }
+
+  const closeOcrSelection = () => {
+    setOcrSelecting(false)
+    closeLightbox()
+  }
+
   useEffect(() => {
     if (!lightboxOpen) return
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') closeLightbox()
+      if (e.key === 'Escape') {
+        if (ocrSelecting) closeOcrSelection()
+        else closeLightbox()
+      }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [lightboxOpen, closeLightbox])
+  }, [lightboxOpen, ocrSelecting, closeLightbox])
 
   function handleWheel(e: React.WheelEvent) {
     e.preventDefault()
@@ -308,7 +435,8 @@ export default function DetailView({
       'img,svg,video,canvas{background:none !important;}',
       '::selection{background:' + t.sel + ' !important;color:' + t.text + ' !important;}',
     ].join('\n')
-    return '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' + css + '</style></head><body>' + content + '</body></html>'
+    const contextMenuScript = '<script nonce="qpaste-context">document.addEventListener("contextmenu",function(e){e.preventDefault();parent.postMessage({type:"qpaste-html-context-menu",x:e.clientX,y:e.clientY,selection:getSelection()?.toString()||""},"*")})</script>'
+    return '<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data: file:; script-src \'nonce-qpaste-context\'"><style>' + css + '</style></head><body>' + content + contextMenuScript + '</body></html>'
   }
 
   const plainText = isImage
@@ -317,56 +445,99 @@ export default function DetailView({
       ? displayContent.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
       : displayContent.trim()
   const filePaths = isFiles ? parseFilePaths(item.content) : []
-  /** 图片 OCR 文字提取（tesseract.js 按需加载，中文+英文） */
-  /** OCR 引擎按需加载：首次使用时从 CDN 拉取并缓存（不随安装包分发，减小体积） */
-  async function loadTesseractEngine(): Promise<any> {
-    const w = window as any
-    if (w.Tesseract) return w.Tesseract
-    await new Promise<void>((resolve, reject) => {
-      const sc = document.createElement('script')
-      sc.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'
-      sc.onload = () => resolve()
-      sc.onerror = () => reject(new Error('OCR 引擎加载失败（首次使用需联网）'))
-      document.head.appendChild(sc)
-    })
-    if (!w.Tesseract) throw new Error('OCR 引擎加载失败')
-    return w.Tesseract
-  }
-
   const runOcr = async () => {
     if (ocrBusy) return
     const src = imageContent || item.content
-    if (!src) return
+    if (!src || !item || !ocrCropRegion || !isValidOcrRegion(ocrCropRegion)) {
+      setOcrError('请将选区移动到图片文字上后重试')
+      return
+    }
+    const taskId = ++ocrTaskIdRef.current
+    const itemId = item.id
+    let worker: any = null
     setOcrBusy(true)
+    setOcrError(null)
+    setOcrActionError(null)
     try {
-      setOcrStage(tr('detail.ocrLoading'))
-      const Tesseract = await loadTesseractEngine()
-      const worker = await Tesseract.createWorker(['chi_sim', 'eng'], 1, {
-        logger: (m: { status?: string; progress?: number }) => {
-          if (m.status === 'loading tesseract core') setOcrStage(tr('detail.ocrLoading'))
-          else if ((m.progress ?? 0) > 0) setOcrStage(`${Math.round((m.progress ?? 0) * 100)}%`)
+      setOcrStage('正在准备本地 OCR…')
+      const [Tesseract, config] = await Promise.all([
+        import('tesseract.js'),
+        window.electronAPI.getOcrConfig(),
+      ])
+      const cropped = await cropImageForOcr(src, ocrCropRegion)
+      worker = await Tesseract.createWorker(['chi_sim', 'eng'], 1, {
+        langPath: config.langPath,
+        workerPath: config.workerPath,
+        corePath: config.corePath,
+        cacheMethod: 'none',
+        logger: (message: { progress?: number }) => {
+          if (shouldApplyOcrResult({ startedItemId: itemId, currentItemId: currentItemIdRef.current ?? -1, startedTaskId: taskId, currentTaskId: ocrTaskIdRef.current })) {
+            setOcrStage((message.progress ?? 0) > 0 ? `正在识别 ${Math.round((message.progress ?? 0) * 100)}%` : '正在初始化 OCR…')
+          }
         },
       })
-      const { data } = await worker.recognize(src)
-      await worker.terminate()
-      const text = (data.text ?? '').replace(/\n{3,}/g, '\n\n').trim()
+      ocrWorkerRef.current = worker
+      const { data } = await worker.recognize(cropped)
+      if (ocrWorkerRef.current === worker) {
+        ocrWorkerRef.current = null
+        await worker.terminate()
+      }
+      worker = null
+      const text = normalizeOcrText(data.text ?? '')
+      if (!shouldApplyOcrResult({ startedItemId: itemId, currentItemId: currentItemIdRef.current ?? -1, startedTaskId: taskId, currentTaskId: ocrTaskIdRef.current })) return
       if (!text) {
-        onToast?.(tr('detail.ocrEmpty'))
+        setOcrError('未识别到文字，请调整选区后重试')
         return
       }
-      const res = await window.electronAPI.insertItem({
-        type: 'text', content: text,
-        preview: [...text].slice(0, 100).join('') + ([...text].length > 100 ? '...' : ''),
-        charCount: text.length, storageSize: new TextEncoder().encode(text).length,
+      setOcrResult(text)
+    } catch (err: any) {
+      if (shouldApplyOcrResult({ startedItemId: itemId, currentItemId: currentItemIdRef.current ?? -1, startedTaskId: taskId, currentTaskId: ocrTaskIdRef.current })) {
+        setOcrError(ocrErrorMessage(err))
+      }
+    } finally {
+      if (worker && ocrWorkerRef.current === worker) {
+        ocrWorkerRef.current = null
+        await worker.terminate().catch(() => {})
+      }
+      if (shouldApplyOcrResult({ startedItemId: itemId, currentItemId: currentItemIdRef.current ?? -1, startedTaskId: taskId, currentTaskId: ocrTaskIdRef.current })) {
+        setOcrBusy(false)
+        setOcrStage('')
+      }
+    }
+  }
+
+  const copyOcrResult = async () => {
+    if (!canSaveOcrResult(ocrResult)) return
+    try {
+      await window.electronAPI.writeText(ocrResult)
+      setOcrActionError(null)
+      onToast?.('已复制 OCR 结果')
+    } catch {
+      setOcrActionError(ocrActionErrorMessage('copy'))
+    }
+  }
+
+  const saveOcrResult = async () => {
+    if (!canSaveOcrResult(ocrResult)) {
+      setOcrError('未识别到文字，请调整选区后重试')
+      return
+    }
+    const content = normalizeOcrText(ocrResult)
+    try {
+      await window.electronAPI.insertItem({
+        type: 'text',
+        content,
+        preview: [...content].slice(0, 100).join('') + ([...content].length > 100 ? '...' : ''),
+        charCount: content.length,
+        storageSize: new TextEncoder().encode(content).length,
         createdAt: new Date().toLocaleString('sv-SE').replace('T', ' ').slice(0, 19),
       })
-      onToast?.(tr('detail.ocrDone'))
-      void res
-    } catch (err: any) {
-      onToast?.(tr('detail.ocrFailed', { error: err?.message ?? String(err) }))
-    } finally {
-      setOcrBusy(false)
-      setOcrStage('')
+      setOcrActionError(null)
+      setOcrResult('')
+      setOcrSelecting(false)
+      onToast?.('OCR 结果已保存到历史记录')
+    } catch {
+      setOcrActionError(ocrActionErrorMessage('save'))
     }
   }
 
@@ -490,6 +661,19 @@ export default function DetailView({
 
       {/* Main content */}
       <div className={`flex-1 overflow-auto ${density === 'compact' ? 'p-3' : 'p-5'}`}>
+        {isImage && (ocrResult || ocrError) && (
+          <OcrResultPanel
+            value={ocrResult}
+            busy={ocrBusy}
+            error={ocrError}
+            notice={ocrActionError}
+            onChange={(value) => { setOcrResult(value); setOcrActionError(null) }}
+            onCopy={() => { void copyOcrResult() }}
+            onSave={saveOcrResult}
+            onRetry={() => { setOcrError(null); void runOcr() }}
+            onClose={() => { setOcrResult(''); setOcrError(null); setOcrActionError(null) }}
+          />
+        )}
         {isImage ? (
           imageContent || item.content ? (
             <div className="flex items-center justify-center min-h-full">
@@ -528,8 +712,9 @@ export default function DetailView({
               </div>
             ) : (
               <iframe
+                ref={htmlPreviewRef}
                 title="rich-text-preview"
-                sandbox=""
+                sandbox="allow-scripts"
                 srcDoc={buildHtmlPreviewDoc(displayContent)}
                 className="w-full h-full bg-white dark:bg-zinc-900"
               />
@@ -585,6 +770,17 @@ export default function DetailView({
               if (e.key === 'Escape') { e.preventDefault(); cancelEdit() }
               if (e.key === 's' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveEdit() }
             }}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setTextContextMenu({
+                x: e.clientX,
+                y: e.clientY,
+                selection: e.currentTarget.value.slice(e.currentTarget.selectionStart, e.currentTarget.selectionEnd),
+                editing: true,
+                selectionStart: e.currentTarget.selectionStart,
+                selectionEnd: e.currentTarget.selectionEnd,
+              })
+            }}
             className={`w-full h-full min-h-[200px] p-3 bg-zinc-50 dark:bg-zinc-900 border border-blue-500/50 rounded-lg text-sm text-zinc-800 dark:text-zinc-200 font-normal antialiased leading-7 resize-none outline-none focus:border-blue-500 transition-colors ${monoClass}`}
             spellCheck={false}
           />
@@ -607,6 +803,11 @@ export default function DetailView({
             )}
             <pre
               onDoubleClick={enterEditMode}
+              onContextMenu={(e) => {
+                if (!supportsTextContextMenu(item.type)) return
+                e.preventDefault()
+                setTextContextMenu({ x: e.clientX, y: e.clientY, selection: window.getSelection()?.toString() ?? '', editing: false, selectionStart: 0, selectionEnd: 0 })
+              }}
               className={`text-sm text-zinc-800 dark:text-zinc-200 font-normal antialiased whitespace-pre-wrap break-words leading-7 select-text cursor-text hover:bg-zinc-50 dark:hover:bg-zinc-900/50 rounded-lg p-1 -m-1 transition-colors ${monoClass}`}
               title={tr('detail.dblClickEdit')}
             >
@@ -616,8 +817,20 @@ export default function DetailView({
         )}
       </div>
 
+      {textContextMenu && supportsTextContextMenu(item.type) && (
+        <div
+          className="fixed z-50 min-w-28 py-1 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 shadow-lg text-xs text-zinc-700 dark:text-zinc-200"
+          style={{ top: textContextMenu.y, left: textContextMenu.x }}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button onClick={() => { void copyTextContext() }} className="w-full px-3 py-2 text-left hover:bg-zinc-100 dark:hover:bg-zinc-700">复制</button>
+          <button onClick={() => { void pasteTextContext() }} className="w-full px-3 py-2 text-left hover:bg-zinc-100 dark:hover:bg-zinc-700">粘贴</button>
+        </div>
+      )}
+
       {/* Bottom action bar */}
-      <div className="flex-shrink-0 h-12 flex items-center justify-end gap-2 px-4">
+      <div className="flex-shrink-0 min-h-12 flex flex-wrap items-center justify-end gap-2 px-4 py-2 [&>button]:shrink-0 [&>button]:whitespace-nowrap">
         {item.type === 'url' && (
           <button
             onClick={() => onOpenUrl(item.content)}
@@ -641,13 +854,14 @@ export default function DetailView({
 
         {isImage && (
           <button
-            onClick={() => void runOcr()}
+            onClick={startOcrSelection}
             disabled={ocrBusy}
             className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
             title={tr('detail.ocr')}
           >
             {ocrBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanText className="w-3.5 h-3.5" />}
             {ocrBusy && ocrStage && <span className="text-[10px] text-zinc-400 dark:text-zinc-500">{ocrStage}</span>}
+            {!ocrBusy && <span>{tr('detail.ocr')}</span>}
           </button>
         )}
 
@@ -731,31 +945,50 @@ export default function DetailView({
           className="fixed inset-0 z-50 bg-black/90 backdrop-blur-sm overflow-hidden"
           onWheel={handleWheel}
           onMouseDown={(e) => {
-            if (e.target === e.currentTarget) closeLightbox()
+            if (e.target === e.currentTarget) {
+              if (ocrSelecting) closeOcrSelection()
+              else closeLightbox()
+            }
           }}
         >
           <div className="absolute top-0 left-0 right-0 h-12 flex items-center justify-between px-4 z-10 pointer-events-none">
             <div className="flex items-center gap-1.5 text-xs text-zinc-400 pointer-events-auto">
-              <ZoomIn className="w-3.5 h-3.5" />
-              <span>{tr('detail.zoomHint')}</span>
-              <span className="text-zinc-600">·</span>
-              <span>{tr('detail.dragHint')}</span>
-              <span className="text-zinc-600">·</span>
-              <span>{tr('detail.dblClickReset')}</span>
-              <span className="text-zinc-600">·</span>
-              <span>{Math.round(scale * 100)}%</span>
+              {ocrSelecting ? (
+                <span>滚轮缩放 · 拖动图片或选区后识别</span>
+              ) : (
+                <>
+                  <ZoomIn className="w-3.5 h-3.5" />
+                  <span>{tr('detail.zoomHint')}</span>
+                  <span className="text-zinc-600">·</span>
+                  <span>{tr('detail.dragHint')}</span>
+                  <span className="text-zinc-600">·</span>
+                  <span>{tr('detail.dblClickReset')}</span>
+                  <span className="text-zinc-600">·</span>
+                  <span>{Math.round(scale * 100)}%</span>
+                </>
+              )}
             </div>
 
             <div className="flex items-center gap-2 pointer-events-auto">
+              {ocrSelecting ? (
+                <button
+                  onClick={() => { closeOcrSelection(); void runOcr() }}
+                  disabled={ocrBusy || !ocrCropRegion}
+                  className="h-7 px-3 rounded-full bg-blue-500 hover:bg-blue-400 disabled:opacity-50 text-xs text-white transition-colors"
+                >
+                  识别选区
+                </button>
+              ) : (
+                <button
+                  onClick={() => { setScale(1); setPos({ x: 0, y: 0 }) }}
+                  className="w-7 h-7 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-zinc-400 hover:text-zinc-200 transition-colors"
+                  title="重置"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                </button>
+              )}
               <button
-                onClick={() => { setScale(1); setPos({ x: 0, y: 0 }) }}
-                className="w-7 h-7 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-zinc-400 hover:text-zinc-200 transition-colors"
-                title="重置"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-              </button>
-              <button
-                onClick={closeLightbox}
+                onClick={ocrSelecting ? closeOcrSelection : closeLightbox}
                 className="w-7 h-7 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-zinc-400 hover:text-zinc-200 transition-colors"
               >
                 <X className="w-4 h-4" />
@@ -763,31 +996,47 @@ export default function DetailView({
             </div>
           </div>
 
-          <img
-            src={imageContent || item.content}
-            alt={item.preview}
-            onMouseDown={(e) => {
-              e.stopPropagation()
-              handleMouseDown(e)
-            }}
-            onDoubleClick={(e) => {
-              e.stopPropagation()
-              handleImageDoubleClick()
-            }}
-            draggable={false}
-            className="absolute rounded-lg shadow-2xl select-none"
-            style={{
-              imageRendering: 'auto',
-              maxWidth: '90vw',
-              maxHeight: '90vh',
-              objectFit: 'contain',
-              top: '50%',
-              left: '50%',
-              transform: `translate(calc(-50% + ${pos.x}px), calc(-50% + ${pos.y}px)) scale(${scale})`,
-              transformOrigin: 'center center',
-              cursor: isDragging ? 'grabbing' : scale > 1 ? 'grab' : 'zoom-in',
-            }}
-          />
+          {ocrSelecting ? (
+            <div className="absolute inset-x-0 top-12 bottom-4 flex items-center justify-center px-4">
+              <OcrRegionSelector
+                src={imageContent || item.content}
+                alt={item.preview}
+                region={ocrRegion}
+                onChange={setOcrRegion}
+                disabled={ocrBusy}
+                imageClassName="max-w-[90vw] max-h-[calc(100vh-4rem)]"
+                imageTransform={`translate(${pos.x}px, ${pos.y}px) scale(${scale})`}
+                onImageMouseDown={handleMouseDown}
+                onImageLayout={setOcrImageLayout}
+              />
+            </div>
+          ) : (
+            <img
+              src={imageContent || item.content}
+              alt={item.preview}
+              onMouseDown={(e) => {
+                e.stopPropagation()
+                handleMouseDown(e)
+              }}
+              onDoubleClick={(e) => {
+                e.stopPropagation()
+                handleImageDoubleClick()
+              }}
+              draggable={false}
+              className="absolute rounded-lg shadow-2xl select-none"
+              style={{
+                imageRendering: 'auto',
+                maxWidth: '90vw',
+                maxHeight: '90vh',
+                objectFit: 'contain',
+                top: '50%',
+                left: '50%',
+                transform: `translate(calc(-50% + ${pos.x}px), calc(-50% + ${pos.y}px)) scale(${scale})`,
+                transformOrigin: 'center center',
+                cursor: isDragging ? 'grabbing' : scale > 1 ? 'grab' : 'zoom-in',
+              }}
+            />
+          )}
         </div>
       )}
       {/* ── 二维码分享弹窗 ── */}

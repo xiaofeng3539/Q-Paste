@@ -6,7 +6,7 @@ import SectionHeader from './SectionHeader'
 import { ShortcutAction, SHORTCUT_ACTIONS, DEFAULT_SHORTCUTS } from '../lib/shortcuts'
 import { useDialog } from './DialogProvider'
 import type { CloudSyncConfig, CloudSyncStatus } from '../main/sync/types'
-import type { FtStatus, FtSettings } from '../types'
+import type { FtDeviceInfo, FtStatus, FtSettings } from '../types'
 import FileTransferChat from './FileTransferChat'
 import { QRCodeCanvas } from 'qrcode.react'
 
@@ -104,11 +104,13 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
   }
 
   const [storagePath, setStoragePath] = useState('')
+  const [storageFolders, setStorageFolders] = useState<{ root: string; transfers: string; exports: string; logs: string } | null>(null)
   useEffect(() => {
     if (typeof window !== 'undefined' && window.electronAPI) {
       window.electronAPI.getConfigPath().then((p) => {
         if (p) setStoragePath(p)
       })
+      window.electronAPI.getStorageFolders().then(setStorageFolders).catch(() => {})
     } else {
       setStoragePath('C:\\Users\\Admin\\AppData\\Roaming\\Q-Paste\\Data')
     }
@@ -175,6 +177,7 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
   // ── 局域网文件传输（手机 ↔ PC，对齐 Tiez 交互）──
   const [ftEnabled, setFtEnabled] = useState(false)
   const [ftStatus, setFtStatus] = useState<FtStatus | null>(null)
+  const [ftOnlineDevices, setFtOnlineDevices] = useState<FtDeviceInfo[]>([])
   const [ftSettings, setFtSettings] = useState<FtSettings>({ enabled: false, port: 18888, path: '', autoOpen: false, autoClose: false, autoCopy: true, bindIp: '' })
   const [ftPortDraft, setFtPortDraft] = useState('18888')
   const [availableIps, setAvailableIps] = useState<string[]>([])
@@ -196,12 +199,17 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
       setAvailableIps(ips)
       setLocalIp((cur) => cur || ips[0] || '')
     }).catch(() => {})
+    window.electronAPI.ftGetOnlineDevices().then(setFtOnlineDevices).catch(() => {})
     const offStatus = window.electronAPI.onFtStatusChanged((st) => {
       setFtStatus(st)
       setFtEnabled(st.enabled)
       if (st.ip) setLocalIp(st.ip)
     })
-    return offStatus
+    const offDevices = window.electronAPI.onFtDevicesUpdated(setFtOnlineDevices)
+    return () => {
+      offStatus()
+      offDevices()
+    }
   }, [])
 
   async function handleFtToggle(v: boolean): Promise<void> {
@@ -869,15 +877,21 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
 
                     {/* 二维码 */}
                     {localIp && (ftStatus?.port ?? 0) > 0 && (
-                      <div className="flex items-center gap-5 py-5 px-5 border-b border-zinc-200 dark:border-zinc-800">
-                        <div className="rounded-lg bg-white p-2 border border-zinc-200 dark:border-zinc-700 flex-shrink-0">
-                          <QRCodeCanvas value={`http://${localIp}:${ftStatus?.port}`} size={90} />
+                      <div className="flex items-center justify-between gap-4 py-5 px-5 border-b border-zinc-200 dark:border-zinc-800">
+                        <div className="flex items-center gap-5 min-w-0">
+                          <div className="rounded-lg bg-white p-2 border border-zinc-200 dark:border-zinc-700 flex-shrink-0">
+                            <QRCodeCanvas value={`http://${localIp}:${ftStatus?.port}`} size={90} />
+                          </div>
+                          <div className="flex flex-col gap-1 font-mono text-[11px] min-w-0">
+                            <span className="text-[13px] font-bold text-zinc-800 dark:text-zinc-200">{tr('ft.scanToSend')}</span>
+                            <span className="text-zinc-400 dark:text-zinc-500">STATUS: <span className="text-emerald-600 dark:text-emerald-500 font-bold">ONLINE</span></span>
+                            <span className="text-zinc-400 dark:text-zinc-500 truncate">HOST: <span className="text-zinc-700 dark:text-zinc-300">{localIp}</span></span>
+                            <span className="text-zinc-400 dark:text-zinc-500">PORT: <span className="text-zinc-700 dark:text-zinc-300">{ftStatus?.port}</span></span>
+                          </div>
                         </div>
-                        <div className="flex flex-col gap-1 font-mono text-[11px]">
-                          <span className="text-[13px] font-bold text-zinc-800 dark:text-zinc-200">{tr('ft.scanToSend')}</span>
-                          <span className="text-zinc-400 dark:text-zinc-500">STATUS: <span className="text-emerald-600 dark:text-emerald-500 font-bold">ONLINE</span></span>
-                          <span className="text-zinc-400 dark:text-zinc-500">HOST: <span className="text-zinc-700 dark:text-zinc-300">{localIp}</span></span>
-                          <span className="text-zinc-400 dark:text-zinc-500">PORT: <span className="text-zinc-700 dark:text-zinc-300">{ftStatus?.port}</span></span>
+                        <div className="flex-shrink-0 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white/70 dark:bg-zinc-900/50 px-4 py-3 text-right">
+                          <div className="text-[11px] text-zinc-400 dark:text-zinc-500">设备连接</div>
+                          <div className="mt-1 text-sm font-medium text-[var(--accent)]">{ftOnlineDevices.length} {tr('ft.devicesConnected')}</div>
                         </div>
                       </div>
                     )}
@@ -886,16 +900,6 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                     <div className="py-4 px-5">
                       <div className="flex items-center justify-between mb-2">
                         <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('ft.savePath')}</span>
-                        <button
-                          className="h-7 px-3 rounded-md text-xs bg-zinc-800 dark:bg-zinc-700 hover:bg-zinc-700 dark:hover:bg-zinc-600 text-zinc-200 transition-colors font-medium"
-                          onClick={() => {
-                            void window.electronAPI.ftChooseSavePath().then((r) => {
-                              if (!r.canceled && r.path) setFtSettings((s) => ({ ...s, path: r.path as string }))
-                            })
-                          }}
-                        >
-                          {tr('ft.choose')}
-                        </button>
                       </div>
                       <div
                         className="text-[11px] font-mono text-zinc-500 dark:text-zinc-400 cursor-pointer truncate"
@@ -1358,8 +1362,25 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
                   </button>
                 </div>
                 <p className="text-[11px] text-amber-600/80 dark:text-amber-500/70 mt-2">
-                  {tr('storage.pathWarning')}
+                  {tr('storage.pathWarning')} 更换时会复制所有数据，旧目录不会自动删除。
                 </p>
+                <div className="flex flex-wrap gap-2 mt-3">
+                  {[
+                    ['打开传输文件夹', storageFolders?.transfers],
+                    ['打开导出文件夹', storageFolders?.exports],
+                    ['打开日志文件夹', storageFolders?.logs],
+                  ].map(([label, folder]) => (
+                    <button
+                      key={label}
+                      type="button"
+                      disabled={!folder}
+                      onClick={() => folder && void window.electronAPI.openFolder(folder)}
+                      className="h-7 px-3 rounded-md border border-zinc-200 dark:border-zinc-700 text-xs text-zinc-600 dark:text-zinc-400 disabled:opacity-50"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {/* ── Retention rules ── */}

@@ -6,9 +6,8 @@
 import { useState, useEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { Plus, Maximize2, Minimize2, ExternalLink, Folder, RotateCcw, Image as ImageIcon, Link as LinkIcon, Clipboard, Video, Send } from 'lucide-react'
-import { QRCodeCanvas } from 'qrcode.react'
 import { tr } from '../i18n'
-import type { FtDeviceInfo, FtMessage, FtStatus } from '../types'
+import type { FtMessage, FtStatus } from '../types'
 
 interface FileTransferChatProps {
   status: FtStatus | null
@@ -49,7 +48,6 @@ export default function FileTransferChat({ status, localIp }: FileTransferChatPr
   const [messages, setMessages] = useState<FtMessage[]>([])
   const [input, setInput] = useState('')
   const [appLogo, setAppLogo] = useState('')
-  const [onlineDevices, setOnlineDevices] = useState<FtDeviceInfo[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const [showFullScreen, setShowFullScreen] = useState(false)
   const [showExpandBtn, setShowExpandBtn] = useState(false)
@@ -68,10 +66,8 @@ export default function FileTransferChat({ status, localIp }: FileTransferChatPr
   useEffect(() => {
     fetchMessages()
     window.electronAPI?.ftGetAppLogo().then(setAppLogo).catch(() => {})
-    const offDevices = window.electronAPI?.onFtDevicesUpdated(setOnlineDevices)
     const offMsg = window.electronAPI?.onFtNewMessage(fetchMessages)
     return () => {
-      offDevices?.()
       offMsg?.()
     }
   }, [])
@@ -263,22 +259,6 @@ export default function FileTransferChat({ status, localIp }: FileTransferChatPr
         <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-zinc-900/60 dark:bg-black/60 backdrop-blur-sm pointer-events-none">
           <Folder size={56} className="text-white" strokeWidth={1.5} />
           <div className="text-xl font-bold text-white">Drop to Send</div>
-        </div>
-      )}
-
-      {localIp && actualPort && (
-        <div className="flex items-center gap-4 px-4 py-3 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
-          <div className="rounded-md bg-white p-1 border border-zinc-200 dark:border-zinc-700">
-            <QRCodeCanvas value={`http://${localIp}:${actualPort}`} size={64} />
-          </div>
-          <div className="flex flex-col gap-0.5 font-mono text-[11px]">
-            <div><span className="opacity-60">LOCAL IP: </span><span>{localIp}</span></div>
-            <div><span className="opacity-60">PORT: </span><span>{actualPort}</span></div>
-            <div>
-              <span className="opacity-60">ONLINE: </span>
-              <span style={{ color: 'var(--accent)' }}>{onlineDevices.length} {tr('ft.devicesConnected')}</span>
-            </div>
-          </div>
         </div>
       )}
 

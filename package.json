@@ -1,13 +1,15 @@
 {
   "name": "q-paste",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "description": "Q-Paste - 跨平台剪贴板管理工具",
   "license": "MIT",
   "main": "dist-electron/main.js",
   "scripts": {
+    "predev": "pnpm run build:floral",
     "dev": "vite",
-    "build": "tsc && vite build && electron-builder",
-    "build:win": "tsc && vite build && electron-builder --win",
+    "build:floral": "tsc --noEmit -p vendor/floral-notepaper/tsconfig.json && vite build --config vendor/floral-notepaper/vite.config.ts",
+    "build": "tsc && vite build && tsc --noEmit -p vendor/floral-notepaper/tsconfig.json && vite build --config vendor/floral-notepaper/vite.config.ts && electron-builder",
+    "build:win": "tsc && vite build && tsc --noEmit -p vendor/floral-notepaper/tsconfig.json && vite build --config vendor/floral-notepaper/vite.config.ts && electron-builder --win",
     "preview": "vite preview",
     "test": "vitest run"
   },
@@ -22,7 +24,8 @@
     "react-dom": "^19.0.0",
     "sortablejs": "^1.15.7",
     "sql.js": "^1.12.0",
-    "tailwind-merge": "^2.6.0"
+    "tailwind-merge": "^2.6.0",
+    "tesseract.js": "5.1.1"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
@@ -43,7 +46,7 @@
   "build": {
     "appId": "com.qpaste.app",
     "productName": "Q-Paste",
-    "artifactName": "${productName} Setup v${version}.${ext}",
+    "artifactName": "${productName}_v${version}_build034_Setup.${ext}",
     "directories": {
       "output": "release"
     },
@@ -70,6 +73,30 @@
       {
         "from": "build/tray-icon.ico",
         "to": "tray-icon.ico"
+      },
+      {
+        "from": "build/ocr",
+        "to": "ocr"
+      },
+      {
+        "from": "vendor/floral-notepaper/LICENSE",
+        "to": "licenses/floral-notepaper-LICENSE"
+      },
+      {
+        "from": "vendor/floral-notepaper/THIRD_PARTY_NOTICES.md",
+        "to": "licenses/floral-notepaper-THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "vendor/floral-notepaper/UPSTREAM.md",
+        "to": "licenses/floral-notepaper-UPSTREAM.md"
+      },
+      {
+        "from": "vendor/floral-notepaper/src/assets/fonts/LICENSE_Fonts",
+        "to": "licenses/HarmonyOS-Sans-License"
+      },
+      {
+        "from": "vendor/floral-notepaper/src/assets/fonts/LICENSE_SourceHanSerif",
+        "to": "licenses/Source-Han-Serif-License"
       }
     ],
     "win": {

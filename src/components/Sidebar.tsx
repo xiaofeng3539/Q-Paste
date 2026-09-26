@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import Sortable from 'sortablejs'
 import { ClipboardItem, ItemType } from '../types'
 import { cn, formatGroupLabel, formatRelativeTime } from '../lib/utils'
 import { highlightSegments } from '../lib/search'
+import { getAutoScrollDelta } from '../lib/drag-auto-scroll'
 import { FileText, Link, Image, Search, X, Clock, Star, Pin, FileCode2, FolderOpen } from 'lucide-react'
 import { tr } from '../i18n'
 
@@ -35,6 +37,7 @@ interface SidebarProps {
   onTypeFilterChange: (t: ItemType | 'all') => void
   selectedIds?: ReadonlySet<number>
   onToggleSelect?: (id: number) => void
+  onRangeSelect?: (id: number, additive: boolean) => void
   onSelectAll?: () => void
   onClearSelection?: () => void
   onBatchCopy?: () => void
@@ -110,6 +113,7 @@ export default function Sidebar({
   onTypeFilterChange,
   selectedIds,
   onToggleSelect,
+  onRangeSelect,
   onSelectAll,
   onClearSelection,
   onBatchCopy,
@@ -127,26 +131,137 @@ export default function Sidebar({
       ]),
     [groups],
   )
-  const itemPy = `py-1.5 transition-all ${density === 'compact' ? 'py-0.5' : 'py-3'}`
+  const itemPy = `py-1.5 ${density === 'compact' ? 'py-0.5' : 'py-3'}`
   const isVault = activeTab === 'vault'
   const [batchTagDraft, setBatchTagDraft] = useState('')
   // 拖拽仅在未搜索、未标签过滤时启用（此时 items 即完整列表，可安全重排），历史/金库 tab 均可拖
   const draggable = !searchQuery.trim() && selectedTag === null
+  const hasRows = flatRows.length > 0
 
   // ── SortableJS：历史列表整表拖拽排序 ──
   const listRef = useRef<HTMLDivElement | null>(null)
+  const handledSelectionPointerRef = useRef<number | null>(null)
   const itemsRef = useRef(items)
   itemsRef.current = items
 
+  const handleItemPointerDown = (id: number, event: ReactPointerEvent<HTMLButtonElement>) => {
+    handledSelectionPointerRef.current = null
+    if (event.button !== 0 || !(event.shiftKey || event.ctrlKey || event.metaKey)) return
+    event.preventDefault()
+    event.stopPropagation()
+    handledSelectionPointerRef.current = id
+    if (event.shiftKey) onRangeSelect?.(id, event.ctrlKey || event.metaKey)
+    else onToggleSelect?.(id)
+  }
+
+  const handleItemClick = (id: number, event: ReactMouseEvent<HTMLButtonElement>) => {
+    if (handledSelectionPointerRef.current === id) {
+      handledSelectionPointerRef.current = null
+      return
+    }
+    handledSelectionPointerRef.current = null
+    if (event.shiftKey) onRangeSelect?.(id, event.ctrlKey || event.metaKey)
+    else if (event.ctrlKey || event.metaKey) onToggleSelect?.(id)
+    else {
+      if (selectedIds && selectedIds.size > 0) onClearSelection?.()
+      onSelect(id)
+    }
+  }
+
   useEffect(() => {
-    if (!draggable || !listRef.current) return
-    const sortable = new Sortable(listRef.current, {
+    if (!draggable || !hasRows || !listRef.current) return
+    let isDragging = false
+    let scrollDelta = 0
+    let scrollFrame: number | null = null
+    let dragOverFrame: number | null = null
+    let sortable: Sortable | null = null
+
+    const updateDropTarget = () => {
+      if (dragOverFrame !== null) return
+      dragOverFrame = requestAnimationFrame(() => {
+        dragOverFrame = null
+        if (!isDragging || !sortable) return
+        // SortableJS fallback 默认每 50ms 才命中一次；改为随鼠标帧更新，拖放判定更跟手。
+        ;(sortable as Sortable & { _emulateDragOver?: () => void })._emulateDragOver?.()
+      })
+    }
+
+    const stopAutoScroll = () => {
+      isDragging = false
+      scrollDelta = 0
+      document.removeEventListener('pointermove', onDocumentDragMove, true)
+      document.removeEventListener('mousemove', onDocumentDragMove, true)
+      document.removeEventListener('wheel', onDragWheel, true)
+      if (scrollFrame !== null) cancelAnimationFrame(scrollFrame)
+      scrollFrame = null
+      if (dragOverFrame !== null) cancelAnimationFrame(dragOverFrame)
+      dragOverFrame = null
+    }
+
+    const scrollWhileDragging = () => {
+      const container = listRef.current
+      if (!isDragging || !container || scrollDelta === 0) {
+        scrollFrame = null
+        return
+      }
+      container.scrollTop += scrollDelta
+      scrollFrame = requestAnimationFrame(scrollWhileDragging)
+    }
+
+    const onDocumentDragMove = (event: MouseEvent) => {
+      const container = listRef.current
+      if (!isDragging || !container) return
+      const rect = container.getBoundingClientRect()
+      scrollDelta = getAutoScrollDelta(event.clientY, rect.top, rect.bottom)
+      updateDropTarget()
+      if (scrollDelta !== 0 && scrollFrame === null) {
+        scrollFrame = requestAnimationFrame(scrollWhileDragging)
+      }
+    }
+
+    const onDragWheel = (event: WheelEvent) => {
+      const container = listRef.current
+      if (!isDragging || !container || event.deltaY === 0) return
+      // 手动滚轮接管期间暂停边缘自动滚动，指针再次移动时恢复。
+      scrollDelta = 0
+      if (scrollFrame !== null) cancelAnimationFrame(scrollFrame)
+      scrollFrame = null
+      event.preventDefault()
+      const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? container.clientHeight : 1
+      container.scrollTop += event.deltaY * unit
+      updateDropTarget()
+    }
+
+    sortable = new Sortable(listRef.current, {
       draggable: '.js-item',
-      animation: 150,
+      forceFallback: true,
+      fallbackOnBody: true,
+      supportPointer: false,
+      scroll: false,
+      filter: (event) => {
+        const pointer = event as MouseEvent
+        return pointer.shiftKey || pointer.ctrlKey || pointer.metaKey
+      },
+      preventOnFilter: false,
+      animation: 0,
       ghostClass: 'qp-drag-ghost',
       chosenClass: 'qp-drag-chosen',
       dragClass: 'qp-drag-original',
+      fallbackClass: 'qp-drag-floating',
+      direction: 'vertical',
+      onStart: () => {
+        isDragging = true
+        // 移除 SortableJS 内置的 50ms 轮询，改由鼠标移动和滚轮事件触发命中检测。
+        const sortableInternals = sortable as Sortable & { _loopId?: number }
+        if (sortableInternals._loopId !== undefined) clearInterval(sortableInternals._loopId)
+        // 跟随模式通过指针移动更新列表外的自动滚动速度。
+        document.addEventListener('pointermove', onDocumentDragMove, true)
+        document.addEventListener('mousemove', onDocumentDragMove, true)
+        document.addEventListener('wheel', onDragWheel, { capture: true, passive: false })
+      },
       onEnd: () => {
+        stopAutoScroll()
         const container = listRef.current
         if (!container) return
         // 依据 DOM 中条目按钮的实际顺序重组数组（顶部→底部）
@@ -159,9 +274,12 @@ export default function Sidebar({
         }
         if (ordered.length > 0) (isVault ? onVaultReorder : onReorder)(ordered)
       },
-    })
-    return () => sortable.destroy()
-  }, [draggable, onReorder, onVaultReorder, isVault])
+    } as Sortable.Options & { supportPointer: boolean })
+    return () => {
+      stopAutoScroll()
+      sortable?.destroy()
+    }
+  }, [draggable, hasRows, onReorder, onVaultReorder, isVault])
 
   // ── 键盘导航跟随滚动 ──
   // W/S 切换选中项时，若目标条目已滑出列表可视区域，就把列表滚到刚好能完整显示它的位置。
@@ -335,29 +453,23 @@ export default function Sidebar({
               // 与历史视图同构：外层不再有 px-3（历史条目靠列表容器的 padding: 0 8px 定位），
               // 并渲染 2px 的完全透明左边框作为黄色时间线的等宽占位，
               // 使 Pin 图标距左边缘的像素值与历史视图分毫不差。
-              'js-item w-full flex items-center gap-2 rounded-lg transition-all border border-transparent',
+              'js-item mb-1 w-full flex items-center gap-2 rounded-lg border border-transparent',
               itemPy,
-              'border-l-2 border-l-transparent rounded-l-none',
-              // 选中态配色（金库＝琥珀）：多选用低透明度色块，当前项用约双倍浓度强调。
-              // 浅色下不再是刺眼的 amber-100 实色块；深色下用 amber-400 透明叠加，替代发闷的 amber-900/40。
-              // 当前项判定优先于多选态，这样全选时仍能看出右侧详情对应的是哪一条。
-              // 底色浓度整体压暗一档：浅色 20%/10% → 10%/5%，深色 20%/10% → 15%/8%。
-              selectedId === item.id
+              'border-l-2 border-l-transparent',
+              selectedId !== item.id && !selectedIds?.has(item.id) && 'rounded-l-none hover:rounded-l-lg',
+              // 当前选中项使用琥珀色浅底，多选项只做轻微提示。
+              selectedId === item.id && !selectedIds
                 ? 'bg-amber-500/10 dark:bg-amber-400/15 text-zinc-900 dark:text-zinc-100'
                 : selectedIds?.has(item.id)
-                  ? 'bg-amber-500/5 dark:bg-amber-400/8'
+                  ? 'qp-vault-item-multi-selected'
                   : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50',
             )}
           >
             <button
-              onClick={(e) => {
-                if (e.ctrlKey || e.metaKey) onToggleSelect?.(item.id)
-                else {
-                  if (selectedIds && selectedIds.size > 0) onClearSelection?.()
-                  onSelect(item.id)
-                }
-              }}
-              className="flex-1 min-w-0 flex items-center gap-2.5 text-left"
+              onPointerDown={(e) => handleItemPointerDown(item.id, e)}
+              onKeyDown={() => { handledSelectionPointerRef.current = null }}
+              onClick={(e) => handleItemClick(item.id, e)}
+              className="flex-1 min-w-0 flex items-center gap-2.5 text-left outline-none"
             >
               <span className="flex-shrink-0 mt-0.5 text-amber-500">
                 <Pin className="w-4 h-4" />
@@ -393,28 +505,21 @@ export default function Sidebar({
             key={item.id}
             data-id={item.id}
             className={cn(
-              'js-item w-full flex items-center gap-2 rounded-lg transition-all border border-transparent',
+              'js-item mb-1 w-full flex items-center gap-2 rounded-lg border border-transparent',
               itemPy,
               item.is_pinned && selectedId !== item.id && 'border-l-2 border-l-amber-400 rounded-l-none',
-              // 选中态配色（历史＝跟随主题强调色）：多选降到 5%/10%，浅色下不再刺眼；
-              // 深色下用强调色透明叠加替代一片死灰的 zinc-800；当前项约双倍浓度强调且优先于多选态。
-              // 底色浓度整体压暗一档：浅色 16%/8% → 10%/5%，深色 32%/15% → 20%/10%。
-              selectedId === item.id
+              selectedId === item.id && !selectedIds
                 ? 'bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] dark:bg-[color-mix(in_srgb,var(--accent)_20%,transparent)] text-zinc-900 dark:text-zinc-100'
                 : selectedIds?.has(item.id)
-                  ? 'bg-[color-mix(in_srgb,var(--accent)_5%,transparent)] dark:bg-[color-mix(in_srgb,var(--accent)_10%,transparent)]'
+                  ? 'qp-item-multi-selected'
                   : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50',
             )}
           >
             <button
-              onClick={(e) => {
-                if (e.ctrlKey || e.metaKey) onToggleSelect?.(item.id)
-                else {
-                  if (selectedIds && selectedIds.size > 0) onClearSelection?.()
-                  onSelect(item.id)
-                }
-              }}
-              className="flex-1 min-w-0 flex items-center gap-2.5 text-left"
+              onPointerDown={(e) => handleItemPointerDown(item.id, e)}
+              onKeyDown={() => { handledSelectionPointerRef.current = null }}
+              onClick={(e) => handleItemClick(item.id, e)}
+              className="flex-1 min-w-0 flex items-center gap-2.5 text-left outline-none"
             >
               <span className="flex-shrink-0 mt-0.5">
                 {item.is_pinned ? (

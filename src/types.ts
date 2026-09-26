@@ -72,8 +72,11 @@ export interface UpdateMetaParams {
 }
 
 export interface ElectronAPI {
+  switchAppMode: (mode: 'clipboard' | 'floral', deleteShortcut?: string) => Promise<{ success: boolean; error?: string }>
+  getSharedDeleteShortcut: () => Promise<string>
   getItems: (params: { limit: number; offset: number; search?: string; pinnedOnly?: boolean }) => Promise<ClipboardItem[]>
   getItemContent: (id: number) => Promise<string>
+  getOcrConfig: () => Promise<{ langPath: string; workerPath: string; corePath: string }>
   insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) => Promise<{ id: number; updated: boolean }>
   deleteItem: (id: number) => Promise<boolean>
   deleteItems: (ids: number[]) => Promise<boolean>
@@ -85,6 +88,7 @@ export interface ElectronAPI {
   getItemCount: () => Promise<number>
   getStorageUsage: () => Promise<{ textBytes: number; imageBytes: number; totalBytes: number }>
   writeText: (text: string) => Promise<boolean>
+  readText: () => Promise<string>
   writeImage: (dataUrl: string) => Promise<boolean>
   writeHtml: (html: string) => Promise<boolean>
   writeFiles: (paths: string[]) => Promise<boolean>
@@ -93,6 +97,8 @@ export interface ElectronAPI {
   onClipboardChanged: (callback: (data: ClipboardChangedData) => void) => () => void
   minimizeWindow: () => void
   maximizeWindow: () => void
+  restoreDefaultWindowSize: () => Promise<boolean>
+  moveWindowByDrag: (dx: number, dy: number) => void
   closeWindow: () => Promise<boolean>
   getAutoStart: () => Promise<{ autoStart: boolean; startMinimized: boolean }>
   setAutoStart: (settings: { autoStart?: boolean; startMinimized?: boolean }) => Promise<{ success: boolean }>
@@ -102,6 +108,7 @@ export interface ElectronAPI {
   openFolder: (dirPath: string) => Promise<void>
   changeStoragePath: (newPath: string) => Promise<{ success: boolean; error?: string }>
   getConfigPath: () => Promise<string>
+  getStorageFolders: () => Promise<{ root: string; transfers: string; exports: string; logs: string }>
   getRetention: () => Promise<{ retentionDays: number | 'forever'; maxRecords: number }>
   setRetention: (settings: { retentionDays?: number | 'forever'; maxRecords?: number }) => Promise<{ success: boolean }>
   getCaptureRules: () => Promise<{ ignorePatterns: string[]; dedupeOnCapture: boolean; maxCaptureKb: number }>
@@ -116,6 +123,7 @@ export interface ElectronAPI {
   getAppIcon: () => Promise<string>
   writeTextAsFile: (text: string, name?: string) => Promise<{ success: boolean; path?: string; error?: string }>
   insertOversize: (content: string, truncate: boolean) => Promise<{ id: number | null; updated: boolean } | null>
+  getPendingOversize: () => Promise<{ content: string; kb: number } | null>
   checkDatabase: () => Promise<{ ok: boolean; integrity: string; count: number; size: number }>
   onOversizeConfirm: (callback: (info: { content: string; kb: number }) => void) => () => void
   onDbIntegrityIssue: (callback: () => void) => () => void
@@ -128,6 +136,7 @@ export interface ElectronAPI {
   ftGetAvailableIps: () => Promise<string[]>
   ftSetDisplayIp: (ip: string) => Promise<void>
   ftGetChatHistory: () => Promise<FtMessage[]>
+  ftGetOnlineDevices: () => Promise<FtDeviceInfo[]>
   ftSendChatText: (content: string) => Promise<boolean>
   ftSendFile: (filePath: string) => Promise<{ success: boolean; error?: string }>
   ftGetActivePath: () => Promise<string>
@@ -160,6 +169,12 @@ export interface ClipboardChangedData {
   charCount?: number
   storageSize?: number
   createdAt: string
+  id?: number
+  updated?: boolean
+  isSensitive?: boolean
+  fromCapture?: boolean
+  fromFt?: boolean
+  fromOversize?: boolean
 }
 
 declare global {

@@ -57,8 +57,10 @@ export interface FtChunkMetadata {
 }
 
 export interface FileTransferServerCallbacks {
-  /** 解析保存目录（每次上传时求值，等价 Tiez 每请求读取 file_transfer_path） */
-  getSaveDir: () => string
+  /** 接收完成后的文件目录 */
+  getTransfersDir: () => string
+  /** 未完成上传的临时目录 */
+  getTempDir: () => string
   /** 手机拉取：返回当前 PC 剪贴板纯文本 */
   getClipboardText: () => string
   /** 页面色深模式：light | dark | system */
@@ -530,9 +532,9 @@ export class FileTransferServer {
     let tempPath = this.uploadSessions.get(meta.upload_id)
     if (!tempPath) {
       // Tiez 原版语义：会话创建前确保保存目录存在（自定义路径可能尚未创建）
-      const saveDir = this.cb.getSaveDir()
-      if (!fs.existsSync(saveDir)) fs.mkdirSync(saveDir, { recursive: true })
-      tempPath = path.join(saveDir, `.tmp_${meta.upload_id}`)
+      const tempDir = this.cb.getTempDir()
+      if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true })
+      tempPath = path.join(tempDir, `.tmp_${meta.upload_id}`)
       this.uploadSessions.set(meta.upload_id, tempPath)
     }
 
@@ -544,7 +546,7 @@ export class FileTransferServer {
     }
 
     if (meta.chunk_index === meta.total_chunks - 1) {
-      const finalPath = path.join(path.dirname(tempPath), `${tsFolder()}_${meta.file_name}`)
+      const finalPath = this.uniqueSavePath(meta.file_name)
       try {
         fs.renameSync(tempPath, finalPath)
       } catch (err) {
@@ -561,13 +563,14 @@ export class FileTransferServer {
 
   /** 保存路径唯一化：{yyyyMMddHHmmss}_{原名}（与 Tiez 命名一致；同秒冲突时追加序号） */
   private uniqueSavePath(fileName: string): string {
-    const dir = this.cb.getSaveDir()
+    const dir = this.cb.getTransfersDir()
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    const base = `${tsFolder()}_${fileName}`
+    const safeName = path.basename(fileName).replace(/[\\/:*?"<>|]/g, '_') || 'unknown.txt'
+    const base = `${tsFolder()}_${safeName}`
     let target = path.join(dir, base)
     let n = 1
     while (fs.existsSync(target)) {
-      target = path.join(dir, `${tsFolder()}_${n++}_${fileName}`)
+      target = path.join(dir, `${tsFolder()}_${n++}_${safeName}`)
     }
     return target
   }
