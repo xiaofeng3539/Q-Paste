@@ -46,7 +46,7 @@
   "build": {
     "appId": "com.qpaste.app",
     "productName": "Q-Paste",
-    "artifactName": "${productName}_v${version}_build034_Setup.${ext}",
+    "artifactName": "${productName}.Setup.v${version}.${ext}",
     "directories": {
       "output": "release"
     },
