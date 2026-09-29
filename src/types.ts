@@ -98,6 +98,8 @@ export interface ElectronAPI {
   minimizeWindow: () => void
   maximizeWindow: () => void
   restoreDefaultWindowSize: () => Promise<boolean>
+  startWindowDrag: () => void
+  endWindowDrag: () => void
   closeWindow: () => Promise<boolean>
   getAutoStart: () => Promise<{ autoStart: boolean; startMinimized: boolean }>
   setAutoStart: (settings: { autoStart?: boolean; startMinimized?: boolean }) => Promise<{ success: boolean }>

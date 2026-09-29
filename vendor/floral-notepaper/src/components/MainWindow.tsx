@@ -8,7 +8,7 @@ import {
   Suspense,
   lazy,
 } from "react";
-import type { MouseEvent } from "react";
+import type { MouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -462,6 +462,7 @@ export function MainWindow({
       (navigator.platform.toLowerCase().startsWith("win") || navigator.userAgent.includes("Windows"))
     );
   }, []);
+  const titleBarDragPointerId = useRef<number | null>(null);
   saveStateRef.current = saveState;
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
@@ -2306,6 +2307,12 @@ export function MainWindow({
     void startCurrentWindowDrag().catch(() => undefined);
   };
 
+  const handleTitleBarPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (titleBarDragPointerId.current !== event.pointerId) return;
+    titleBarDragPointerId.current = null;
+    window.electronAPI?.endWindowDrag();
+  };
+
   const handleMinimize = () => {
     void minimizeCurrentWindow();
   };
@@ -2382,10 +2389,19 @@ export function MainWindow({
       <div className="relative noise-bg bg-cloud overflow-hidden flex flex-col flex-1">
         <BackgroundLayer config={settingsConfig} />
         <div
-          className={`relative z-10 flex items-center justify-between h-11 bg-paper/55 backdrop-blur-[1px] border-b border-paper-deep/30 shrink-0 select-none cursor-default electron-drag-region ${
+          className={`relative z-10 flex items-center justify-between h-11 bg-paper/55 backdrop-blur-[1px] border-b border-paper-deep/30 shrink-0 select-none cursor-default ${isWindows ? "electron-no-drag" : "electron-drag-region"} ${
             isMacOS ? "pl-20 pr-5" : "pl-5 pr-0"
           }`}
           onMouseDown={isWindows ? undefined : handleTitleBarMouseDown}
+          onPointerDown={(event) => {
+            if (!isWindows || event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+            titleBarDragPointerId.current = event.pointerId;
+            event.currentTarget.setPointerCapture(event.pointerId);
+            window.electronAPI?.startWindowDrag();
+          }}
+          onPointerUp={handleTitleBarPointerEnd}
+          onPointerCancel={handleTitleBarPointerEnd}
+          onLostPointerCapture={handleTitleBarPointerEnd}
           onDoubleClick={(event) => {
             if ((event.target as HTMLElement).closest("button")) return;
             event.preventDefault();

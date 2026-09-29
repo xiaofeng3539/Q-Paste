@@ -5,17 +5,17 @@ import TitleBar from '../src/components/TitleBar'
 import { MainWindow } from '../vendor/floral-notepaper/src/components/MainWindow'
 
 describe('Windows 标题栏拖动', () => {
-  test('通过 Electron 原生拖动区移动窗口', () => {
+  test('Q-Paste 标题栏保留指针事件以驱动平滑移动', () => {
     const markup = renderToStaticMarkup(createElement(TitleBar))
     const titleBarClass = markup.match(/^<div class="([^"]+)"/)?.[1] ?? ''
 
-    expect(titleBarClass.split(' ')).toContain('drag-region')
-    expect(titleBarClass.split(' ')).not.toContain('no-drag')
+    expect(titleBarClass.split(' ')).toContain('no-drag')
+    expect(titleBarClass.split(' ')).not.toContain('drag-region')
   })
 
-  test('花笺主窗口标题栏也使用 Electron 原生拖动区', () => {
+  test('花笺标题栏保留指针事件以驱动平滑移动', () => {
     const markup = renderToStaticMarkup(createElement(MainWindow))
 
-    expect(markup).toContain('electron-drag-region')
+    expect(markup).toContain('cursor-default electron-no-drag')
   })
 })

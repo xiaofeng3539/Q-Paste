@@ -144,6 +144,8 @@ function isVideoName(name: string): boolean {
 
 export class FileTransferServer {
   private server: http.Server | null = null
+  private startPromise: Promise<number> | null = null
+  private startGeneration = 0
   private port = 0
   private displayIp = ''
   private enabled = false
@@ -240,10 +242,25 @@ export class FileTransferServer {
       if (autoClose) { this.touch(); this.startAutoCloseTimer() } else { this.stopAutoCloseTimer() }
       return this.port
     }
+    if (this.startPromise) return this.startPromise
+    const starting = this.startListening(preferredPort, autoClose, opts, this.startGeneration)
+    this.startPromise = starting
+    try {
+      return await starting
+    } finally {
+      if (this.startPromise === starting) this.startPromise = null
+    }
+  }
+
+  private async startListening(preferredPort: number, autoClose: boolean, opts: { pin?: string; host?: string } | undefined, generation: number): Promise<number> {
     // 配对码功能已移除：opts.pin 保留骨架，固定置空（恢复：此处读取 opts.pin 并放开 checkPin）
     this.pin = ''
     this.bindHost = opts?.host?.trim() || '0.0.0.0'
     const { server, port } = await this.bindListener(preferredPort)
+    if (generation !== this.startGeneration) {
+      server.close()
+      throw new Error('文件传输服务启动已取消')
+    }
     this.server = server
     this.port = port
     this.enabled = true
@@ -262,6 +279,8 @@ export class FileTransferServer {
   }
 
   stop(): void {
+    this.startGeneration += 1
+    this.startPromise = null
     if (this.server) {
       for (const [socket] of this.wsClients) socket.destroy()
       this.wsClients.clear()

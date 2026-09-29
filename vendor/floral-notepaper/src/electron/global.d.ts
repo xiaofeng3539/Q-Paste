@@ -13,6 +13,8 @@ declare global {
       floralOpenUrl: (url: string) => Promise<void>;
       floralWindow: (method: string, ...args: unknown[]) => Promise<any>;
       onWindowMaximizeChanged?: (callback: (maximized: boolean) => void) => () => void;
+      startWindowDrag: () => void;
+      endWindowDrag: () => void;
       floralVersion: () => Promise<string>;
       checkUpdate: () => Promise<{ success: boolean; error?: string }>;
       installUpdate: () => Promise<{ success: boolean; error?: string }>;

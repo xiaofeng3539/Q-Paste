@@ -186,15 +186,6 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.electronAPI?.ftGetSettings) return
-    window.electronAPI.ftGetSettings().then((s) => {
-      setFtSettings(s)
-      setFtEnabled(s.enabled)
-      setFtPortDraft(String(s.port))
-      return window.electronAPI.ftStatus()
-    }).then((st) => {
-      setFtStatus(st)
-      if (st?.ip) setLocalIp(st.ip)
-    }).catch(() => {})
     window.electronAPI.ftGetAvailableIps().then((ips) => {
       setAvailableIps(ips)
       setLocalIp((cur) => cur || ips[0] || '')
@@ -211,6 +202,29 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
       offDevices()
     }
   }, [])
+
+  useEffect(() => {
+    if (activeMenu !== 'fileTransfer' || !window.electronAPI?.ftGetSettings) return
+    let cancelled = false
+    void (async () => {
+      const settings = await window.electronAPI.ftGetSettings()
+      let status = await window.electronAPI.ftStatus()
+      if (settings.enabled && !status.enabled) {
+        const result = await window.electronAPI.ftToggle(true, settings.port)
+        if (!result.success) onToast?.(result.error || 'error')
+        status = await window.electronAPI.ftStatus()
+      }
+      if (cancelled) return
+      setFtSettings({ ...settings, enabled: status.enabled })
+      setFtEnabled(status.enabled)
+      setFtPortDraft(String(status.enabled ? status.port : settings.port))
+      setFtStatus(status)
+      if (status.ip) setLocalIp(status.ip)
+    })().catch((error) => {
+      if (!cancelled) onToast?.(error?.message ?? String(error))
+    })
+    return () => { cancelled = true }
+  }, [activeMenu])
 
   async function handleFtToggle(v: boolean): Promise<void> {
     const res = await window.electronAPI.ftToggle(v, Number(ftPortDraft) || undefined)

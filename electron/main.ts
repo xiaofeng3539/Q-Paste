@@ -2779,6 +2779,47 @@ ipcMain.handle('window:maximize', () => {
 
 ipcMain.handle('window:is-maximized', () => mainWindow?.isMaximized() ?? false)
 
+let windowDragTimer: ReturnType<typeof setInterval> | null = null
+let windowDragOwner: BrowserWindow | null = null
+
+function stopWindowDrag(): void {
+  if (windowDragTimer) clearInterval(windowDragTimer)
+  windowDragTimer = null
+  windowDragOwner = null
+}
+
+ipcMain.on('window:drag-start', (event) => {
+  const targetWindow = BrowserWindow.fromWebContents(event.sender)
+  if (!targetWindow || targetWindow.isDestroyed()) return
+  if (targetWindow !== mainWindow && ![...floralSurfaceWindows.values()].includes(targetWindow)) return
+  stopWindowDrag()
+  if (targetWindow.isMaximized()) return
+
+  const startBounds = targetWindow.getBounds()
+  const startCursor = screen.getCursorScreenPoint()
+  let lastX = startBounds.x
+  let lastY = startBounds.y
+  windowDragOwner = targetWindow
+  windowDragTimer = setInterval(() => {
+    if (targetWindow.isDestroyed()) return stopWindowDrag()
+    const cursor = screen.getCursorScreenPoint()
+    const dx = cursor.x - startCursor.x
+    const dy = cursor.y - startCursor.y
+    if (Math.hypot(dx, dy) < 4) return
+    const x = Math.round(startBounds.x + dx)
+    const y = Math.round(startBounds.y + dy)
+    if (lastX === x && lastY === y) return
+    lastX = x
+    lastY = y
+    // Windows 缩放比例非 100% 时，反复 setPosition 会逐次增大窗口；每次固定起始宽高。
+    targetWindow.setBounds({ x, y, width: startBounds.width, height: startBounds.height })
+  }, 16)
+})
+
+ipcMain.on('window:drag-end', (event) => {
+  if (windowDragOwner?.webContents === event.sender) stopWindowDrag()
+})
+
 ipcMain.handle('window:restore-default-size', (event) => {
   if (!mainWindow || event.sender !== mainWindow.webContents) return false
   restoreMainWindowDefaultSize()
