@@ -12,7 +12,6 @@ declare global {
       floralClipboard: (kind: "read" | "write", text?: string) => Promise<any>;
       floralOpenUrl: (url: string) => Promise<void>;
       floralWindow: (method: string, ...args: unknown[]) => Promise<any>;
-      moveWindowByDrag: (dx: number, dy: number) => void;
       onWindowMaximizeChanged?: (callback: (maximized: boolean) => void) => () => void;
       floralVersion: () => Promise<string>;
       checkUpdate: () => Promise<{ success: boolean; error?: string }>;

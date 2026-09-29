@@ -8,7 +8,7 @@ import {
   Suspense,
   lazy,
 } from "react";
-import type { MouseEvent, PointerEvent as ReactPointerEvent } from "react";
+import type { MouseEvent } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -462,14 +462,6 @@ export function MainWindow({
       (navigator.platform.toLowerCase().startsWith("win") || navigator.userAgent.includes("Windows"))
     );
   }, []);
-  const titleBarDragRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    lastX: number;
-    lastY: number;
-    started: boolean;
-  } | null>(null);
   saveStateRef.current = saveState;
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
@@ -2314,35 +2306,6 @@ export function MainWindow({
     void startCurrentWindowDrag().catch(() => undefined);
   };
 
-  const handleTitleBarPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!isWindows || event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
-    titleBarDragRef.current = {
-      pointerId: event.pointerId,
-      startX: event.screenX,
-      startY: event.screenY,
-      lastX: event.screenX,
-      lastY: event.screenY,
-      started: false,
-    };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  };
-
-  const handleTitleBarPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = titleBarDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    if (!drag.started && Math.hypot(event.screenX - drag.startX, event.screenY - drag.startY) < 4) return;
-    drag.started = true;
-    const dx = event.screenX - drag.lastX;
-    const dy = event.screenY - drag.lastY;
-    drag.lastX = event.screenX;
-    drag.lastY = event.screenY;
-    if (dx || dy) window.electronAPI?.moveWindowByDrag(dx, dy);
-  };
-
-  const handleTitleBarPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (titleBarDragRef.current?.pointerId === event.pointerId) titleBarDragRef.current = null;
-  };
-
   const handleMinimize = () => {
     void minimizeCurrentWindow();
   };
@@ -2419,14 +2382,10 @@ export function MainWindow({
       <div className="relative noise-bg bg-cloud overflow-hidden flex flex-col flex-1">
         <BackgroundLayer config={settingsConfig} />
         <div
-          className={`relative z-10 flex items-center justify-between h-11 bg-paper/55 backdrop-blur-[1px] border-b border-paper-deep/30 shrink-0 select-none cursor-default ${isWindows ? "electron-no-drag" : "electron-drag-region"} ${
+          className={`relative z-10 flex items-center justify-between h-11 bg-paper/55 backdrop-blur-[1px] border-b border-paper-deep/30 shrink-0 select-none cursor-default electron-drag-region ${
             isMacOS ? "pl-20 pr-5" : "pl-5 pr-0"
           }`}
           onMouseDown={isWindows ? undefined : handleTitleBarMouseDown}
-          onPointerDown={handleTitleBarPointerDown}
-          onPointerMove={handleTitleBarPointerMove}
-          onPointerUp={handleTitleBarPointerEnd}
-          onPointerCancel={handleTitleBarPointerEnd}
           onDoubleClick={(event) => {
             if ((event.target as HTMLElement).closest("button")) return;
             event.preventDefault();

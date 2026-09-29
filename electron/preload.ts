@@ -110,7 +110,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   restoreDefaultWindowSize: () => ipcRenderer.invoke('window:restore-default-size') as Promise<boolean>,
-  moveWindowByDrag: (dx: number, dy: number) => ipcRenderer.send('window:drag-move', { dx, dy }),
   getWindowMaximized: () => ipcRenderer.invoke('window:is-maximized') as Promise<boolean>,
   showWindowSystemMenu: () => ipcRenderer.invoke('window:system-menu') as Promise<boolean>,
   getAppIcon: () => ipcRenderer.invoke('app:get-icon') as Promise<string>,

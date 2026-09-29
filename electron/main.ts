@@ -2779,19 +2779,6 @@ ipcMain.handle('window:maximize', () => {
 
 ipcMain.handle('window:is-maximized', () => mainWindow?.isMaximized() ?? false)
 
-ipcMain.on('window:drag-move', (event, input: { dx?: number; dy?: number }) => {
-  const targetWindow = BrowserWindow.fromWebContents(event.sender)
-  if (!targetWindow || targetWindow.isDestroyed()) return
-  const isMainWindow = targetWindow === mainWindow
-  const isFloralSurface = findFloralSurfaceWindow(floralSurfaceWindows.values(), event.sender) === targetWindow
-  if (!isMainWindow && !isFloralSurface) return
-  const dx = Number(input?.dx)
-  const dy = Number(input?.dy)
-  if (!Number.isFinite(dx) || !Number.isFinite(dy) || Math.abs(dx) > 500 || Math.abs(dy) > 500) return
-  const bounds = targetWindow.getBounds()
-  targetWindow.setPosition(Math.round(bounds.x + dx), Math.round(bounds.y + dy))
-})
-
 ipcMain.handle('window:restore-default-size', (event) => {
   if (!mainWindow || event.sender !== mainWindow.webContents) return false
   restoreMainWindowDefaultSize()
