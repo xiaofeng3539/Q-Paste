@@ -1,5 +1,20 @@
-import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import { contextBridge, ipcRenderer, webUtils, webFrame } from 'electron'
 import type { CloudSyncConfig, CloudSyncStatus, WebDavToggleResult } from '../src/main/sync/types'
+
+// 隐藏一段时间后释放 Blink 图片/资源缓存；不触发 GC，也不改变窗口状态。
+window.addEventListener('DOMContentLoaded', () => {
+  let idleCacheTimer: ReturnType<typeof setTimeout> | undefined
+  const update = () => {
+    clearTimeout(idleCacheTimer)
+    idleCacheTimer = document.hidden ? setTimeout(() => webFrame.clearCache(), 30000) : undefined
+  }
+  document.addEventListener('visibilitychange', update)
+  window.addEventListener('unload', () => {
+    clearTimeout(idleCacheTimer)
+    document.removeEventListener('visibilitychange', update)
+  }, { once: true })
+  update()
+}, { once: true })
 
 export interface FtMessage {
   id: number
@@ -56,8 +71,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   floralVersion: () => ipcRenderer.invoke('app:get-version'),
   floralAssetUrl: (filePath: string) => ipcRenderer.invoke('floral:asset-url', filePath),
   // Database
-  getItems: (params: { limit: number; offset: number; search?: string; pinnedOnly?: boolean }) =>
+  getItems: (params: { limit: number; offset: number; search?: string; pinnedOnly?: boolean; summaryOnly?: boolean; ids?: number[] }) =>
     ipcRenderer.invoke('db:get-items', params),
+  getHistoryIds: () => ipcRenderer.invoke('db:get-history-ids') as Promise<number[]>,
+  searchLocalItems: (ids: number[], query: string) => ipcRenderer.invoke('db:search-local-items', ids, query) as Promise<number[]>,
   getItemContent: (id: number) =>
     ipcRenderer.invoke('db:get-item-content', id) as Promise<string>,
   getOcrConfig: () =>

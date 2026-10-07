@@ -43,6 +43,8 @@ export interface ClipboardItem {
   id: number
   type: ItemType
   content: string
+  /** false 表示列表摘要，正文需要按 id 读取。 */
+  content_loaded?: boolean
   preview: string
   char_count: number
   storage_size: number
@@ -74,7 +76,9 @@ export interface UpdateMetaParams {
 export interface ElectronAPI {
   switchAppMode: (mode: 'clipboard' | 'floral', deleteShortcut?: string) => Promise<{ success: boolean; error?: string }>
   getSharedDeleteShortcut: () => Promise<string>
-  getItems: (params: { limit: number; offset: number; search?: string; pinnedOnly?: boolean }) => Promise<ClipboardItem[]>
+  getItems: (params: { limit: number; offset: number; search?: string; pinnedOnly?: boolean; summaryOnly?: boolean; ids?: number[] }) => Promise<ClipboardItem[]>
+  getHistoryIds: () => Promise<number[]>
+  searchLocalItems: (ids: number[], query: string) => Promise<number[]>
   getItemContent: (id: number) => Promise<string>
   getOcrConfig: () => Promise<{ langPath: string; workerPath: string; corePath: string }>
   insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) => Promise<{ id: number; updated: boolean }>

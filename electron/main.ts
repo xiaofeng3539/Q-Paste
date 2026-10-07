@@ -150,12 +150,13 @@ function saveConfig(): void {
 
 function saveDb(): void {
   if (!db) return
-  fs.writeFileSync(dbPath, Buffer.from(db.export()))
+  fs.writeFileSync(dbPath, db.export())
 }
 
 // ── 保留策略：仅清理未收藏的记录，金库数据永远保留 ──
 
 let retentionTimer: ReturnType<typeof setInterval> | null = null
+let retentionLoggingConfigured = false
 
 /** 按保留天数清理过期记录（retentionDays 未设置或为 'forever' 时跳过） */
 function enforceRetention(): void {
@@ -211,15 +212,16 @@ function startRetentionTimer(): void {
       log.transports.file.resolvePathFn = () => path.join(getStorageLayoutOrThrow().logsDir, 'main.log')
       log.transports.file.maxSize = 5 * 1024 * 1024
       const origError = console.error.bind(console)
-      console.error = (...args: unknown[]) => {
+      if (!retentionLoggingConfigured) console.error = (...args: unknown[]) => {
         origError(...args)
         log.error(...args.map((a) => (a instanceof Error ? a.stack ?? a.message : String(a))))
       }
       const origInfo = console.log.bind(console)
-      console.log = (...args: unknown[]) => {
+      if (!retentionLoggingConfigured) console.log = (...args: unknown[]) => {
         origInfo(...args)
         log.info(...args.map((a) => String(a)))
       }
+      retentionLoggingConfigured = true
     } catch {}
 
     enforceRetentionRules()
@@ -1386,14 +1388,28 @@ ipcMain.handle('floral:window', (event, method: string, ...args: any[]) => {
   }
 })
 
-ipcMain.handle('db:get-items', (_event, { limit, offset, search, pinnedOnly }: { limit: number; offset: number; search?: string; pinnedOnly?: boolean }) => {
+ipcMain.handle('db:get-history-ids', () => {
   if (!db) return []
+  const stmt = db.prepare('SELECT id FROM items ORDER BY sort_order DESC, created_at DESC, id DESC LIMIT 500')
+  const ids: number[] = []
+  try { while (stmt.step()) ids.push(Number(stmt.getAsObject().id)) }
+  finally { stmt.free() }
+  return ids
+})
+
+ipcMain.handle('db:get-items', (_event, { limit, offset, search, pinnedOnly, summaryOnly, ids }: { limit: number; offset: number; search?: string; pinnedOnly?: boolean; summaryOnly?: boolean; ids?: number[] }) => {
+  if (!db) return []
+  if (ids && !ids.length) return []
   const q = (search || '').trim()
   // 列表查询：图片 content 置空（大文件落盘后按需读取，避免全量 base64 过 IPC）
   let sql =
-    "SELECT id, type, CASE WHEN type = 'image' THEN '' ELSE content END AS content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive, sort_order, vault_sort_order FROM items"
+    `SELECT id, type, ${summaryOnly ? "''" : "CASE WHEN type = 'image' THEN '' ELSE content END"} AS content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive, sort_order, vault_sort_order FROM items`
   const binds: Record<string, any> = { ':limit': limit, ':offset': offset }
   const conditions: string[] = []
+  if (ids) {
+    const keys = ids.map((id, i) => { const key = `:id${i}`; binds[key] = id; return key })
+    conditions.push(` id IN (${keys.join(',')})`)
+  }
   if (q) {
     // 转义 LIKE 通配符，避免 % _ 被当作通配符
     const escaped = q.replace(/[\\%_]/g, (m) => '\\' + m)
@@ -1427,10 +1443,41 @@ ipcMain.handle('db:get-items', (_event, { limit, offset, search, pinnedOnly }: {
   return items
 })
 
+// 保留最近列表的全文/拼音匹配，每次仅处理一条正文，结果只传递 id。
+const localSearchTasks = new WeakMap<Electron.WebContents, object>()
+ipcMain.handle('db:search-local-items', async (_event, ids: number[], query: string) => {
+  const task = {}
+  localSearchTasks.set(_event.sender, task)
+  if (!db || !query.trim() || !ids.length) return []
+  const { searchIncludes } = await import('../src/lib/search')
+  if (!db) return []
+  const hits: number[] = []
+  let processed = 0
+  for (const id of ids) {
+    if (!db || localSearchTasks.get(_event.sender) !== task) return []
+    const stmt = db.prepare("SELECT preview, CASE WHEN type = 'image' THEN '' ELSE content END AS content FROM items WHERE id = :id")
+    let preview = ''
+    let content = ''
+    try {
+      stmt.bind({ ':id': id })
+      if (stmt.step()) {
+        const row = stmt.getAsObject()
+        preview = String(row.preview)
+        content = String(row.content)
+      }
+    } finally { stmt.free() }
+    const fullContent = content.startsWith('texts/') ? getFullItemContent(id) : content
+    if (searchIncludes(preview + '\n' + fullContent, query)) hits.push(id)
+    // 释放游标后再让出事件循环，保存数据库时不会误释放正在使用的游标。
+    if (++processed % 10 === 0) await new Promise<void>((resolve) => setImmediate(resolve))
+  }
+  return hits
+})
+
 ipcMain.handle('ocr:get-config', () => getOcrConfig())
 
 /** 按 id 取完整 content：图片返回 dataURL（兼容旧 base64 与新落盘路径） */
-ipcMain.handle('db:get-item-content', (_event, id: number) => {
+function getFullItemContent(id: number): string {
   if (!db) return ''
   const stmt = db.prepare('SELECT type, content FROM items WHERE id = :id')
   stmt.bind({ ':id': id })
@@ -1458,7 +1505,8 @@ ipcMain.handle('db:get-item-content', (_event, id: number) => {
     return ''
   }
   return content
-})
+}
+ipcMain.handle('db:get-item-content', (_event, id: number) => getFullItemContent(id))
 
 /** 大文本落盘阈值：超过则存为 texts/ 磁盘文件，库内只存引用（防库膨胀） */
 const TEXT_OFFLOAD_BYTES = 64 * 1024

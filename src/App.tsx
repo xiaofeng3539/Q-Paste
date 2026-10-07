@@ -9,6 +9,7 @@ import { mockItems } from './mock'
 import { Lang, loadLang, setLang, tr } from './i18n'
 import { stripHtml, cn } from './lib/utils'
 import { searchIncludes } from './lib/search'
+import { historySummary, loadHistorySummaries, readHistoryContent } from './lib/history-memory'
 import { selectRangeIds } from './lib/selection-range'
 import { assignVaultSortOrders } from './lib/vault-order'
 import { useDialog } from './components/DialogProvider'
@@ -93,6 +94,7 @@ function compareByVaultOrder(a: ClipboardItem, b: ClipboardItem): number {
 export default function App() {
   const [items, setItems] = useState<ClipboardItem[]>(isElectron ? [] : mockItems)
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [selectedContent, setSelectedContent] = useState<{ summary: ClipboardItem; content: string } | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [toast, setToast] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
@@ -258,9 +260,9 @@ export default function App() {
 
   useEffect(() => {
     if (!isElectron) return
-    window.electronAPI.getItems({ limit: 500, offset: 0 }).then((loaded) => {
+    loadHistorySummaries(window.electronAPI.getItems, window.electronAPI.getHistoryIds).then((loaded) => {
       const normalized = normalizeItems(loaded)
-      setItems(normalized)
+      setItems((prev) => [...prev, ...normalized.filter((item) => !prev.some((existing) => existing.id === item.id))])
       if (normalized.length > 0) {
         setSelectedId(normalized[0].id)
       }
@@ -275,21 +277,22 @@ export default function App() {
       setSearchResults(null)
       return
     }
+    let cancelled = false
     const timer = setTimeout(async () => {
       let loaded: ClipboardItem[] = []
       if (isElectron) {
-        const dbRes = await window.electronAPI.getItems({ limit: 300, offset: 0, search: q, pinnedOnly: activeTab === 'vault' })
-        loaded = normalizeItems(dbRes)
+        const dbRes = await window.electronAPI.getItems({ limit: 300, offset: 0, search: q, pinnedOnly: activeTab === 'vault', summaryOnly: true })
+        loaded = normalizeItems(dbRes).map(historySummary)
       }
       // 拼音搜索：对本地已加载条目（最近 500 条）额外做拼音/子串匹配，与 DB 结果去重合并
       const known = new Set(loaded.map((it) => it.id))
-      const localHits = items.filter(
-        (it) => !known.has(it.id) && (it.is_pinned || activeTab !== 'vault') && searchIncludes(it.preview + '\n' + it.content, q),
-      )
+      const candidates = items.filter((it) => !known.has(it.id) && (it.is_pinned || activeTab !== 'vault'))
+      const hitIds = new Set(await window.electronAPI.searchLocalItems(candidates.map((it) => it.id), q))
+      const localHits = candidates.filter((it) => hitIds.has(it.id))
       if (localHits.length) loaded = [...loaded, ...localHits]
-      setSearchResults(loaded)
+      if (!cancelled) setSearchResults(loaded)
     }, 250)
-    return () => clearTimeout(timer)
+    return () => { cancelled = true; clearTimeout(timer) }
   }, [searchQuery, activeTab, items])
 
   useEffect(() => {
@@ -302,7 +305,8 @@ export default function App() {
           const item: ClipboardItem = {
             id,
             type: data.type,
-            content: data.content,
+            content: '',
+            content_loaded: false,
             preview: data.preview,
             char_count: data.charCount ?? 0,
             storage_size: data.storageSize ?? 0,
@@ -324,7 +328,8 @@ export default function App() {
         const newItem: ClipboardItem = {
           id: data.id,
           type: data.type,
-          content: data.content,
+          content: '',
+          content_loaded: false,
           preview: data.preview,
           char_count: data.charCount ?? 0,
           storage_size: data.storageSize ?? 0,
@@ -357,7 +362,8 @@ export default function App() {
           .map((r) => ({
             id: r.id,
             type: r.type as ClipboardItem['type'],
-            content: r.content,
+            content: '',
+            content_loaded: false,
             preview: r.preview,
             char_count: r.charCount,
             storage_size: r.storageSize,
@@ -408,9 +414,26 @@ export default function App() {
     return cleanup
   }, [])
 
+  const selectedSummary = useMemo(
+    () => items.find((it) => it.id === selectedId) ?? searchResults?.find((it) => it.id === selectedId) ?? null,
+    [items, selectedId, searchResults]
+  )
+  useEffect(() => {
+    if (!isElectron || !selectedSummary || selectedSummary.type === 'image') {
+      setSelectedContent(null)
+      return
+    }
+    let cancelled = false
+    void readHistoryContent(selectedSummary, window.electronAPI.getItemContent).then((content) => {
+      if (!cancelled) setSelectedContent({ summary: selectedSummary, content })
+    }).catch((error) => { if (!cancelled) console.error('读取历史正文失败:', error) })
+    return () => { cancelled = true }
+  }, [selectedSummary])
   const selectedItem = useMemo(
-    () => items.find((it) => it.id === selectedId) ?? null,
-    [items, selectedId]
+    () => selectedSummary && selectedContent?.summary === selectedSummary
+      ? { ...selectedSummary, content: selectedContent.content, content_loaded: true }
+      : selectedSummary,
+    [selectedSummary, selectedContent]
   )
 
   const filteredItems = useMemo(() => {
@@ -553,6 +576,7 @@ export default function App() {
     async (item: ClipboardItem) => {
       if (isElectron) {
         try {
+          item = { ...item, content: await readHistoryContent(item, window.electronAPI.getItemContent), content_loaded: true }
           if (item.type === 'image') {
             // 列表查询已置空图片 content，复制前按 id 取完整内容（dataURL）
             let content = item.content
@@ -662,7 +686,7 @@ export default function App() {
       }
       setItems((prev) =>
         prev.map((it) =>
-          it.id === id ? { ...it, content, preview, char_count: charCount, storage_size: storageSize } : it
+          it.id === id ? { ...it, content: isElectron ? '' : content, content_loaded: !isElectron, preview, char_count: charCount, storage_size: storageSize } : it
         )
       )
       showToast(tr('toast.updated'))
@@ -758,10 +782,18 @@ export default function App() {
     if (selectedIds.size === 0) return
     const list = sidebarItems.filter((it) => selectedIds.has(it.id))
     if (!list.length) return
-    const texts = list
-      .filter((it) => it.type !== 'image')
-      .map((it) => (it.type === 'html' ? stripHtml(it.content) : it.content))
-      .filter((t) => t && t.trim())
+    const texts: string[] = []
+    try {
+      for (const it of list) {
+        if (it.type === 'image') continue
+        const content = isElectron ? await readHistoryContent(it, window.electronAPI.getItemContent) : it.content
+        const text = it.type === 'html' ? stripHtml(content) : content
+        if (text.trim()) texts.push(text)
+      }
+    } catch (err: any) {
+      showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+      return
+    }
     if (texts.length) {
       try {
         if (isElectron) await window.electronAPI.writeText(texts.join('\n\n'))
@@ -992,7 +1024,7 @@ export default function App() {
         <Settings theme={theme} onThemeChange={setTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} autoHideOnCopy={autoHideOnCopy} onAutoHideChange={setAutoHideOnCopy} shortcuts={shortcuts} onShortcutChange={handleShortcutChange} onBack={() => setShowSettings(false)} onToast={showToast} onDataImported={async () => {
             // 导入 JSON 后重新拉取列表
             if (!isElectron) return
-            const loaded = await window.electronAPI.getItems({ limit: 500, offset: 0 })
+            const loaded = await loadHistorySummaries(window.electronAPI.getItems, window.electronAPI.getHistoryIds)
             const normalized = normalizeItems(loaded)
             setItems(normalized)
             setSelectedId(normalized.length > 0 ? normalized[0].id : null)

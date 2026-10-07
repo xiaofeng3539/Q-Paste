@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { ClipboardItem } from '../types'
+import { readHistoryContent } from '../lib/history-memory'
 import { formatStorageSize, getTypeLabel, maskSensitive, parseFilePaths, basename } from '../lib/utils'
 import { ShortcutAction } from '../lib/shortcuts'
 import { FileText, Link, Image, Copy, Trash2, Monitor, X, ZoomIn, RotateCcw, Pin, Eye, EyeOff, Shield, Plus, ExternalLink, FolderOpen, FileCode2, QrCode, ScanText, FileDown, Loader2, Check } from 'lucide-react'
@@ -117,11 +118,17 @@ export default function DetailView({
     setImageContent('')
     if (!item || item.type !== 'image') return
     if (typeof window === 'undefined' || !window.electronAPI) return
-    let cancelled = false
-    window.electronAPI.getItemContent(item.id).then((content) => {
-      if (!cancelled && content) setImageContent(content)
-    })
-    return () => { cancelled = true }
+    let request = 0
+    const refresh = () => {
+      const current = ++request
+      if (document.hidden) { setImageContent(''); return }
+      void window.electronAPI.getItemContent(item.id).then((content) => {
+        if (request === current) setImageContent(content)
+      }).catch(() => { if (request === current) setImageContent('') })
+    }
+    refresh()
+    document.addEventListener('visibilitychange', refresh)
+    return () => { request++; document.removeEventListener('visibilitychange', refresh) }
   }, [item?.id, item?.type])
 
   // Reset edit modes when item changes
@@ -132,6 +139,7 @@ export default function DetailView({
     if (activeWorker) void activeWorker.terminate().catch(() => {})
     currentItemIdRef.current = item?.id ?? null
     setIsEditing(false)
+    setEditContent('')
     setIsEditingAlias(false)
     setShowTagInput(false)
     setShowSensitive(false)
@@ -145,6 +153,10 @@ export default function DetailView({
     setOcrBusy(false)
     setOcrStage('')
   }, [item?.id])
+
+  useEffect(() => {
+    if (!isEditing) setEditContent('')
+  }, [isEditing])
 
   useEffect(() => {
     if (!ocrRegion || !ocrImageLayout) return
@@ -210,10 +222,14 @@ export default function DetailView({
     }
   }, [showTagInput])
 
-  function enterEditMode() {
+  async function enterEditMode() {
     if (!item || item.type === 'image' || item.type === 'html' || item.type === 'files') return
-    setEditContent(item.content)
-    setIsEditing(true)
+    try {
+      const content = isElectron ? await readHistoryContent(item, window.electronAPI.getItemContent) : item.content
+      if (currentItemIdRef.current !== item.id) return
+      setEditContent(content)
+      setIsEditing(true)
+    } catch { onToast?.('读取正文失败，请重试') }
   }
 
   function saveEdit() {
@@ -231,9 +247,13 @@ export default function DetailView({
 
   async function copyTextContext() {
     if (!item || !textContextMenu) return
-    const source = textContextMenu.editing ? editContent : item.type === 'html' ? plainText : item.content
-    const content = getTextContextCopyValue(source, textContextMenu.selection)
     try {
+      const fullContent = textContextMenu.editing ? editContent : await readHistoryContent(item, window.electronAPI.getItemContent)
+      const source = !textContextMenu.editing && item.type === 'html'
+        ? (item.is_sensitive && !showSensitive ? maskSensitive(fullContent) : fullContent)
+          .replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+        : fullContent
+      const content = getTextContextCopyValue(source, textContextMenu.selection)
       await window.electronAPI.writeText(content)
       onToast?.('已复制文本')
     } catch {
@@ -245,21 +265,23 @@ export default function DetailView({
   async function pasteTextContext() {
     if (!item) return
     try {
+      const content = await readHistoryContent(item, window.electronAPI.getItemContent)
       const pasted = await window.electronAPI.readText()
+      if (currentItemIdRef.current !== item.id) return
       if (!pasted) {
         onToast?.('剪贴板中没有文本')
         setTextContextMenu(null)
         return
       }
       if (item.type === 'html') {
-        onUpdate(item.id, appendRichTextPasteValue(item.content, pasted))
+        onUpdate(item.id, appendRichTextPasteValue(content, pasted))
         onToast?.('已粘贴到富文本')
       } else if (textContextMenu?.editing) {
         const next = insertTextAtSelection(editContent, pasted, textContextMenu.selectionStart, textContextMenu.selectionEnd)
         setEditContent(next.value)
         requestAnimationFrame(() => textareaRef.current?.setSelectionRange(next.cursor, next.cursor))
       } else {
-        setEditContent(appendTextContextPasteValue(item.content, pasted))
+        setEditContent(appendTextContextPasteValue(content, pasted))
         setIsEditing(true)
       }
     } catch {
@@ -833,7 +855,12 @@ export default function DetailView({
       <div className="flex-shrink-0 min-h-12 flex flex-wrap items-center justify-end gap-2 px-4 py-2 [&>button]:shrink-0 [&>button]:whitespace-nowrap">
         {item.type === 'url' && (
           <button
-            onClick={() => onOpenUrl(item.content)}
+            onClick={async () => {
+              try {
+                const content = isElectron ? await readHistoryContent(item, window.electronAPI.getItemContent) : item.content
+                onOpenUrl(content)
+              } catch { onToast?.('读取链接失败，请重试') }
+            }}
             className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
             title={tr('detail.openUrl')}
           >
