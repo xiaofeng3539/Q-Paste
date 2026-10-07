@@ -47,6 +47,7 @@
     "appId": "com.qpaste.app",
     "productName": "Q-Paste",
     "artifactName": "${productName}.Setup.v${version}.${ext}",
+    "compression": "maximum",
     "directories": {
       "output": "release"
     },
@@ -59,7 +60,13 @@
     ],
     "files": [
       "dist/**/*",
-      "dist-electron/**/*"
+      "dist-electron/**/*",
+      "!**/*.map",
+      "!node_modules/lucide-react/dist/**/*",
+      "!node_modules/{react,react-dom}/cjs/**/*",
+      "!node_modules/tesseract.js/{dist,src}/**/*",
+      "!node_modules/tesseract.js-core/*.wasm*",
+      "!node_modules/sql.js/dist/{sql-asm*,worker*,sql-wasm-browser*,sql-wasm-debug*,*.zip,*.wasm}"
     ],
     "extraResources": [
       {
@@ -76,7 +83,11 @@
       },
       {
         "from": "build/ocr",
-        "to": "ocr"
+        "to": "ocr",
+        "filter": [
+          "**/*",
+          "!core/*.wasm"
+        ]
       },
       {
         "from": "vendor/floral-notepaper/LICENSE",
@@ -101,6 +112,11 @@
     ],
     "win": {
       "icon": "build/icon.ico",
+      "electronLanguages": [
+        "en-US",
+        "zh-CN",
+        "zh-TW"
+      ],
       "target": [
         {
           "target": "nsis",
