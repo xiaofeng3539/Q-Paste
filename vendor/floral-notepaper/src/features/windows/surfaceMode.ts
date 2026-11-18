@@ -17,10 +17,15 @@ export function isNoteSurfaceMode(value: unknown): value is NoteSurfaceMode {
 }
 
 export function getSurfaceTargetBounds(
-  _mode: NoteSurfaceMode,
+  mode: NoteSurfaceMode,
   current: WindowBounds,
 ): WindowBounds {
-  return current;
+  if (mode !== 'pad') return current;
+  return {
+    ...current,
+    width: Math.max(current.width, SURFACE_WINDOW_SIZES.pad.width),
+    height: Math.max(current.height, SURFACE_WINDOW_SIZES.pad.height),
+  };
 }
 
 export function requestSurfaceMode(mode: NoteSurfaceMode): void {

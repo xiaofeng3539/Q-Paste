@@ -45,13 +45,12 @@ export function setCurrentWindowAlwaysOnTop(enabled: boolean): Promise<void> {
   return getCurrentWindow().setAlwaysOnTop(enabled);
 }
 
-export function startCurrentWindowDrag(): Promise<void> {
-  return getCurrentWindow().startDragging();
+export function setCurrentWindowSurfaceMode(mode: 'pad' | 'tile', noteId: string): Promise<void> {
+  return window.electronAPI!.floralWindow('setSurfaceMode', mode, noteId);
 }
 
-/** Shift window by `(dx, dy)` logical px during a pointer drag. */
-export function startCurrentWindowDragWithOffset(dx: number, dy: number): Promise<void> {
-  return invoke("start_window_drag_with_offset", { dx, dy });
+export function startCurrentWindowDrag(): Promise<void> {
+  return getCurrentWindow().startDragging();
 }
 
 export function startCurrentWindowResize(direction: ResizeDirection = "SouthEast"): Promise<void> {

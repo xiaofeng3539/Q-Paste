@@ -2,7 +2,7 @@ import chroma from "chroma-js";
 import type { CSSProperties, HTMLAttributes } from "react";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { DEFAULT_TILE_COLOR, normalizeTileColor } from "../features/settings/tileColor";
+import { DEFAULT_TILE_COLOR, normalizeTileColor, getTileTextColor } from "../features/settings/tileColor";
 import { MarkdownPreviewLazy as MarkdownPreview } from "../features/markdown/MarkdownPreviewLazy";
 
 export interface TileProps extends Omit<
@@ -90,9 +90,9 @@ export function Tile({
     return {
       borderColor: chroma.mix(tileColor, mixTarget, 0.18).alpha(0.55).css(),
       cornerColor: chroma.mix(tileColor, mixTarget, 0.3).alpha(0.26).css(),
-      titleColor: chroma.mix(tileColor, mixTarget, 0.4).alpha(0.5).css(),
-      contentColor: chroma.mix(tileColor, mixTarget, 0.65).alpha(0.85).css(),
-      emptyColor: chroma.mix(tileColor, mixTarget, 0.25).alpha(0.4).css(),
+      titleColor: getTileTextColor(tileColor),
+      contentColor: getTileTextColor(tileColor),
+      emptyColor: getTileTextColor(tileColor),
     };
   }, [tileColor]);
   const mergedStyle: CSSProperties = {
@@ -110,7 +110,8 @@ export function Tile({
       className={`app-surface-frame relative border overflow-hidden select-none shadow-[0_1px_8px_rgba(26,26,24,0.04)] hover:shadow-[0_6px_24px_rgba(26,26,24,0.07)] ${className}`}
       style={mergedStyle}
     >
-      <div className="px-4 pt-4 pb-4 h-full overflow-y-auto scrollbar-hidden">
+      <div data-tile-scroll="true" className="h-full overflow-y-auto overflow-x-hidden scrollbar-hidden">
+      <div data-tile-body="true" className="pl-4 pr-8 pt-6 pb-4 min-w-0" style={{ fontSize: `${fontSize}px`, overflowWrap: 'anywhere' }}>
         {title && (
           <div
             className="font-display tracking-wide mb-3 leading-snug"
@@ -145,6 +146,7 @@ export function Tile({
             {t("tile.empty", { defaultValue: "空" })}
           </div>
         )}
+      </div>
       </div>
 
       <CornerMarks color={cornerColor} />

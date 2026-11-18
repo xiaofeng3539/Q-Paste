@@ -1982,6 +1982,8 @@ export function MainWindow({
     setContent,
     markDirty,
     onEnsureNoteSaved: ensureNoteSaved,
+    // 图片插入后展示预览，避免纯编辑模式下只看到 Markdown 地址。
+    onImagesInserted: () => setViewMode((mode) => mode === "edit" ? "split" : mode),
     disabled: isExternal,
     onError: showToast,
     t,

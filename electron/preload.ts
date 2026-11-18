@@ -218,6 +218,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ftGetAvailableIps: () => ipcRenderer.invoke('ft:get-available-ips') as Promise<string[]>,
   ftSetDisplayIp: (ip: string) => ipcRenderer.invoke('ft:set-display-ip', ip) as Promise<void>,
   ftGetChatHistory: () => ipcRenderer.invoke('ft:get-chat-history') as Promise<FtMessage[]>,
+  ftClearChatHistory: () => ipcRenderer.invoke('ft:clear-chat-history') as Promise<boolean>,
   ftGetOnlineDevices: () => ipcRenderer.invoke('ft:get-online-devices') as Promise<FtDeviceInfo[]>,
   ftSendChatText: (content: string) => ipcRenderer.invoke('ft:send-chat-text', content) as Promise<boolean>,
   ftSendFile: (filePath: string) =>

@@ -17,7 +17,7 @@ import { resolveAppMode, type AppMode } from '../src/lib/app-mode'
 import { persistClipboardCapture, type ClipboardCapture } from '../src/main/clipboard-capture'
 import { FloralNotesStore } from './floral/notes-store'
 import { copyExistingFloralData } from './floral/data-migration'
-import { findFloralSurfaceWindow } from './floral/surface-window'
+import { findFloralSurfaceWindow, registerFloralSurfaceMode, fitFloralTileBounds, installFloralNativeDrag } from './floral/surface-window'
 import { broadcastFloralEvent } from './floral/event-broadcast'
 import { toFloralUpdateState, type HostUpdateStatus } from './floral/host-update'
 
@@ -1093,9 +1093,10 @@ function openFloralSurface(kind: 'notepad' | 'tile', noteId?: string, bounds?: {
   const key = kind === 'tile' ? `tile:${noteId}` : `notepad:${noteId || 'new'}`
   const existing = floralSurfaceWindows.get(key)
   if (existing && !existing.isDestroyed()) {
+    const wasHidden = !existing.isVisible()
     existing.show()
     existing.focus()
-    if (kind === 'notepad') existing.webContents.send('floral:event:notepad:activate', 'main')
+    if (kind === 'notepad' && wasHidden) existing.webContents.send('floral:event:notepad:activate', 'main')
     return key
   }
   const child = new BrowserWindow({
@@ -1106,14 +1107,27 @@ function openFloralSurface(kind: 'notepad' | 'tile', noteId?: string, bounds?: {
     y: Number.isFinite(bounds?.y) ? bounds!.y : undefined,
     frame: false,
     transparent: kind === 'tile',
+    maximizable: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     show: false,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
   })
   floralSurfaceWindows.set(key, child)
+  if (process.platform === 'win32') {
+    installFloralNativeDrag(child, (point) => {
+      if ([...floralSurfaceWindows].some(([key, window]) => key.startsWith('tile:') && window === child)) {
+        const scale = screen.getDisplayMatching(child.getBounds()).scaleFactor
+        child.webContents.send('floral:event:surface-native-double-click', point ? { x: point.x / scale, y: point.y / scale } : null)
+      }
+    })
+  }
   child.once('ready-to-show', () => child.show())
-  child.on('closed', () => { if (floralSurfaceWindows.get(key) === child) floralSurfaceWindows.delete(key) })
+  child.on('closed', () => {
+    for (const [registeredKey, window] of floralSurfaceWindows) {
+      if (window === child) floralSurfaceWindows.delete(registeredKey)
+    }
+  })
   void child.loadFile(path.join(app.getAppPath(), 'dist', 'floral', 'index.html'), {
     query: { view: kind, ...(noteId ? { noteId } : {}) },
   })
@@ -1247,22 +1261,6 @@ ipcMain.handle('floral:invoke', async (event, command: string, input?: any, opti
     case 'start_shortcut_recording':
     case 'stop_shortcut_recording':
       result = undefined; break
-    case 'start_window_drag_with_offset': {
-      const dx = Number(input?.dx)
-      const dy = Number(input?.dy)
-      if (Number.isFinite(dx) && Number.isFinite(dy)) {
-        const targetWindow = BrowserWindow.fromWebContents(event.sender)
-        if (targetWindow && !targetWindow.isDestroyed()) {
-          const bounds = targetWindow.getBounds()
-          targetWindow.setBounds({
-            ...bounds,
-            x: Math.round(bounds.x + dx),
-            y: Math.round(bounds.y + dy),
-          })
-        }
-      }
-      result = undefined; break
-    }
     case 'take_startup_file': result = null; break
     case 'update_status': result = toFloralUpdateState(currentUpdateStatus, app.getVersion()); break
     case 'update_install_prepare_report': {
@@ -1379,6 +1377,18 @@ ipcMain.handle('floral:window', (event, method: string, ...args: any[]) => {
     case 'isMaximized': return targetWindow.isMaximized()
     case 'focus': targetWindow.focus(); return
     case 'setAlwaysOnTop': targetWindow.setAlwaysOnTop(Boolean(args[0])); return
+    case 'setSurfaceMode':
+      registerFloralSurfaceMode(floralSurfaceWindows, event.sender, args[0], String(args[1] ?? '')); return
+    case 'getWorkArea': return screen.getDisplayMatching(bounds).workArea
+    case 'fitTileContent': {
+      if (![...floralSurfaceWindows].some(([key, window]) => key.startsWith('tile:') && window === targetWindow)) return
+      const area = screen.getDisplayMatching(bounds).workArea
+      const next = fitFloralTileBounds(bounds, args[0] ?? {}, area)
+      if (next.width !== bounds.width || next.height !== bounds.height || next.x !== bounds.x || next.y !== bounds.y) {
+        targetWindow.setBounds(next)
+      }
+      return next
+    }
     case 'startDragging': return
     case 'outerPosition': return { x: bounds.x, y: bounds.y }
     case 'innerSize': return { width: bounds.width, height: bounds.height }
@@ -2673,6 +2683,12 @@ ipcMain.handle('ft:status', (): FtStatus => ftServer.status)
 ipcMain.handle('ft:get-available-ips', () => getAvailableIps())
 ipcMain.handle('ft:set-display-ip', (_event, ip: string) => ftServer.setDisplayIp(ip))
 ipcMain.handle('ft:get-chat-history', () => ftServer.getChatHistory())
+ipcMain.handle('ft:clear-chat-history', (event) => {
+  if (event.sender !== mainWindow?.webContents) throw new Error('Invalid file transfer sender')
+  ftServer.clearChatHistory()
+  mainWindow.webContents.send('ft:new-message')
+  return true
+})
 ipcMain.handle('ft:get-online-devices', () => ftServer.getOnlineDevices())
 ipcMain.handle('ft:send-chat-text', (_event, content: string) => {
   ftServer.sendChatText(content)

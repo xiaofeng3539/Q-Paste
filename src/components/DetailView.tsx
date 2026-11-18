@@ -604,7 +604,6 @@ export default function DetailView({
       </div>
 
       {/* ── Alias row ── */}
-      {!isImage && (
         <div className="flex-shrink-0 flex items-center gap-2 px-4 pb-1">
           {isEditingAlias ? (
             <input
@@ -636,7 +635,6 @@ export default function DetailView({
             </span>
           )}
         </div>
-      )}
 
       {/* ── Tag row ── */}
       {!isImage && (

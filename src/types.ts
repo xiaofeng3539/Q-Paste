@@ -141,6 +141,7 @@ export interface ElectronAPI {
   ftGetAvailableIps: () => Promise<string[]>
   ftSetDisplayIp: (ip: string) => Promise<void>
   ftGetChatHistory: () => Promise<FtMessage[]>
+  ftClearChatHistory: () => Promise<boolean>
   ftGetOnlineDevices: () => Promise<FtDeviceInfo[]>
   ftSendChatText: (content: string) => Promise<boolean>
   ftSendFile: (filePath: string) => Promise<{ success: boolean; error?: string }>

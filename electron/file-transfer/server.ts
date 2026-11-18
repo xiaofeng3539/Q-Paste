@@ -11,6 +11,7 @@ import os from 'node:os'
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import mobilePageHtml from './mobile-page.html?raw'
 import { buildThemeCss, modeClass } from './theme'
 import { parseMultipart, readRawBody } from './multipart'
@@ -91,6 +92,21 @@ function tsFolder(): string {
 
 /** 移植 utils.rs get_available_ips：过滤虚拟网卡 + 网段打分排序 */
 export function getAvailableIps(): string[] {
+  let connectedIps: Set<string> | undefined
+  if (os.platform() === 'win32') {
+    try {
+      // Windows 会保留断开网卡的静态地址，networkInterfaces() 本身不提供连接状态。
+      const output = execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+        "$ErrorActionPreference='Stop'; $connected=@(Get-NetIPInterface -AddressFamily IPv4 | Where-Object { $_.ConnectionState -eq 'Connected' } | Select-Object -ExpandProperty InterfaceIndex); @(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceIndex -in $connected } | Select-Object -ExpandProperty IPAddress) | ConvertTo-Json -Compress",
+      ], { encoding: 'utf8', windowsHide: true, timeout: 5000 })
+      const ips: unknown = JSON.parse(output.trim() || '[]')
+      const list = typeof ips === 'string' ? [ips] : ips
+      if (!Array.isArray(list) || !list.every((ip) => typeof ip === 'string')) throw new Error('Invalid network address list')
+      connectedIps = new Set(list)
+    } catch (error) {
+      console.warn('[Q-Paste] 无法查询网卡连接状态，回退到系统地址列表:', error)
+    }
+  }
   const virtualHints = ['vnet', 'vbox', 'virtual', 'vmnet', 'tailscale', 'zerotier', 'pseudo', 'clash', 'wsl', 'vethernet', 'docker', 'hyper-v', 'radmin']
   const score = (name: string, ip: string): number => {
     let s = 0
@@ -106,6 +122,7 @@ export function getAvailableIps(): string[] {
     if (virtualHints.some((h) => nameLower.includes(h))) continue
     for (const addr of addrs ?? []) {
       if (addr.internal || addr.family !== 'IPv4') continue
+      if (connectedIps && !connectedIps.has(addr.address)) continue
       if (addr.address.startsWith('192.168.') || addr.address.startsWith('10.') || addr.address.startsWith('172.')) {
         candidates.push({ name: nameLower, ip: addr.address })
       }
@@ -158,6 +175,7 @@ export class FileTransferServer {
 
   /** 聊天历史（内存，重启清空 —— 与 Tiez ChatState 一致） */
   private messages: FtMessage[] = []
+  private nextMessageId = 1
   private onlineDevices = new Map<string, FtDeviceInfo>()
   private uploadSessions = new Map<string, string>() // upload_id → .tmp 绝对路径
   private sharedFiles = new Map<string, string>() // token → 本地路径
@@ -171,6 +189,10 @@ export class FileTransferServer {
 
   getChatHistory(): FtMessage[] {
     return [...this.messages]
+  }
+
+  clearChatHistory(): void {
+    this.messages = []
   }
 
   getOnlineDevices(): FtDeviceInfo[] {
@@ -365,7 +387,7 @@ export class FileTransferServer {
       }
     }
     const msg: FtMessage = {
-      id: this.messages.length + 1,
+      id: this.nextMessageId++,
       direction,
       msg_type: msgType,
       content: finalContent,

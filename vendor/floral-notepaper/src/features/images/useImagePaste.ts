@@ -19,6 +19,7 @@ interface UseImagePasteOptions {
   setContent: (content: string) => void;
   markDirty: () => void;
   onEnsureNoteSaved: () => Promise<string | null>;
+  onImagesInserted?: () => void;
   disabled?: boolean;
   onError?: (message: string) => void;
   t?: TFunction;
@@ -71,6 +72,7 @@ export function useImagePaste({
   setContent,
   markDirty,
   onEnsureNoteSaved,
+  onImagesInserted,
   disabled,
   onError,
   t,
@@ -103,6 +105,7 @@ export function useImagePaste({
         if (markdownLines.length > 0) {
           insertTextAtCursor(textarea, setContent, markdownLines.join("\n"));
           markDirty();
+          onImagesInserted?.();
         }
       } catch (error) {
         const message =
@@ -114,7 +117,7 @@ export function useImagePaste({
         processingRef.current = false;
       }
     },
-    [noteId, textareaRef, setContent, markDirty, onEnsureNoteSaved, onError, t],
+    [noteId, textareaRef, setContent, markDirty, onEnsureNoteSaved, onImagesInserted, onError, t],
   );
 
   const handlePaste = useCallback(

@@ -13,14 +13,13 @@ import { countNoteChars, metadataFromNote } from "../features/notes/noteUtils";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  animateCurrentWindowBounds,
+  setCurrentWindowBounds,
   closeCurrentWindow,
   getCurrentWindowBounds,
   recycleCurrentNotepad,
   setCurrentWindowAlwaysOnTop,
+  setCurrentWindowSurfaceMode,
   showCurrentWindow,
-  startCurrentWindowDrag,
-  startCurrentWindowDragWithOffset,
   startCurrentWindowResize,
 } from "../features/windows/controls";
 import type { ResizeDirection } from "../features/windows/controls";
@@ -52,6 +51,7 @@ import {
 } from "../features/windows/tileWindowEvents";
 import { NotepadOpenPanel } from "./NotepadOpenPanel";
 import { Tile } from "./Tile";
+import { useTileAutoSize } from '../features/windows/useTileAutoSize';
 
 type OpenMode = "new" | "open";
 type NotePadStatus = "empty" | "opened" | "saved" | "dirty" | "saveFailed" | "copied";
@@ -97,8 +97,6 @@ function isTileControlDoubleClickTarget(target: EventTarget | null): boolean {
   );
 }
 
-const TILE_DRAG_START_THRESHOLD_PX = 5;
-
 function SurfaceResizeHandles() {
   return (
     <>
@@ -127,6 +125,7 @@ export function NotePad({
 }: NotePadProps) {
   const { t } = useTranslation();
   const [surfaceMode, setSurfaceMode] = useState<NoteSurfaceMode>(initialSurfaceMode);
+  const surfaceRef = useRef<HTMLDivElement>(null);
   const [mode, setMode] = useState<OpenMode>("new");
   const [notes, setNotes] = useState<NoteMetadata[]>([]);
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
@@ -146,7 +145,6 @@ export function NotePad({
   const [isExiting, setIsExiting] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLTextAreaElement>(null);
-  const tileDragIntentRef = useRef<{ x: number; y: number; dragging: boolean } | null>(null);
   const windowLabelRef = useRef("");
   const statusRef = useRef<NotePadStatus>("empty");
   const contentValueRef = useRef(content);
@@ -433,11 +431,12 @@ export function NotePad({
   });
 
   const tileNoteId = editingNoteId ?? initialNoteId ?? "";
+  useTileAutoSize(surfaceRef, surfaceMode === 'tile' && Boolean(editingNoteId), title, content, surfaceFontSize, tileRenderMarkdown);
 
   const switchSurfaceMode = useCallback(
-    async (nextMode: NoteSurfaceMode) => {
-      const unpinnedNoteId = tileSurfaceModeUnpinNoteId(surfaceMode, nextMode, tileNoteId);
-      setSurfaceMode(nextMode);
+    async (nextMode: NoteSurfaceMode, noteId = tileNoteId) => {
+      await setCurrentWindowSurfaceMode(nextMode, noteId);
+      const unpinnedNoteId = tileSurfaceModeUnpinNoteId(surfaceMode, nextMode, noteId);
       if (unpinnedNoteId) {
         void emitTileWindowUnpinned(unpinnedNoteId).catch(() => undefined);
       }
@@ -450,7 +449,10 @@ export function NotePad({
           await setCurrentWindowAlwaysOnTop(true);
         }
 
-        await animateCurrentWindowBounds(targetBounds);
+        // Let content fitting own the tile dimensions; a concurrent bounds
+        // animation would restore the old fixed editor size after fitting.
+        if (nextMode !== 'tile') await setCurrentWindowBounds(targetBounds);
+        setSurfaceMode(nextMode);
       } catch (error) {
         showToast(getErrorMessage(error));
       }
@@ -488,7 +490,7 @@ export function NotePad({
             isAutoSave,
           })
         ) {
-          await switchSurfaceMode("tile");
+          await switchSurfaceMode("tile", savedNote.id);
         }
       } catch (error) {
         setStatus("saveFailed");
@@ -503,48 +505,14 @@ export function NotePad({
   const handleSaveRef = useRef(handleSave);
   handleSaveRef.current = handleSave;
 
-  const clearPendingTileDrag = useCallback(() => {
-    tileDragIntentRef.current = null;
-  }, []);
-
-  useEffect(() => clearPendingTileDrag, [clearPendingTileDrag]);
-
   useEffect(() => {
-    if (surfaceMode !== "tile") {
-      clearPendingTileDrag();
-      return undefined;
-    }
-
-    const handleMouseMove = (event: globalThis.MouseEvent) => {
-      const intent = tileDragIntentRef.current;
-      if (!intent) return;
-      // Pointer left the window during a missed mouseup, etc. — drop the stale intent.
-      if ((event.buttons & 1) === 0) {
-        clearPendingTileDrag();
-        return;
-      }
-
-      const distanceX = event.screenX - intent.x;
-      const distanceY = event.screenY - intent.y;
-      if (!intent.dragging && Math.hypot(distanceX, distanceY) < TILE_DRAG_START_THRESHOLD_PX) return;
-
-      const deltaX = intent.dragging ? event.screenX - intent.x : distanceX;
-      const deltaY = intent.dragging ? event.screenY - intent.y : distanceY;
-      intent.x = event.screenX;
-      intent.y = event.screenY;
-      intent.dragging = true;
-      void startCurrentWindowDragWithOffset(deltaX, deltaY).catch(() => undefined);
-    };
-
-    const handleMouseUp = () => clearPendingTileDrag();
-
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
-    };
-  }, [clearPendingTileDrag, surfaceMode]);
+    const unlisten = listen<{ x: number; y: number } | null>('surface-native-double-click', (event) => {
+      const point = event.payload;
+      const target = point ? document.elementFromPoint(point.x, point.y) : null;
+      if (surfaceMode === 'tile' && tileDoubleClickToEdit && !isTileControlDoubleClickTarget(target)) void switchSurfaceMode('pad');
+    });
+    return () => { void unlisten.then((stop) => stop()); };
+  }, [surfaceMode, tileDoubleClickToEdit, switchSurfaceMode]);
 
   const handleTileDoubleClick = useCallback(
     (event: MouseEvent<HTMLElement>) => {
@@ -557,12 +525,11 @@ export function NotePad({
         return;
       }
 
-      clearPendingTileDrag();
       event.preventDefault();
       event.stopPropagation();
       void switchSurfaceMode("pad");
     },
-    [clearPendingTileDrag, switchSurfaceMode, tileDoubleClickToEdit],
+    [switchSurfaceMode, tileDoubleClickToEdit],
   );
 
   useEffect(() => {
@@ -589,10 +556,11 @@ export function NotePad({
 
   const handlePin = async () => {
     try {
+      let noteId = tileNoteId;
       if (shouldSaveBeforeSwitchingToTile(noteSurfaceAutoSave) || !editingNoteId) {
-        await saveNote();
+        noteId = (await saveNote()).id;
       }
-      await switchSurfaceMode("tile");
+      await switchSurfaceMode("tile", noteId);
     } catch (error) {
       showToast(getErrorMessage(error));
     }
@@ -690,24 +658,6 @@ export function NotePad({
     return () => window.clearTimeout(timer);
   }, [handleSave, hasDraftContent, mode, noteSurfaceAutoSave, status]);
 
-  const handleDrag = (event: MouseEvent<HTMLElement>) => {
-    const target = event.target as HTMLElement;
-    if (target.closest("button,input,textarea,[data-surface-resize-handle=\"true\"]")) return;
-
-    if (surfaceMode === "tile") {
-      if (event.button !== 0 || (tileDoubleClickToEdit && event.detail > 1)) return;
-      clearPendingTileDrag();
-      tileDragIntentRef.current = {
-        x: event.screenX,
-        y: event.screenY,
-        dragging: false,
-      };
-      return;
-    }
-
-    void startCurrentWindowDrag().catch(() => undefined);
-  };
-
   const resetDraft = () => {
     setEditingNoteId(null);
     setTitle("");
@@ -724,7 +674,7 @@ export function NotePad({
     "app-surface-frame relative noise-bg w-full h-full min-h-0 bg-cloud overflow-hidden flex flex-col flex-1 border border-paper-deep/70 shadow-[0_1px_10px_rgba(26,26,24,0.06)] transition-all duration-200 ease-out";
 
   return (
-    <div className={surfaceWrapperClassName}>
+    <div ref={surfaceRef} className={surfaceWrapperClassName}>
       {isTile ? (
         <Tile
           title={tileTitle || undefined}
@@ -734,11 +684,10 @@ export function NotePad({
           renderMarkdown={tileRenderMarkdown}
           imageBaseDir={imageBaseDir ?? undefined}
           width="100%"
-          className={`h-full cursor-default ${tileDoubleClickToEdit ? "" : "electron-drag-region"}`}
+          className="h-full cursor-default electron-drag-region"
           data-surface-mode={surfaceMode}
           data-context-menu="tile"
           data-note-id={tileNoteId}
-          onMouseDown={handleDrag}
           onDoubleClick={handleTileDoubleClick}
         >
           <button

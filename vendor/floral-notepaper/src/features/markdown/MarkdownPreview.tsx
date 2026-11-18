@@ -1,4 +1,5 @@
-import { useState, useCallback, useMemo, useEffect } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -14,6 +15,113 @@ import "katex/dist/katex.min.css";
 import remarkAlerts from "./remarkAlerts";
 import { resolveMarkdownImageSrc } from "./imageSrc";
 
+function ImageViewer({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const dragRef = useRef({ startX: 0, startY: 0, x: 0, y: 0 });
+  const reset = () => setView({ scale: 1, x: 0, y: 0 });
+  const { t } = useTranslation();
+  useEffect(() => {
+    // 原生模态框负责焦点限制、Esc 和关闭后的焦点恢复，不受预览区裁剪影响。
+    const dialog = dialogRef.current;
+    dialog?.showModal();
+    return () => dialog?.close();
+  }, []);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.deltaY) return;
+      const rect = dialog.getBoundingClientRect();
+      const cx = event.clientX - rect.left - rect.width / 2;
+      const cy = event.clientY - rect.top - rect.height / 2;
+      setView((previous) => {
+        const scale = Math.min(10, Math.max(0.1, previous.scale + (event.deltaY > 0 ? -0.1 : 0.1)));
+        const ratio = scale / previous.scale;
+        return { scale, x: cx - ratio * (cx - previous.x), y: cy - ratio * (cy - previous.y) };
+      });
+    };
+    // 非被动监听才能阻止滚轮同时滚动底下的笔记。
+    dialog.addEventListener("wheel", onWheel, { passive: false });
+    return () => dialog.removeEventListener("wheel", onWheel);
+  }, []);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (event: MouseEvent) => setView((previous) => ({
+      ...previous,
+      x: dragRef.current.x + event.clientX - dragRef.current.startX,
+      y: dragRef.current.y + event.clientY - dragRef.current.startY,
+    }));
+    const onEnd = () => setDragging(false);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onEnd);
+    window.addEventListener("blur", onEnd);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onEnd);
+      window.removeEventListener("blur", onEnd);
+    };
+  }, [dragging]);
+
+  return createPortal(
+    <dialog
+      ref={dialogRef}
+      aria-label={t("markdown.imagePreview", { defaultValue: "图片预览" })}
+      onClose={onClose}
+      onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
+      className="m-auto p-0 border-0 bg-black/90 text-white backdrop:bg-black/70 overflow-hidden"
+      style={{ width: "100vw", height: "100vh", maxWidth: "100vw", maxHeight: "100vh" }}
+    >
+      <div className="absolute top-0 left-0 right-0 h-12 flex items-center justify-between px-4 z-10 pointer-events-none">
+        <span className="text-xs text-zinc-400">
+          {t("markdown.imageControls", { defaultValue: "滚轮缩放 · 拖拽平移 · 双击重置" })} · {Math.round(view.scale * 100)}%
+        </span>
+        <div className="flex gap-2 pointer-events-auto">
+          <button
+            type="button"
+            title={t("markdown.resetImage", { defaultValue: "重置" })}
+            aria-label={t("markdown.resetImage", { defaultValue: "重置" })}
+            onClick={reset}
+            className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 text-zinc-400 cursor-pointer"
+          >↺</button>
+          <button
+            type="button"
+            autoFocus
+            onClick={onClose}
+            aria-label={t("markdown.closeImagePreview", { defaultValue: "关闭图片预览" })}
+            className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 text-zinc-400 cursor-pointer"
+          >×</button>
+        </div>
+      </div>
+      <img
+        src={src}
+        alt={alt}
+        draggable={false}
+        className="absolute rounded-lg select-none"
+        onMouseDown={(event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          event.stopPropagation();
+          dragRef.current = { startX: event.clientX, startY: event.clientY, x: view.x, y: view.y };
+          setDragging(true);
+        }}
+        onDoubleClick={(event) => { event.stopPropagation(); reset(); }}
+        style={{
+          width: "90vw", height: "80vh", objectFit: "contain", top: "50%", left: "50%",
+          transform: `translate(calc(-50% + ${view.x}px), calc(-50% + ${view.y}px)) scale(${view.scale})`,
+          transformOrigin: "center center", cursor: dragging ? "grabbing" : "grab",
+        }}
+      />
+    </dialog>,
+    document.body,
+  );
+}
+
 function MarkdownImage({
   src,
   alt,
@@ -21,6 +129,8 @@ function MarkdownImage({
   ...props
 }: React.ComponentProps<"img"> & { src?: string; imageBaseDir?: string }) {
   const [resolvedSrc, setResolvedSrc] = useState(src ?? "");
+  const [expanded, setExpanded] = useState(false);
+  const { t } = useTranslation();
 
   useEffect(() => {
     let cancelled = false;
@@ -36,7 +146,30 @@ function MarkdownImage({
     };
   }, [src, imageBaseDir]);
 
-  return <img {...props} src={resolvedSrc} alt={alt ?? ""} />;
+  return <>
+    <img
+      {...props}
+      src={resolvedSrc}
+      alt={alt ?? ""}
+      role="button"
+      tabIndex={0}
+      title={t("markdown.enlargeImage", { defaultValue: "双击放大图片" })}
+      style={{ ...props.style, cursor: "zoom-in" }}
+      onDoubleClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (resolvedSrc) setExpanded(true);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          event.stopPropagation();
+          if (resolvedSrc) setExpanded(true);
+        }
+      }}
+    />
+    {expanded && <ImageViewer src={resolvedSrc} alt={alt ?? ""} onClose={() => setExpanded(false)} />}
+  </>;
 }
 
 function CodeBlock({ children, language }: { children: React.ReactNode; language?: string }) {

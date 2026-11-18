@@ -234,6 +234,12 @@
         .progress-wrapper { margin-top: 8px; border-top: 1px dashed rgba(255,255,255,0.3); padding-top: 4px; }
         .progress-bar { width: 100%; height: 4px; background: rgba(0,0,0,0.1); border-radius: 2px; overflow: hidden; margin-top: 4px; }
         .progress-inner { height: 100%; background: var(--accent-color); width: 0%; transition: width 0.2s; }
+        #batch-progress { padding: 6px 16px; font-size: 12px; background: var(--bg-panel); flex-shrink: 0; }
+        #upload-menu { display: flex; gap: 12px; padding: 10px 16px; background: var(--bg-panel); border-top: 1px solid var(--border-dark); flex-shrink: 0; }
+        #upload-menu[hidden] { display: none; }
+        #upload-menu .retro-btn { flex: 1; padding: 0 12px; }
+        .upload-status { font-size: 12px; margin-top: 6px; }
+        .upload-status button { margin-left: 8px; cursor: pointer; }
 
         footer {
             padding: 10px 16px;
@@ -287,7 +293,7 @@
         }
         
         .text-input { 
-            flex: 1; height: 40px; min-height: 40px; max-height: 100px; padding: 10px 12px;
+            flex: 1; min-width: 0; height: 40px; min-height: 40px; max-height: 100px; padding: 10px 12px;
             background: var(--bg-input); border: var(--input-border, 2px solid var(--border-dark));
             box-shadow: var(--input-shadow, inset 2px 2px 0 rgba(0,0,0,0.1));
             font-size: 14px; font-family: var(--content-font-family, var(--font-mono));
@@ -366,6 +372,18 @@
         }
 
         .fs-toolbar { display: flex; justify-content: flex-end; gap: 12px; }
+        #chat-history-menu {
+            position: fixed; z-index: 1100; min-width: 180px; padding: 4px;
+            border: 1px solid var(--hairline); border-radius: 12px;
+            background: var(--bg-solid); color: var(--text-primary);
+            box-shadow: 0 6px 24px rgba(0,0,0,0.18);
+        }
+        #chat-history-menu[hidden] { display: none; }
+        #chat-history-menu button {
+            width: 100%; padding: 12px 16px; border: none; border-radius: 8px;
+            background: transparent; color: inherit; text-align: left; font-size: 14px;
+        }
+        #chat-history-menu button:active { background: var(--muted-btn-bg); }
         __THEME_CSS__
 
         /* ── Q-Paste 终端传输 · 简约圆润风格（严格对齐 TieZ） ── */
@@ -524,6 +542,9 @@
     </div>
     
     <!-- Full Screen Editor Modal -->
+    <div id="chat-history-menu" role="menu" aria-label="聊天记录" hidden>
+        <button type="button" id="clear-chat-history" role="menuitem">清除历史记录</button>
+    </div>
     <div id="fs-editor">
         <div style="font-weight:bold; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center">
             <span>FULL SCREEN EDIT</span>
@@ -536,14 +557,22 @@
         </div>
     </div>
 
+    <div id="batch-progress" role="status" aria-live="polite" hidden></div>
+    <div id="upload-menu" hidden aria-label="上传方式">
+        <label for="image-input" class="retro-btn" tabindex="0">相册</label>
+        <label for="camera-input" class="retro-btn" tabindex="0">相机</label>
+        <label for="file-input" class="retro-btn" tabindex="0">文件</label>
+    </div>
     <footer>
-        <label for="file-input" class="retro-btn add-btn">+</label>
-        <div style="position:relative; flex:1; display:flex;">
+        <button type="button" id="upload-toggle" class="retro-btn add-btn" aria-label="选择上传方式" aria-controls="upload-menu" aria-expanded="false">+</button>
+        <div style="position:relative; flex:1; min-width:0; display:flex;">
             <textarea class="text-input" id="text-input" placeholder="输入文字..." rows="1"></textarea>
             <div class="expand-btn" id="expand-btn" onclick="openFullscreen()">⤢</div>
         </div>
         <button class="retro-btn send-btn" id="send-btn">SEND</button>
         <input type="file" id="file-input" multiple style="display:none">
+        <input type="file" id="image-input" accept="image/*" multiple style="display:none">
+        <input type="file" id="camera-input" accept="image/*" capture="environment" style="display:none">
     </footer>
 
     <!-- Fullscreen Image Overlay -->
@@ -562,13 +591,135 @@
         document.getElementById('time-now').innerText = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
         
         let lastId = 0;
-        let isUploading = false;
         const deviceId = localStorage.getItem('qpaste_device_id') || ('m-' + Math.random().toString(36).substr(2, 9));
         localStorage.setItem('qpaste_device_id', deviceId);
         
         const deviceName = "Mobile";
         const TIEZ_LOGO = "__LOGO__";
-        const pendingUploads = new Map(); // filename -> [elements]
+        const seenMessages = new Set();
+        function createUploadQueue(send, onChange) {
+            const tasks = [];
+            let running = false;
+            let nextId = 0;
+            async function drain() {
+                if (running) return;
+                running = true;
+                try {
+                    for (;;) {
+                        const task = tasks.find(item => item.status !== 'success');
+                        if (!task || task.status !== 'waiting') break;
+                        task.status = 'sending';
+                        task.error = '';
+                        onChange(task);
+                        try {
+                            await send(task, percent => { task.progress = percent; onChange(task); });
+                            task.status = 'success';
+                            task.progress = 100;
+                            task.file = null;
+                        } catch (error) {
+                            task.status = 'failed';
+                            task.error = error.message || '连接中断';
+                        }
+                        onChange(task);
+                        if (task.status === 'failed') break;
+                        // 大批次之间让浏览器有机会绘制和处理输入。
+                        await new Promise(resolve => setTimeout(resolve, 0));
+                    }
+                } finally { running = false; }
+            }
+            return {
+                tasks,
+                enqueue(files) {
+                    const batch = files.map(file => ({ id: ++nextId, file, name: file.name, status: 'waiting', progress: 0 }));
+                    tasks.push(...batch);
+                    batch.forEach(onChange);
+                    void drain();
+                    return batch;
+                },
+                retry(task) {
+                    if (task.status !== 'failed') return;
+                    task.status = 'waiting';
+                    task.progress = 0;
+                    onChange(task);
+                    void drain();
+                }
+            };
+        }
+        // 上传队列结束
+        const uploadQueue = createUploadQueue(uploadFile, renderUpload);
+
+        function enqueueSelectedFiles(input) {
+            // 系统选择器确认后立即入队；重置输入，允许再次选择同一张图片。
+            const files = Array.from(input.files);
+            input.value = '';
+            if (files.length) uploadQueue.enqueue(files);
+        }
+        fileInput.onchange = event => enqueueSelectedFiles(event.target);
+        document.getElementById('image-input').onchange = event => enqueueSelectedFiles(event.target);
+        document.getElementById('camera-input').onchange = event => enqueueSelectedFiles(event.target);
+
+        const uploadMenu = document.getElementById('upload-menu');
+        const uploadToggle = document.getElementById('upload-toggle');
+        function closeUploadMenu() {
+            uploadMenu.hidden = true;
+            uploadToggle.setAttribute('aria-expanded', 'false');
+        }
+        uploadToggle.onclick = () => {
+            uploadMenu.hidden = !uploadMenu.hidden;
+            uploadToggle.setAttribute('aria-expanded', String(!uploadMenu.hidden));
+        };
+        uploadMenu.querySelectorAll('label').forEach(label => {
+            // 保留 label 的默认行为，让同一次用户点击直接打开对应系统选择器。
+            label.onclick = closeUploadMenu;
+            label.onkeydown = event => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    closeUploadMenu();
+                    document.getElementById(label.htmlFor).click();
+                }
+            };
+        });
+        document.addEventListener('click', event => {
+            if (!uploadMenu.contains(event.target) && !uploadToggle.contains(event.target)) closeUploadMenu();
+        });
+        document.addEventListener('keydown', event => { if (event.key === 'Escape') closeUploadMenu(); });
+
+        function renderUpload(task) {
+            if (!task.element) {
+                task.element = createMessageElement('sent', task.name, 'You', 'file');
+                task.element.querySelector('.bubble').onclick = null;
+                task.element.querySelector('.file-size').textContent = '等待';
+                const status = document.createElement('div');
+                status.className = 'upload-status';
+                const label = document.createElement('span');
+                const retry = document.createElement('button');
+                retry.textContent = '重试';
+                retry.onclick = () => uploadQueue.retry(task);
+                status.append(label, retry);
+                task.element.querySelector('.bubble').appendChild(status);
+                task.label = label;
+                task.retryButton = retry;
+                chatBox.appendChild(task.element);
+                scrollToBottom();
+            }
+            const labels = { waiting: '等待', sending: `发送中 ${task.progress}%`, success: '成功', failed: '失败：' + task.error };
+            task.label.textContent = labels[task.status];
+            task.retryButton.hidden = task.status !== 'failed';
+            task.element.querySelector('.file-size').textContent = labels[task.status];
+            if (task.status === 'success' && task.receipt && !task.previewAdded) {
+                const message = task.receipt;
+                const preview = createMessageElement('sent', message.content, 'You', message.msg_type, message.file_path);
+                const media = preview.querySelector('img.img-preview, video');
+                if (media) task.element.querySelector('.bubble').insertBefore(media, task.element.querySelector('.upload-status'));
+                else task.element.querySelector('.file-card').onclick = () => { window.location.href = message.content; };
+                task.previewAdded = true;
+            }
+            const progress = document.getElementById('batch-progress');
+            const success = uploadQueue.tasks.filter(item => item.status === 'success').length;
+            const failed = uploadQueue.tasks.some(item => item.status === 'failed');
+            progress.hidden = false;
+            progress.textContent = `${success} / ${uploadQueue.tasks.length} 已发送${failed ? ' · 失败项重试后继续' : ''}`;
+        }
 
         function scrollToBottom() {
             chatBox.scrollTop = chatBox.scrollHeight;
@@ -631,20 +782,12 @@
             }
             return file_path || content || '';
         }
-        function addPendingUpload(fileName, el) {
-            const list = pendingUploads.get(fileName) || [];
-            list.push(el);
-            pendingUploads.set(fileName, list);
-        }
-        function takePendingUpload(maybeName) {
-            for (const [name, list] of pendingUploads.entries()) {
-                if (maybeName.endsWith(name) && list.length > 0) {
-                    const el = list.shift();
-                    if (list.length === 0) pendingUploads.delete(name);
-                    return el;
-                }
-            }
-            return null;
+        function matchesUpload(msg, task) {
+            if (msg.direction !== 'in' || msg.sender_id !== deviceId || !['file', 'image', 'video'].includes(msg.msg_type)) return false;
+            const savedName = extractNameFromContent(msg.content, msg.file_path).split('/').pop().split('\\').pop();
+            const safeName = task.name.replace(/[\\/:*?"<>|]/g, '_');
+            const withoutTimestamp = savedName.replace(/^\d{8,}_/, '');
+            return withoutTimestamp === safeName || withoutTimestamp.replace(/^\d+_/, '') === safeName;
         }
         function createMessageElement(direction, content, senderName, msgType, file_path) {
             const div = document.createElement('div');
@@ -760,14 +903,16 @@
             
             socket.onmessage = (e) => {
                 const msg = JSON.parse(e.data);
-                if (msg.direction === 'in' && msg.sender_id === deviceId && (msg.msg_type === 'file' || msg.msg_type === 'image' || msg.msg_type === 'video')) {
-                    const rawName = extractNameFromContent(msg.content, msg.file_path);
-                    const maybeName = normalizeFileName(rawName);
-                    const pending = takePendingUpload(maybeName);
-                    if (pending) {
-                        const replacement = createMessageElement('sent', msg.content, 'You', msg.msg_type, msg.file_path);
-                        pending.replaceWith(replacement);
-                        scrollToBottom();
+                if (msg.id) {
+                    if (seenMessages.has(msg.id)) return;
+                    seenMessages.add(msg.id);
+                    lastId = Math.max(lastId, msg.id);
+                }
+                if (msg.direction === 'in' && msg.sender_id === deviceId) {
+                    const task = uploadQueue.tasks.find(item => item.attempt && !item.receipt && msg.id > item.attempt.afterId && matchesUpload(msg, item));
+                    if (task) {
+                        task.receipt = msg;
+                        renderUpload(task);
                         return;
                     }
                 }
@@ -786,9 +931,64 @@
         }
         connectWS();
 
+        function clearMobileChatHistory() {
+            const pending = uploadQueue.tasks.filter(task => task.status !== 'success');
+            const keep = new Set(pending.map(task => task.element));
+            for (const element of Array.from(chatBox.children)) {
+                if (!keep.has(element)) element.remove();
+            }
+            uploadQueue.tasks.splice(0, uploadQueue.tasks.length, ...pending);
+            document.getElementById('batch-progress').hidden = pending.length === 0;
+            if (pending.length) renderUpload(pending[0]);
+            document.getElementById('chat-history-menu').hidden = true;
+            // Preserve lastId / seenMessages: clearing this phone must neither
+            // replay old messages nor clear the computer or interrupt uploads.
+        }
+
+        function installChatHistoryMenu() {
+            const menu = document.getElementById('chat-history-menu');
+            let timer = null;
+            let start = null;
+            let ignoreClickUntil = 0;
+            const cancel = () => { clearTimeout(timer); timer = null; start = null; };
+            const isBlank = target => !target.closest('.bubble,.avatar,button,a,input,textarea,video,img');
+            const show = (x, y) => {
+                menu.hidden = false;
+                menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+                menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + 'px';
+                ignoreClickUntil = Date.now() + 350;
+            };
+            chatBox.addEventListener('pointerdown', event => {
+                cancel();
+                if (event.pointerType === 'mouse' || event.isPrimary === false || !isBlank(event.target)) return;
+                start = { x: event.clientX, y: event.clientY };
+                timer = setTimeout(() => { show(start.x, start.y); timer = null; }, 550);
+            });
+            chatBox.addEventListener('pointermove', event => {
+                if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 10) cancel();
+            }, { passive: true });
+            const release = () => { if (!menu.hidden) ignoreClickUntil = Date.now() + 350; cancel(); };
+            chatBox.addEventListener('pointerup', release);
+            chatBox.addEventListener('pointercancel', cancel);
+            chatBox.addEventListener('scroll', () => { cancel(); menu.hidden = true; }, { passive: true });
+            chatBox.addEventListener('contextmenu', event => {
+                if (!isBlank(event.target)) return;
+                event.preventDefault();
+                cancel();
+                show(event.clientX, event.clientY);
+            });
+            document.addEventListener('pointerdown', event => { if (!menu.contains(event.target)) menu.hidden = true; });
+            document.addEventListener('click', event => {
+                if (!menu.contains(event.target) && Date.now() >= ignoreClickUntil) menu.hidden = true;
+            });
+            document.addEventListener('keydown', event => { if (event.key === 'Escape') menu.hidden = true; });
+            document.getElementById('clear-chat-history').onclick = clearMobileChatHistory;
+        }
+        installChatHistoryMenu();
+
         sendBtn.onclick = async () => {
             const text = textInput.value.trim();
-            if (!text || isUploading) return;
+            if (!text) return;
             
             textInput.value = '';
             textInput.style.height = '40px';
@@ -804,44 +1004,36 @@
             } catch(e) { alert('Send failed'); }
         };
 
-        fileInput.onchange = async () => {
-            if (!fileInput.files.length || isUploading) return;
-            const files = Array.from(fileInput.files);
-            fileInput.value = '';
-            
-            for(const file of files) {
-                await uploadFile(file);
-            }
-        };
+        async function pollUploads(afterId) {
+            const response = await fetch('/poll?last_id=' + afterId, { signal: AbortSignal.timeout(15000) });
+            if (!response.ok) throw new Error('无法确认电脑接收状态，请检查连接后重试');
+            return response.json();
+        }
 
-        async function uploadFile(file) {
-            isUploading = true;
-            const isImage = file.type.startsWith('image/');
-            const isVideo = file.type.startsWith('video/');
-            const msgType = isVideo ? 'video' : (isImage ? 'image' : 'file');
-            const previewUrl = (isImage || isVideo) ? URL.createObjectURL(file) : file.name;
-            const el = createMessageElement('sent', previewUrl, 'You', msgType, undefined);
-            el.dataset.fileName = file.name;
-            el.dataset.pending = 'true';
-            addPendingUpload(file.name, el);
-            const progressWrapper = document.createElement('div');
-            progressWrapper.className = 'progress-wrapper';
-            progressWrapper.innerHTML = `<div style="font-size:10px">0%</div><div class="progress-bar"><div class="progress-inner"></div></div>`;
-            el.querySelector('.bubble').appendChild(progressWrapper);
-            chatBox.appendChild(el);
-            scrollToBottom();
+        async function confirmUpload(task) {
+            if (task.receipt) return true;
+            const messages = await pollUploads(task.attempt.afterId);
+            const receipt = messages.find(msg => matchesUpload(msg, task));
+            if (!receipt) return false;
+            task.receipt = receipt;
+            seenMessages.add(receipt.id);
+            lastId = Math.max(lastId, receipt.id);
+            return true;
+        }
 
-            const CHUNK_SIZE = 1024 * 512; // 512KB
-            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-            const uploadId = Math.random().toString(36).substr(2, 9);
-
+        async function uploadFile(task, progress) {
+            // 最后一块响应丢失时，先核对接收记录，不能直接重发造成重复落盘。
+            if (task.attempt && task.attempt.finalSent && await confirmUpload(task)) return;
+            const history = await pollUploads(0);
+            const afterId = history.reduce((id, msg) => Math.max(id, msg.id), lastId);
+            task.attempt = { afterId, finalSent: false };
+            const file = task.file;
+            const CHUNK_SIZE = 1024 * 512;
+            const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+            const uploadId = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : Date.now() + '-' + task.id + '-' + Math.random().toString(36).slice(2);
             for (let i = 0; i < totalChunks; i++) {
-                const start = i * CHUNK_SIZE;
-                const end = Math.min(file.size, start + CHUNK_SIZE);
-                const chunk = file.slice(start, end);
-
                 const formData = new FormData();
-                formData.append('file', chunk);
+                formData.append('file', file.slice(i * CHUNK_SIZE, Math.min(file.size, (i + 1) * CHUNK_SIZE)));
                 formData.append('metadata', JSON.stringify({
                     upload_id: uploadId,
                     chunk_index: i,
@@ -852,30 +1044,18 @@
                     total_size: file.size,
                     content_type: file.type
                 }));
-
+                task.attempt.finalSent = i === totalChunks - 1;
                 try {
-                    const res = await fetch('/upload-chunk', { method: 'POST', body: formData });
-                    if (!res.ok) throw new Error('Chunk failed');
-                    
-                    const percent = Math.round(((i + 1) / totalChunks) * 100);
-                    progressWrapper.querySelector('.progress-inner').style.width = percent + '%';
-                    progressWrapper.querySelector('div').innerText = percent + '%';
-                } catch (e) {
-                    alert('Upload failed: ' + file.name);
-                    // Remove pending marker on failure
-                    el.dataset.pending = 'false';
-                    const list = pendingUploads.get(file.name) || [];
-                    const idx = list.indexOf(el);
-                    if (idx >= 0) { list.splice(idx, 1); }
-                    if (list.length === 0) pendingUploads.delete(name);
-                    break;
+                    const response = await fetch('/upload-chunk', { method: 'POST', body: formData, signal: AbortSignal.timeout(60000) });
+                    if (!response.ok) throw new Error('电脑接收失败（' + response.status + '）');
+                } catch (error) {
+                    if (task.attempt.finalSent && await confirmUpload(task)) return;
+                    throw error;
                 }
+                progress(Math.round((i + 1) / totalChunks * 100));
             }
-            
-            progressWrapper.remove();
-            el.querySelector('.bubble').innerHTML += ' <span style="color:#4caf50">✓</span>';
-            isUploading = false;
-            syncSendState();
+            // HTTP 成功已表示完成；轮询仅用于取得可预览的下载地址。
+            try { await confirmUpload(task); } catch (_) {}
         }
 
         // ── 获取电脑剪贴板 ──
@@ -910,30 +1090,18 @@
 
         // SEND 按钮可用态
         function syncSendState() {
-            sendBtn.classList.toggle('ready', !!textInput.value.trim() && !isUploading);
+            sendBtn.classList.toggle('ready', !!textInput.value.trim());
         }
         textInput.addEventListener('input', syncSendState);
         syncSendState();
 
-        // Dragon-drop support
+        // 拖放与相册使用同一队列，避免并行写入和虚假的成功提示。
         document.addEventListener('dragover', e => e.preventDefault());
-        document.addEventListener('drop', async e => {
+        document.addEventListener('drop', e => {
             e.preventDefault();
-            const files = Array.from(e.dataTransfer.files);
-            if (files.length) {
-                 for(const file of files) await uploadFile(file);
-                 
-                 // Small delay for UI and then notify PC
-                 setTimeout(() => {
-                     const fileCount = files.length;
-                     const replyEl = createMessageElement('received', `ACK: <b>${fileCount}</b> FILES SAVED.`, 'System', 'pc');
-                     chatBox.appendChild(replyEl);
-                     scrollToBottom();
-                 }, 800);
-            }
+            uploadQueue.enqueue(Array.from(e.dataTransfer.files));
         });
 
     </script>
 </body>
 </html>
-    

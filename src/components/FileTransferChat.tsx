@@ -3,9 +3,10 @@
  * 交互与 Tiez 一致：QR/地址面板、消息气泡（文本链接化/图片/视频/文件卡片）、
  * 拖拽发送、加号多选文件、粘贴图片、全屏编辑、右键菜单、智能滚动。
  */
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
-import { Plus, Maximize2, Minimize2, ExternalLink, Folder, RotateCcw, Image as ImageIcon, Link as LinkIcon, Clipboard, Video, Send } from 'lucide-react'
+import { Plus, Maximize2, Minimize2, ExternalLink, Folder, RotateCcw, Image as ImageIcon, Link as LinkIcon, Clipboard, Video, Send, Trash2 } from 'lucide-react'
+import { useDialog } from './DialogProvider'
 import { tr } from '../i18n'
 import type { FtMessage, FtStatus } from '../types'
 
@@ -57,11 +58,36 @@ export default function FileTransferChat({ status, localIp }: FileTransferChatPr
   const chatBoxRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const prevMessagesLengthRef = useRef(0)
+  const messageRequestRef = useRef(0)
+  const contextMenuRef = useRef<HTMLDivElement>(null)
+  const { alert } = useDialog()
   const actualPort = status?.port ? String(status.port) : ''
 
   const fetchMessages = () => {
-    window.electronAPI?.ftGetChatHistory().then(setMessages).catch(() => {})
+    const request = ++messageRequestRef.current
+    return window.electronAPI?.ftGetChatHistory().then((rows) => {
+      if (request === messageRequestRef.current) setMessages(rows)
+    }).catch(() => {})
   }
+
+  const clearHistory = async () => {
+    setContextMenu(null)
+    ++messageRequestRef.current
+    try {
+      await window.electronAPI.ftClearChatHistory()
+      setIsUserScrolling(false)
+      await fetchMessages()
+    } catch {
+      void alert(tr('ft.clearHistoryFailed'))
+    }
+  }
+
+  useLayoutEffect(() => {
+    const menu = contextMenuRef.current
+    if (!contextMenu || !menu) return
+    menu.style.left = `${Math.max(8, Math.min(contextMenu.x, window.innerWidth - menu.offsetWidth - 8))}px`
+    menu.style.top = `${Math.max(8, Math.min(contextMenu.y, window.innerHeight - menu.offsetHeight - 8))}px`
+  }, [contextMenu])
 
   useEffect(() => {
     fetchMessages()
@@ -262,7 +288,12 @@ export default function FileTransferChat({ status, localIp }: FileTransferChatPr
         </div>
       )}
 
-      <div ref={chatBoxRef} className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-3">
+      <div ref={chatBoxRef} data-testid="ft-message-list" className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-3"
+        onContextMenu={(e) => {
+          if (e.defaultPrevented) return
+          e.preventDefault()
+          setContextMenu({ x: e.clientX, y: e.clientY })
+        }}>
         {messages.length === 0 && (
           <div className="opacity-50 text-center mt-10 text-xs font-mono">{tr('ft.waitingConnection')}</div>
         )}
@@ -432,7 +463,9 @@ export default function FileTransferChat({ status, localIp }: FileTransferChatPr
 
       {contextMenu && (
         <div
-          className="fixed z-50 min-w-[180px] py-1 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 shadow-lg text-xs text-zinc-700 dark:text-zinc-200"
+          ref={contextMenuRef}
+          role="menu"
+          className="fixed z-50 min-w-[180px] max-h-[calc(100vh-16px)] overflow-y-auto py-1 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 shadow-lg text-xs text-zinc-700 dark:text-zinc-200"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -534,6 +567,8 @@ export default function FileTransferChat({ status, localIp }: FileTransferChatPr
               }}
             />
           )}
+          {contextMenu.type && <div className="h-px bg-zinc-200 dark:bg-zinc-700 my-1 mx-2 opacity-60" />}
+          <FtMenuItem icon={<Trash2 size={14} />} label={tr('ft.clearHistory')} onClick={() => { void clearHistory() }} />
         </div>
       )}
     </div>
@@ -542,9 +577,9 @@ export default function FileTransferChat({ status, localIp }: FileTransferChatPr
 
 function FtMenuItem({ icon, label, onClick }: { icon: ReactNode; label: string; onClick: () => void }) {
   return (
-    <div className="flex items-center gap-2.5 px-3 py-2 hover:bg-zinc-100 dark:hover:bg-zinc-700 cursor-pointer" onClick={onClick}>
+    <button type="button" role="menuitem" className="w-full text-left flex items-center gap-2.5 px-3 py-2 hover:bg-zinc-100 dark:hover:bg-zinc-700 cursor-pointer" onClick={onClick}>
       {icon}
       <span>{label}</span>
-    </div>
+    </button>
   )
 }
