@@ -11,6 +11,66 @@ export interface OcrRegion {
   height: number
 }
 
+interface OcrWorker {
+  recognize: (image: Blob, options: Record<string, never>, output: { text: true; blocks: false; hocr: false; tsv: false }) => Promise<{ data: { text: string } }>
+  terminate: () => Promise<unknown>
+}
+
+type OcrProgress = (progress: number) => void
+
+export function createOcrWorkerSession(createWorker: (reportProgress: OcrProgress) => Promise<OcrWorker>) {
+  let worker: Promise<OcrWorker> | undefined
+  let reportProgress: OcrProgress | undefined
+  let cancel: (() => void) | undefined
+  let idleTimer: ReturnType<typeof setTimeout> | undefined
+
+  function dispose() {
+    const previous = worker
+    worker = undefined
+    reportProgress = undefined
+    cancel?.()
+    cancel = undefined
+    clearTimeout(idleTimer)
+    void previous?.then((active) => active.terminate()).catch(() => {})
+  }
+
+  return {
+    async recognize(image: Blob, onProgress: OcrProgress) {
+      if (cancel) throw new Error('OCR already running')
+      clearTimeout(idleTimer)
+      const active: Promise<OcrWorker> = worker ?? Promise.resolve().then(() => createWorker((progress) => {
+        if (worker === active) reportProgress?.(progress)
+      }))
+      worker = active
+      reportProgress = onProgress
+      const cancelled = new Promise<never>((_, reject) => {
+        cancel = () => reject(new Error('OCR cancelled'))
+      })
+      try {
+        const recognition = active.then((ready) => {
+          if (worker !== active) throw new Error('OCR cancelled')
+          return ready.recognize(image, {}, { text: true, blocks: false, hocr: false, tsv: false })
+        })
+        const { data } = await Promise.race([recognition, cancelled])
+        return data.text
+      } catch (error) {
+        if (worker === active) dispose()
+        throw error
+      } finally {
+        if (worker === active) {
+          cancel = undefined
+          reportProgress = undefined
+          idleTimer = setTimeout(dispose, 60_000)
+        }
+      }
+    },
+    cancelActive() {
+      if (cancel) dispose()
+    },
+    dispose,
+  }
+}
+
 export function openOcrSelection(): { selecting: true; lightboxOpen: true } {
   return { selecting: true, lightboxOpen: true }
 }

@@ -102,8 +102,6 @@ export interface ElectronAPI {
   minimizeWindow: () => void
   maximizeWindow: () => void
   restoreDefaultWindowSize: () => Promise<boolean>
-  startWindowDrag: () => void
-  endWindowDrag: () => void
   closeWindow: () => Promise<boolean>
   getAutoStart: () => Promise<{ autoStart: boolean; startMinimized: boolean }>
   setAutoStart: (settings: { autoStart?: boolean; startMinimized?: boolean }) => Promise<{ success: boolean }>
@@ -137,6 +135,8 @@ export interface ElectronAPI {
   ftToggle: (enabled: boolean, port?: number) => Promise<{ success: boolean; port: number; error?: string }>
   ftStatus: () => Promise<FtStatus>
   ftGetSettings: () => Promise<FtSettings>
+  ftTakeOpenPageRequest: () => Promise<boolean>
+  onFtOpenPage: (callback: () => void) => () => void
   ftSetSetting: (key: 'fileTransferAutoOpen' | 'fileTransferAutoClose' | 'fileTransferAutoCopy' | 'fileTransferBindIp', value: boolean | string) => Promise<boolean>
   ftGetAvailableIps: () => Promise<string[]>
   ftSetDisplayIp: (ip: string) => Promise<void>

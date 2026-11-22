@@ -127,8 +127,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   restoreDefaultWindowSize: () => ipcRenderer.invoke('window:restore-default-size') as Promise<boolean>,
-  startWindowDrag: () => ipcRenderer.send('window:drag-start'),
-  endWindowDrag: () => ipcRenderer.send('window:drag-end'),
   getWindowMaximized: () => ipcRenderer.invoke('window:is-maximized') as Promise<boolean>,
   showWindowSystemMenu: () => ipcRenderer.invoke('window:system-menu') as Promise<boolean>,
   getAppIcon: () => ipcRenderer.invoke('app:get-icon') as Promise<string>,
@@ -212,6 +210,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ftToggle: (enabled: boolean, port?: number) =>
     ipcRenderer.invoke('ft:toggle', enabled, port) as Promise<{ success: boolean; port: number; error?: string }>,
   ftStatus: () => ipcRenderer.invoke('ft:status') as Promise<FtStatus>,
+  ftTakeOpenPageRequest: () => ipcRenderer.invoke('ft:take-open-page-request') as Promise<boolean>,
+  onFtOpenPage: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('ft:open-page', handler)
+    return () => ipcRenderer.removeListener('ft:open-page', handler)
+  },
   ftGetSettings: () => ipcRenderer.invoke('ft:get-settings') as Promise<FtSettings>,
   ftSetSetting: (key: 'fileTransferAutoOpen' | 'fileTransferAutoClose' | 'fileTransferAutoCopy' | 'fileTransferBindIp', value: boolean | string) =>
     ipcRenderer.invoke('ft:set-setting', key, value) as Promise<boolean>,

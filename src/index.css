@@ -79,6 +79,14 @@
   max-width: 100%;
   min-width: 0;
 }
+/* Sortable measures the outer rows. Chromium can defer their offscreen contents. */
+.qp-item-content {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 18px;
+}
+.qp-item-content-two-lines {
+  contain-intrinsic-block-size: auto 34.75px;
+}
 /* 文本溢出：nowrap + ellipsis 截断，禁止文字撑开横向滚动 */
 .qp-list-scroll .truncate,
 .qp-list-scroll [class*="truncate"] {

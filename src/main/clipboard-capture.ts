@@ -16,14 +16,14 @@ export interface StoredClipboardCapture extends ClipboardCapture {
   fromCapture: true
 }
 
-export function persistClipboardCapture(
+export async function persistClipboardCapture(
   capture: ClipboardCapture,
-  save: (item: ClipboardCapture & { isSensitive: boolean }) => { id: number | null; updated: boolean } | null,
+  save: (item: ClipboardCapture & { isSensitive: boolean }) => Promise<{ id: number | null; updated: boolean } | null> | { id: number | null; updated: boolean } | null,
   notify: (item: StoredClipboardCapture) => void,
-): { id: number; updated: boolean } | null {
+): Promise<{ id: number; updated: boolean } | null> {
   const contentForCheck = capture.type === 'html' ? stripHtml(capture.content) : capture.content
   const isSensitive = ['text', 'url', 'html'].includes(capture.type) && detectSensitive(contentForCheck)
-  const result = save({ ...capture, isSensitive })
+  const result = await save({ ...capture, isSensitive })
   if (!result || result.id === null) return null
   notify({ ...capture, ...result, id: result.id, isSensitive, fromCapture: true })
   return { id: result.id, updated: result.updated }

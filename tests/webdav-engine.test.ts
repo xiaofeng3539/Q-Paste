@@ -1,13 +1,15 @@
 /**
  * WebDAV 云同步引擎回归测试：空目录自举、增量推拉、大内容 blob 旁路、删除墓碑。
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import http from 'node:http'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SyncEngine } from '../src/main/sync/SyncEngine'
 import { computeContentHash } from '../src/main/sync/SyncEngine'
+
+const unreadableFiles = new Set<string>()
 
 /** 内存 WebDAV 模拟（坚果云式严格语义：父目录缺失返回 409/404） */
 function createDavMock() {
@@ -40,7 +42,7 @@ function createDavMock() {
         return done(201)
       }
       if (method === 'GET') {
-        if (files.has(url)) return done(200, files.get(url) as Buffer)
+        if (files.has(url) && !unreadableFiles.has(url)) return done(200, files.get(url) as Buffer)
         return done(404)
       }
       if (method === 'DELETE') {
@@ -74,14 +76,14 @@ function createDavMock() {
   })
 }
 
-function mkEngine(deviceId: string, stateDir: string): Promise<SyncEngine> {
+function mkEngine(deviceId: string, stateDir: string, basePath = 'qpaste-sync'): Promise<SyncEngine> {
   const e = new SyncEngine()
   e.onPulled = () => {}
   return e.init({
     enabled: true,
     webdavUrl: 'http://127.0.0.1:18862/dav',
     username: 'u', password: 'p',
-    basePath: 'qpaste-sync', deviceId, intervalSecs: 0,
+    basePath, deviceId, intervalSecs: 0,
   }, join(stateDir, `${deviceId}.json`)).then(() => e)
 }
 
@@ -94,13 +96,24 @@ function mkItem(text: string, deviceId = 'devA') {
   }
 }
 
+function opPath(deviceId: string, seq: number): string {
+  return `ops/${deviceId}__${String(seq).padStart(20, '0')}.json`
+}
+
+function opBatch(deviceId: string, seq: number, content: string) {
+  return {
+    deviceId, seq, uploadedAt: Date.now(),
+    entries: [{ ...mkItem(content, deviceId), contentBlobHash: null, htmlBlobHash: null }],
+  }
+}
+
 describe('WebDAV 云同步引擎', () => {
   let srv: http.Server
   let stateDir: string
   let a: SyncEngine
   let b: SyncEngine
 
-  beforeAll(async () => {
+  beforeEach(async () => {
     srv = createDavMock()
     await new Promise<void>((r) => srv.listen(18862, '127.0.0.1', r))
     stateDir = mkdtempSync(join(tmpdir(), 'qp-sync-test-'))
@@ -108,8 +121,8 @@ describe('WebDAV 云同步引擎', () => {
     b = await mkEngine('devB', stateDir)
   })
 
-  afterAll(() => {
-    srv.close()
+  afterEach(async () => {
+    await new Promise<void>((resolve) => srv.close(() => resolve()))
     rmSync(stateDir, { recursive: true, force: true })
   })
 
@@ -154,5 +167,144 @@ describe('WebDAV 云同步引擎', () => {
     const tombstones = got.filter((i) => i.deletedAt > 0)
     expect(tombstones.length).toBeGreaterThan(0)
     expect(tombstones[0].hash).toBe(hash)
+  })
+
+  it('replays the same remote item after the host rejects durable storage', async () => {
+    const source = await mkEngine('callback-source', stateDir)
+    const peer = await mkEngine('callback-peer', stateDir)
+    await source.pushItem(mkItem('callback-retry'))
+    peer.onPulled = () => { throw new Error('database commit failed') }
+    await expect(peer.pullChanges(0)).rejects.toThrow()
+    expect(peer.status.lastSyncAt).toBeNull()
+    expect(peer.status.receivedItems).toBe(0)
+
+    const restarted = await mkEngine('callback-peer', stateDir)
+    expect((await restarted.pullChanges(0)).map((item) => item.content)).toContain('callback-retry')
+  })
+
+  it('keeps the in-memory cursor retryable when saving the state file fails', async () => {
+    const source = await mkEngine('save-source', stateDir)
+    const peer = await mkEngine('save-peer', stateDir)
+    await source.pushItem(mkItem('state-save-retry'))
+    const statePath = join(stateDir, 'save-peer.json')
+    mkdirSync(statePath)
+    const applied: string[] = []
+    peer.onPulled = (items) => { applied.push(...items.map((item) => item.content)) }
+    try {
+      await expect(peer.pullChanges(0)).rejects.toThrow()
+      expect(applied).toContain('state-save-retry')
+      expect(peer.status.lastSyncAt).toBeNull()
+    } finally {
+      rmSync(statePath, { force: true, recursive: true })
+    }
+    expect((await peer.pullChanges(0)).map((item) => item.content)).toContain('state-save-retry')
+  })
+
+  it('applies late batches even when their entry timestamps precede the last sync', async () => {
+    const source = await mkEngine('late-source', stateDir)
+    const peer = await mkEngine('late-peer', stateDir)
+    await peer.pullChanges(0)
+    await source.pushItem({ ...mkItem('late-entry'), createdAt: 100, updatedAt: 100 })
+    expect((await peer.pullChanges(peer.status.lastSyncAt!)).map((item) => item.content)).toContain('late-entry')
+  })
+
+  it.each(['unlisted', 'unreadable', 'invalid JSON', 'wrong device', 'wrong seq', 'invalid entry'])(
+    'waits for an earlier %s batch while applying other devices',
+    async (failure) => {
+      const id = `retry-${failure.replace(/ /g, '-')}`
+      const peer = await mkEngine(`${id}-peer`, stateDir)
+      const invalidBatch = opBatch(id, 1, `${id}-first`)
+      let body = JSON.stringify(invalidBatch)
+      if (failure === 'invalid JSON') body = '{'
+      if (failure === 'wrong device') body = JSON.stringify({ ...invalidBatch, deviceId: 'different-device' })
+      if (failure === 'wrong seq') body = JSON.stringify({ ...invalidBatch, seq: 8 })
+      if (failure === 'invalid entry') body = JSON.stringify({ ...invalidBatch, entries: [{ ...invalidBatch.entries[0], type: 'invalid' }] })
+      const firstPath = opPath(id, 1)
+      const remoteFirst = `/dav/qpaste-sync/${firstPath}`
+      if (failure !== 'unlisted') await a.uploadFile(firstPath, Buffer.from(body))
+      if (failure === 'unreadable') unreadableFiles.add(remoteFirst)
+      await a.uploadFile(opPath(id, 2), Buffer.from(JSON.stringify(opBatch(id, 2, `${id}-second`))))
+      await a.uploadFile(opPath(`${id}-other`, 1), Buffer.from(JSON.stringify(opBatch(`${id}-other`, 1, `${id}-independent`))))
+      const applied: string[] = []
+      peer.onPulled = (items) => { applied.push(...items.map((item) => item.content)) }
+
+      try {
+        await expect(peer.pullChanges(0)).rejects.toThrow()
+        expect(applied).toContain(`${id}-independent`)
+        expect(applied).not.toContain(`${id}-first`)
+        expect(applied).not.toContain(`${id}-second`)
+      } finally {
+        unreadableFiles.delete(remoteFirst)
+        await a.uploadFile(firstPath, Buffer.from(JSON.stringify(invalidBatch)))
+      }
+
+      const retried = (await peer.pullChanges(0)).map((item) => item.content)
+      expect(retried).toEqual(expect.arrayContaining([`${id}-first`, `${id}-second`]))
+      expect(retried).not.toContain(`${id}-independent`)
+    },
+  )
+
+  it('retries a blob whose contents do not match its address', async () => {
+    const source = await mkEngine('blob-source', stateDir)
+    const peer = await mkEngine('blob-peer', stateDir)
+    const content = 'blob body'.repeat(2048)
+    await source.pushItem(mkItem(content))
+    const hash = computeContentHash(content)
+    const path = `blobs/${hash.slice(0, 2)}/content_${hash}.blob`
+    await source.uploadFile(path, Buffer.from('corrupted'))
+    try {
+      await expect(peer.pullChanges(0)).rejects.toThrow()
+    } finally {
+      await source.uploadFile(path, Buffer.from(content))
+    }
+    expect((await peer.pullChanges(0)).map((item) => item.content)).toContain(content)
+  })
+
+  it('publishes simultaneous incremental and bulk pushes with distinct sequences', async () => {
+    const source = await mkEngine('concurrent-source', stateDir)
+    const peer = await mkEngine('concurrent-peer', stateDir)
+    await Promise.all([
+      source.pushItem(mkItem('concurrent-incremental-1')),
+      source.pushAll([mkItem('concurrent-bulk')]),
+      source.pushItem(mkItem('concurrent-incremental-2')),
+    ])
+    const contents = (await peer.pullChanges(0)).map((item) => item.content)
+    expect(contents).toEqual(expect.arrayContaining([
+      'concurrent-incremental-1', 'concurrent-bulk', 'concurrent-incremental-2',
+    ]))
+  })
+
+  it.each(['in the same engine', 'after restart'])(
+    'preserves a published batch %s after saving the sequence fails',
+    async (resume) => {
+      const source = await mkEngine('push-save-source', stateDir)
+      const peer = await mkEngine('push-save-peer', stateDir)
+      const statePath = join(stateDir, 'push-save-source.json')
+      mkdirSync(statePath)
+      try {
+        await expect(source.pushItem(mkItem('published-before-save-failed'))).rejects.toThrow()
+      } finally {
+        rmSync(statePath, { force: true, recursive: true })
+      }
+      const resumed = resume === 'after restart' ? await mkEngine('push-save-source', stateDir) : source
+      await resumed.pushItem(mkItem('published-next'))
+      expect((await peer.pullChanges(0)).map((item) => item.content)).toEqual(expect.arrayContaining([
+        'published-before-save-failed', 'published-next',
+      ]))
+    },
+  )
+
+  it('resets operation cursors and sequences when changing the WebDAV destination', async () => {
+    await a.pushItem(mkItem('first-destination'))
+    await b.pullChanges(0)
+
+    const movedSource = await mkEngine('devA', stateDir, 'second destination')
+    const movedPeer = await mkEngine('devB', stateDir, 'second destination')
+    await movedSource.pushItem(mkItem('second-destination'))
+    expect((await movedPeer.pullChanges(0)).map((item) => item.content)).toEqual(['second-destination'])
+
+    const returningSource = await mkEngine('devA', stateDir)
+    await returningSource.pushItem(mkItem('returned-to-first'))
+    expect((await b.pullChanges(0)).map((item) => item.content)).toEqual(['returned-to-first'])
   })
 })

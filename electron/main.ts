@@ -1,9 +1,12 @@
-import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, clipboard, nativeImage, dialog, shell, protocol, net, nativeTheme, safeStorage, screen } from 'electron'
+import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, clipboard, ClipboardItem, nativeImage, dialog, shell, protocol, net, nativeTheme, safeStorage, screen, powerMonitor } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import os from 'node:os'
 import { pathToFileURL } from 'node:url'
-import initSqlJs, { Database as SqlJsDatabase, SqlJsStatic } from 'sql.js'
+import { NativeDatabase } from '../src/main/native-database'
+import { htmlToText, trimHistory, type HistoryItemInput, type HistoryInsertResult } from '../src/main/history-write'
+import { runDatabaseTask } from './database-client'
+import { listenForClipboardChanges, readClipboardSnapshot, writeClipboardFiles, writeClipboardImage } from './system-clipboard'
 import log from 'electron-log'
 import { createHash, randomUUID } from 'node:crypto'
 import { SyncEngine } from '../src/main/sync/SyncEngine'
@@ -11,12 +14,12 @@ import { WebDavService, verifyWebDav } from '../src/main/sync/WebDavService'
 import type { ClipboardSyncItem, ClipboardSyncType, CloudSyncStatus, WebDavToggleResult } from '../src/main/sync/types'
 import { FileTransferServer, getAvailableIps, guessMime, FILE_TRANSFER_DEFAULT_PORT, type FtStatus } from './file-transfer/server'
 import { ensureStorageLayout, getStorageLayout, type StorageLayout } from '../src/main/storage-layout'
-import { prepareStorageRoot, writeStorageRootPointer } from '../src/main/storage-migration'
+import { prepareStorageRoot, stageStorageMigration, writeJsonFile, writeStorageRootPointer } from '../src/main/storage-migration'
 import { cleanupStaleTempFiles } from '../src/main/temp-cleanup'
 import { resolveAppMode, type AppMode } from '../src/lib/app-mode'
 import { persistClipboardCapture, type ClipboardCapture } from '../src/main/clipboard-capture'
-import { FloralNotesStore } from './floral/notes-store'
-import { copyExistingFloralData } from './floral/data-migration'
+import { FloralNotesStore, replaceFile as replaceFloralFile, type FloralNoteMetadata } from './floral/notes-store'
+import { copyExistingFloralData, FloralMigrationGate } from './floral/data-migration'
 import { findFloralSurfaceWindow, registerFloralSurfaceMode, fitFloralTileBounds, installFloralNativeDrag } from './floral/surface-window'
 import { broadcastFloralEvent } from './floral/event-broadcast'
 import { toFloralUpdateState, type HostUpdateStatus } from './floral/host-update'
@@ -46,8 +49,7 @@ const pendingInstallReports = new Map<string, Map<number, (ready: boolean) => vo
 protocol.registerSchemesAsPrivileged([
   { scheme: 'ft-file', privileges: { stream: true, supportFetchAPI: true, bypassCSP: true } },
 ])
-let db: SqlJsDatabase | null = null
-let sqlModule: SqlJsStatic | null = null
+let db: NativeDatabase | null = null
 let dbPath = ''
 let configPath = ''
 let storageLayout: StorageLayout | null = null
@@ -59,7 +61,6 @@ let clipboardTimer: ReturnType<typeof setInterval> | null = null
 const pendingOversizeCaptures: Array<{ content: string; kb: number }> = []
 let isQuitting = false
 let dbIntegrityIssue = false // 启动完整性检查发现异常时置位
-let legacyMaxSortOrder = 0 // 迁移回填时历史记录的最大 sort_order，供新条目置顶基准（启动后由实际 MAX 兜底）
 let legacyMaxVaultSortOrder = 0 // 迁移回填时金库记录的最大 vault_sort_order，供新收藏置顶基准
 const BOOT_T0 = Date.now() // 冷启动耗时基线
 
@@ -108,6 +109,7 @@ interface AppConfig {
   cloudSyncFullPushDone?: boolean
   /** 局域网文件传输（手机 ↔ PC）：服务配置 */
   fileTransferEnabled?: boolean
+  fileTransferTrustedDevices?: string[]
   fileTransferPort?: number
   fileTransferPath?: string
   /** 绑定的网卡 IP（空 = 全部接口 0.0.0.0） */
@@ -145,12 +147,8 @@ function loadConfig(): void {
 }
 
 function saveConfig(): void {
-  try { fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8') } catch {}
-}
-
-function saveDb(): void {
-  if (!db) return
-  fs.writeFileSync(dbPath, db.export())
+  try { writeJsonFile(configPath, config) }
+  catch (error) { log.warn('无法保存 Q-Paste 设置:', error) }
 }
 
 // ── 保留策略：仅清理未收藏的记录，金库数据永远保留 ──
@@ -169,37 +167,9 @@ function enforceRetention(): void {
 }
 
 /** 超出最大记录条数时，裁剪最旧的未收藏记录 */
-function enforceMaxRecords(): void {
-  if (!db) return
-  const max = config.maxRecords
-  if (!max || max <= 0) return
-
-  const stmt = db.prepare('SELECT COUNT(*) AS total, SUM(is_pinned) AS pinned FROM items')
-  let total = 0
-  let pinned = 0
-  if (stmt.step()) {
-    const row = stmt.getAsObject()
-    total = (row.total as number) || 0
-    pinned = (row.pinned as number) || 0
-  }
-  stmt.free()
-
-  const allowedUnpinned = Math.max(0, max - pinned)
-  const unpinned = total - pinned
-  if (unpinned <= allowedUnpinned) return
-
-  // 保留最新 allowedUnpinned 条未收藏记录，删除其余更旧的
-  db.run(
-    `DELETE FROM items WHERE is_pinned = 0 AND id NOT IN (
-       SELECT id FROM items WHERE is_pinned = 0 ORDER BY created_at DESC, id DESC LIMIT :keep
-     )`,
-    { ':keep': allowedUnpinned }
-  )
-}
-
 function enforceRetentionRules(): void {
   enforceRetention()
-  enforceMaxRecords()
+  if (db) trimHistory(db, config.maxRecords)
   // 删除记录后清理不再被引用的图片文件
   cleanupOrphanImages()
 }
@@ -225,7 +195,6 @@ function startRetentionTimer(): void {
     } catch {}
 
     enforceRetentionRules()
-    saveDb()
   }, 60 * 60 * 1000) // 每小时执行一次
 }
 
@@ -251,8 +220,6 @@ function getOcrConfig(): { langPath: string; workerPath: string; corePath: strin
     path.join(ocrDir, 'chi_sim.traineddata.gz'),
     path.join(ocrDir, 'eng.traineddata.gz'),
     workerFile,
-    path.join(coreDir, 'tesseract-core.wasm.js'),
-    path.join(coreDir, 'tesseract-core-simd.wasm.js'),
     path.join(coreDir, 'tesseract-core-lstm.wasm.js'),
     path.join(coreDir, 'tesseract-core-simd-lstm.wasm.js'),
   ]
@@ -273,17 +240,17 @@ function getImagesDir(): string {
 }
 
 /** 保存 dataURL 图片到磁盘，返回相对路径（如 images/img_xxx.png）；失败返回 null */
-function saveImageToDisk(dataUrl: string, hash: string): string | null {
+function saveImageToDisk(data: string | Buffer, hash: string, format = 'png'): string | null {
   try {
-    const m = dataUrl.match(/^data:image\/(png|jpeg|jpg);base64,(.+)$/i)
-    if (!m) return null
-    const ext = m[1].toLowerCase() === 'jpeg' || m[1].toLowerCase() === 'jpg' ? 'jpg' : 'png'
+    const m = typeof data === 'string' ? data.match(/^data:image\/(png|jpeg|jpg);base64,(.+)$/i) : null
+    if (typeof data === 'string' && !m) return null
+    const ext = m ? (m[1].toLowerCase() === 'jpeg' || m[1].toLowerCase() === 'jpg' ? 'jpg' : 'png') : format
     const dir = getImagesDir()
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     // hash 含冒号（长度:值），文件名为安全字符：仅保留字母数字
     const safeHash = hash.replace(/[^a-zA-Z0-9]/g, '')
     const name = `img_${Date.now()}_${safeHash}.${ext}`
-    fs.writeFileSync(path.join(dir, name), Buffer.from(m[2], 'base64'))
+    fs.writeFileSync(path.join(dir, name), typeof data === 'string' ? Buffer.from(m![2], 'base64') : data)
     return `images/${name}`
   } catch (err) {
     console.error('[Q-Paste] 图片落盘失败:', err)
@@ -300,36 +267,51 @@ function resolveImagePath(relPath: string): string | null {
   return fs.existsSync(abs) ? abs : null
 }
 
-/** 读取图片文件并转 dataURL（供渲染层预览/写回剪贴板） */
-function readImageAsDataUrl(relPath: string): string | null {
-  const abs = resolveImagePath(relPath)
-  if (!abs) return null
-  try {
-    const buf = fs.readFileSync(abs)
-    const ext = path.extname(abs).toLowerCase()
-    const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png'
-    return `data:${mime};base64,${buf.toString('base64')}`
-  } catch {
-    return null
+const pendingHistoryImages = new Map<string, number>()
+const pendingHistoryWrites = new Set<Promise<HistoryInsertResult>>()
+let activeDatabaseExports = 0
+let orphanCleanupPending = false
+
+function retainHistoryImage(item: Pick<HistoryItemInput, 'type' | 'content'>): () => void {
+  if (item.type !== 'image' || !item.content.startsWith('images/')) return () => {}
+  const image = item.content
+  pendingHistoryImages.set(image, (pendingHistoryImages.get(image) ?? 0) + 1)
+  return () => {
+    const remaining = (pendingHistoryImages.get(image) ?? 1) - 1
+    if (remaining) pendingHistoryImages.set(image, remaining)
+    else pendingHistoryImages.delete(image)
   }
+}
+
+async function drainHistoryWrites(): Promise<void> {
+  while (pendingHistoryWrites.size) await Promise.allSettled(pendingHistoryWrites)
 }
 
 /** 删除磁盘上不再被任何记录引用的孤儿图片文件 */
 function cleanupOrphanImages(): void {
   if (!db) return
+  if (activeDatabaseExports) {
+    orphanCleanupPending = true
+    return
+  }
+  orphanCleanupPending = false
   const dir = getImagesDir()
   if (!fs.existsSync(dir)) return
-  let files: string[]
-  try { files = fs.readdirSync(dir) } catch { return }
+  const layout = getStorageLayoutOrThrow()
+  let files: string[], kept: Set<string>
+  try {
+    files = fs.readdirSync(dir)
+    kept = new Set(db.exec("SELECT content FROM items WHERE type = 'image'")[0].values.map(([content]) => String(content)))
+    const queued = path.join(layout.databaseDir, 'pending-inserts.json')
+    if (fs.existsSync(queued)) {
+      const items = JSON.parse(fs.readFileSync(queued, 'utf8')) as HistoryItemInput[]
+      for (const item of items) if (item.type === 'image') kept.add(item.content)
+    }
+  } catch { return }
   for (const f of files) {
     if (!f.startsWith('img_')) continue
     const rel = `images/${f}`
-    const stmt = db.prepare("SELECT COUNT(*) AS cnt FROM items WHERE type = 'image' AND content = :rel")
-    stmt.bind({ ':rel': rel })
-    let cnt = 0
-    if (stmt.step()) cnt = (stmt.getAsObject().cnt as number) || 0
-    stmt.free()
-    if (cnt === 0) {
+    if (!kept.has(rel) && !pendingHistoryImages.has(rel)) {
       try { fs.unlinkSync(path.join(dir, f)) } catch { /* 忽略删除失败 */ }
     }
   }
@@ -353,148 +335,80 @@ async function initDatabase(): Promise<void> {
   }
   dbPath = storageLayout.dbPath
   ensureStorageLayout(storageLayout)
-  // 缓存 sql.js 模块实例，避免重复加载 WASM
-  const SQL = sqlModule ?? (sqlModule = await initSqlJs({
-    locateFile: (file: string) => {
-      // Production: WASM copied to resources/ by electron-builder extraResources
-      // Development: WASM inside node_modules/sql.js/dist/
-      if (app.isPackaged) {
-        return path.join(process.resourcesPath, file)
+  const recovery = await runDatabaseTask({ kind: 'open', layout: storageLayout })
+  if (recovery === 'damaged' || recovery === 'recovered') {
+    dbIntegrityIssue = true
+    console.error('[Q-Paste] 历史库恢复状态:', recovery)
+  }
+  db = new NativeDatabase(dbPath)
+  db.transaction(() => {
+    db!.run(`
+      CREATE TABLE IF NOT EXISTS items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        preview TEXT NOT NULL DEFAULT '',
+        char_count INTEGER NOT NULL DEFAULT 0,
+        storage_size INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+      )
+    `)
+
+    // 迁移：添加金库功能字段（幂等 — 列已存在则忽略）
+    const migrations = [
+      "ALTER TABLE items ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE items ADD COLUMN alias TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE items ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
+      "ALTER TABLE items ADD COLUMN is_sensitive INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE items ADD COLUMN pinned_at TEXT",
+      "ALTER TABLE items ADD COLUMN sort_order REAL",
+      "ALTER TABLE items ADD COLUMN vault_sort_order REAL",
+    ]
+    for (const sql of migrations) {
+      try { db!.run(sql) } catch { /* 列已存在，忽略 */ }
+    }
+    // 存量收藏没有收藏时间：以复制时间兜底，保证金库可按收藏先后稳定排序
+    db!.run("UPDATE items SET pinned_at = created_at WHERE is_pinned = 1 AND pinned_at IS NULL")
+    // 自定义拖拽排序：存量数据无 sort_order 时，以复制时间兜底（数值越大越靠前，与默认时间倒序一致）
+    {
+      const stmt = db!.prepare(
+        "SELECT id, created_at FROM items WHERE sort_order IS NULL"
+      )
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as { id: number; created_at: string }
+        const so = localDateToMs(row.created_at)
+        db!.run("UPDATE items SET sort_order = :so WHERE id = :id", { ':so': so, ':id': row.id })
       }
-      return path.join(__dirname, '../../node_modules/sql.js/dist', file)
-    },
-  }))
-
-  // 数据恢复扫描：枚举数据目录全部库文件候选（含 .bak / .pre-rollback / history.* / .tmp 残留），
-  // 逐一校验完整性（可解析 + integrity_check + items 行数），按数据量择优加载；绝不删除任何原文件
-  const bakPath = dbPath + '.bak'
-  const candidates = new Set<string>([
-    dbPath, bakPath, dbPath + '.pre-rollback',
-    path.join(storageLayout.databaseDir, 'history.db'), path.join(storageLayout.databaseDir, 'history.bak'),
-  ])
-  try {
-    for (const f of fs.readdirSync(storageLayout.databaseDir)) {
-      if (/(?:^|\/)history\.(?:db|bak)$|\.db\.tmp$|\.pre-rollback$/.test(f)) candidates.add(path.join(storageLayout.databaseDir, f))
+      stmt.free()
     }
-  } catch {}
-  const evaluate = (file: string): { ok: boolean; count: number } => {
-    let probe: any = null
-    try {
-      if (!fs.existsSync(file) || fs.statSync(file).size === 0) return { ok: false, count: -1 }
-      probe = new SQL.Database(fs.readFileSync(file))
-      probe.exec('SELECT COUNT(*) FROM sqlite_master')
-      const r = probe.exec('SELECT COUNT(*) FROM items')
-      const count = Number(r[0]?.values[0]?.[0] ?? 0)
-      probe.exec('PRAGMA integrity_check')
-      probe.close()
-      return { ok: true, count }
-    } catch {
-      try { probe?.close() } catch {}
-      return { ok: false, count: -1 }
+    // 金库自定义拖拽排序：存量收藏无 vault_sort_order 时，以收藏时间兜底（与默认收藏倒序一致）
+    {
+      const stmt = db!.prepare(
+        "SELECT id, pinned_at, created_at FROM items WHERE is_pinned = 1 AND vault_sort_order IS NULL"
+      )
+      let maxVso = 0
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as { id: number; pinned_at: string | null; created_at: string }
+        const so = localDateToMs(row.pinned_at || row.created_at)
+        if (so > maxVso) maxVso = so
+        db!.run("UPDATE items SET vault_sort_order = :so WHERE id = :id", { ':so': so, ':id': row.id })
+      }
+      stmt.free()
+      legacyMaxVaultSortOrder = maxVso
     }
-  }
-  const ranked = [...candidates]
-    .filter((f) => fs.existsSync(f))
-    .map((f) => ({ file: f, mtime: fs.statSync(f).mtimeMs, ...evaluate(f) }))
-    .sort((x, y) => y.count - x.count || y.mtime - x.mtime)
-  for (const c of ranked) {
-    console.log(`[Q-Paste] 库文件候选: ${path.basename(c.file)} 可用=${c.ok} 条数=${c.count}`)
-  }
-  const mainEval = ranked.find((c) => c.file === dbPath)
-  let chosen = ranked[0]
-  if (mainEval?.ok && mainEval.count >= (chosen?.count ?? 0)) chosen = mainEval
-  if (chosen?.ok) {
-    if (chosen.file !== dbPath) {
-      // 主库不是最优：以最优候选覆盖主库（原主库保留为 .damaged，绝不删除）
-      try { fs.copyFileSync(dbPath, dbPath + '.damaged') } catch {}
-      fs.copyFileSync(chosen.file, dbPath)
-      console.error(`[Q-Paste] 主库数据(${mainEval?.count ?? 0}条)少于候选(${chosen.count}条)，已从 ${path.basename(chosen.file)} 恢复`)
-    }
-    const buf = fs.readFileSync(dbPath)
-    db = new SQL.Database(buf)
-  } else {
-    console.error('[Q-Paste] 未找到任何可用数据库文件，以空库启动（原文件全部保留待人工恢复）')
-    db = new SQL.Database()
-  }
 
-  db!.run('PRAGMA journal_mode = WAL')
+    // 回滚迁移：移除优化期新增的 content_hash 冗余列（幂等；未加过该列的库静默跳过）
+    try { db!.run('ALTER TABLE items DROP COLUMN content_hash') } catch { /* 列不存在或已回滚 */ }
 
-  db!.run(`
-    CREATE TABLE IF NOT EXISTS items (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      type TEXT NOT NULL,
-      content TEXT NOT NULL DEFAULT '',
-      preview TEXT NOT NULL DEFAULT '',
-      char_count INTEGER NOT NULL DEFAULT 0,
-      storage_size INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
-    )
-  `)
+    // 查询性能索引（幂等）
+    db!.run('CREATE INDEX IF NOT EXISTS idx_items_created ON items (created_at DESC, id DESC)')
+    db!.run('CREATE INDEX IF NOT EXISTS idx_items_type ON items (type)')
+    db!.run('CREATE INDEX IF NOT EXISTS idx_items_pinned ON items (is_pinned)')
+    db!.run('CREATE INDEX IF NOT EXISTS idx_items_history_order ON items (sort_order DESC, created_at DESC, id DESC)')
+    db!.run('CREATE INDEX IF NOT EXISTS idx_items_vault_order ON items (vault_sort_order DESC, created_at DESC, id DESC) WHERE is_pinned = 1')
 
-  // 迁移：添加金库功能字段（幂等 — 列已存在则忽略）
-  const migrations = [
-    "ALTER TABLE items ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE items ADD COLUMN alias TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE items ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
-    "ALTER TABLE items ADD COLUMN is_sensitive INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE items ADD COLUMN pinned_at TEXT",
-    "ALTER TABLE items ADD COLUMN sort_order REAL",
-    "ALTER TABLE items ADD COLUMN vault_sort_order REAL",
-  ]
-  for (const sql of migrations) {
-    try { db!.run(sql) } catch { /* 列已存在，忽略 */ }
-  }
-  // 存量收藏没有收藏时间：以复制时间兜底，保证金库可按收藏先后稳定排序
-  db!.run("UPDATE items SET pinned_at = created_at WHERE is_pinned = 1 AND pinned_at IS NULL")
-  // 自定义拖拽排序：存量数据无 sort_order 时，以复制时间兜底（数值越大越靠前，与默认时间倒序一致）
-  {
-    const stmt = db!.prepare(
-      "SELECT id, created_at FROM items WHERE sort_order IS NULL"
-    )
-    let maxSo = 0
-    while (stmt.step()) {
-      const row = stmt.getAsObject() as { id: number; created_at: string }
-      const so = localDateToMs(row.created_at)
-      if (so > maxSo) maxSo = so
-      db!.run("UPDATE items SET sort_order = :so WHERE id = :id", { ':so': so, ':id': row.id })
-    }
-    stmt.free()
-    // 防止置顶时新条目 sort_order 与旧值碰撞：以当前最大值为基准，首个新条目 +1
-    legacyMaxSortOrder = maxSo
-  }
-  // 金库自定义拖拽排序：存量收藏无 vault_sort_order 时，以收藏时间兜底（与默认收藏倒序一致）
-  {
-    const stmt = db!.prepare(
-      "SELECT id, pinned_at, created_at FROM items WHERE is_pinned = 1 AND vault_sort_order IS NULL"
-    )
-    let maxVso = 0
-    while (stmt.step()) {
-      const row = stmt.getAsObject() as { id: number; pinned_at: string | null; created_at: string }
-      const so = localDateToMs(row.pinned_at || row.created_at)
-      if (so > maxVso) maxVso = so
-      db!.run("UPDATE items SET vault_sort_order = :so WHERE id = :id", { ':so': so, ':id': row.id })
-    }
-    stmt.free()
-    legacyMaxVaultSortOrder = maxVso
-  }
-
-  // 回滚迁移：移除优化期新增的 content_hash 冗余列（幂等；未加过该列的库静默跳过）
-  try { db!.exec('ALTER TABLE items DROP COLUMN content_hash') } catch { /* 列不存在或已回滚 */ }
-
-  // 查询性能索引（幂等）
-  db!.run('CREATE INDEX IF NOT EXISTS idx_items_created ON items (created_at DESC, id DESC)')
-  db!.run('CREATE INDEX IF NOT EXISTS idx_items_type ON items (type)')
-  db!.run('CREATE INDEX IF NOT EXISTS idx_items_pinned ON items (is_pinned)')
-
-  // 完整性检查：异常置位（窗口就绪后提示用户）
-  try {
-    const ic = db!.exec('PRAGMA integrity_check')
-    const status = String(ic[0]?.values[0]?.[0] ?? 'ok')
-    if (status !== 'ok') {
-      dbIntegrityIssue = true
-      console.error('[Q-Paste] 数据库完整性异常:', status)
-    }
-  } catch { /* 检查失败不阻塞启动 */ }
+    db!.run('PRAGMA user_version = 1')
+  })
 
   // 一次性迁移：把旧版存在 DB 里的 base64 图片落盘，content 替换为相对路径（缩小 DB）
   migrateLegacyImages()
@@ -503,23 +417,24 @@ async function initDatabase(): Promise<void> {
   try {
     const qPath = path.join(storageLayout.databaseDir, 'pending-inserts.json')
     if (fs.existsSync(qPath)) {
-      const arr = JSON.parse(fs.readFileSync(qPath, 'utf-8')) as Array<Record<string, unknown>>
-      let ok = 0
-      for (const it of arr) {
-        if (insertItemDb(it as any)) ok++
+      const queued = JSON.parse(fs.readFileSync(qPath, 'utf-8')) as HistoryItemInput[]
+      const remaining: HistoryItemInput[] = []
+      for (const item of queued) {
+        try {
+          if (!await insertItemDb(item)) remaining.push(item)
+        } catch { remaining.push(item) }
       }
+      const ok = queued.length - remaining.length
       if (ok > 0) {
-        saveDb()
-        console.log(`[Q-Paste] 已补录 ${ok}/${arr.length} 条待写记录`)
+        console.log(`[Q-Paste] 已补录 ${ok}/${queued.length} 条待写记录`)
       }
-      if (ok === arr.length) fs.rmSync(qPath, { force: true })
-      else fs.writeFileSync(qPath, JSON.stringify(arr.slice(ok)), 'utf-8')
+      if (!remaining.length) fs.rmSync(qPath, { force: true })
+      else fs.writeFileSync(qPath, JSON.stringify(remaining), 'utf-8')
     }
   } catch (err) {
     console.error('[Q-Paste] 待写队列补录失败（原队列保留）:', err)
   }
 
-  saveDb()
   if (prepared.isNewPointer) writeStorageRootPointer(pointerPath, storageLayout.rootDir)
 }
 
@@ -557,7 +472,7 @@ function nowLocal(): string {
 }
 
 // ══════════════════════════════════════════════════════════════
-// Clipboard monitor — high-frequency polling + format sniffing
+// Clipboard monitor — system notifications with a polling fallback.
 // ══════════════════════════════════════════════════════════════
 
 const IMAGE_SIZE_LIMIT_MB = 10
@@ -566,7 +481,7 @@ let lastImageHash = ''
 let lastHtmlContent = ''
 let lastFileHash = ''
 /** 应用自身写入剪贴板后的保护窗口（毫秒）：窗口内轮询直接跳过，避免自我捕获 */
-let selfWriteUntil = 0
+let selfClipboardSequence: number | undefined
 
 /** Lightweight hash of a Buffer — avoids expensive crypto for large images */
 function hashBuffer(buf: Buffer): string {
@@ -594,65 +509,65 @@ function isIgnoredContent(text: string): boolean {
 }
 
 /** 从 Windows 剪贴板读取文件路径列表（FileNameW 格式：UTF-16LE，\0 分隔） */
-function readClipboardFilePaths(): string[] | null {
-  const formats = clipboard.availableFormats()
-  if (!formats.includes('FileNameW')) return null
-  const buf = clipboard.readBuffer('FileNameW')
-  if (buf.length === 0) return null
-  // UTF-16LE 解码后按 \0 切分（结尾通常也有一个 \0）
-  const raw = buf.toString('utf16le')
-  const paths = raw.split('\0').map((s) => s.trim()).filter(Boolean)
-  return paths.length > 0 ? paths : null
-}
-
 /** 极简 HTML → 纯文本（主进程侧，供预览/写回剪贴板使用） */
-function htmlToText(html: string): string {
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>|<\/div>|<\/li>|<\/h[1-6]>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
+let clipboardWork: Promise<unknown> = Promise.resolve()
+let clipboardPersistence: Promise<void> = Promise.resolve()
+let clipboardListener: ReturnType<typeof listenForClipboardChanges> = null
+let clipboardMonitorGeneration = 0
+let clipboardMonitoring = false
+let clipboardCheckQueued = false
+
+async function flushHistory(): Promise<void> {
+  await clipboardWork
+  await clipboardPersistence
+  await drainHistoryWrites()
+  if (db) await runDatabaseTask({ kind: 'flush' })
 }
 
 function recordClipboardCapture(capture: ClipboardCapture): void {
-  const result = persistClipboardCapture(
-    capture,
-    insertItemDbWithRetry,
-    (item) => mainWindow?.webContents.send('clipboard-changed', item),
-  )
-  if (result) void pushCaptureToCloud(capture)
+  const releaseImage = retainHistoryImage(capture)
+  clipboardPersistence = clipboardPersistence.then(async () => {
+    await persistClipboardCapture(
+      capture,
+      insertItemDbWithRetry,
+      (item) => {
+        mainWindow?.webContents.send('clipboard-changed', item)
+        void pushCaptureToCloud(item)
+      },
+    )
+  }).catch((error) => log.error('Clipboard capture persistence failed:', error)).finally(releaseImage)
 }
 
-function checkClipboard(): void {
-  if (!mainWindow) return
+function enqueueClipboard<T>(work: () => Promise<T>): Promise<T> {
+  const queued = clipboardWork.then(work)
+  clipboardWork = queued.catch(() => {})
+  return queued
+}
 
-  // 应用自身写入剪贴板后，跳过本轮轮询，避免自我捕获（复制自己的记录不再重复入账）
-  if (Date.now() < selfWriteUntil) return
+function rememberOwnClipboardWrite(): void {
+  selfClipboardSequence = clipboardListener?.sequence() || undefined
+}
 
-  // ── 1. Format sniffing (lightweight, no heavy read) ──
-  const formats = clipboard.availableFormats()
+async function checkClipboard(generation: number, seed: boolean): Promise<void> {
+  if (!mainWindow || !clipboardMonitoring || generation !== clipboardMonitorGeneration) return
+  const sequence = clipboardListener?.sequence()
+  if (!seed && sequence && sequence === selfClipboardSequence) return
+  const snapshot = await readClipboardSnapshot()
+  if (!clipboardMonitoring || generation !== clipboardMonitorGeneration) return
+  const { image: buf, imageType, files: filePaths, html, text } = snapshot
+  if (seed) {
+    lastTextContent = (html && htmlToText(html)) || text
+    lastHtmlContent = html
+    lastImageHash = buf ? hashBuffer(buf) : ''
+    lastFileHash = filePaths.length ? hashBuffer(Buffer.from(filePaths.join('\0') + '\0', 'utf16le')) : ''
+    return
+  }
 
-  // Image path
-  if (formats.includes('image/png') || formats.includes('image/jpeg')) {
-    const image = clipboard.readImage()
-    if (image.isEmpty()) return // Still writing — wait for next poll
-
-    const buf = image.toPNG()
+  if (buf?.length) {
     const hash = hashBuffer(buf)
 
     // Duplicate check
     if (hash === lastImageHash) return
-    lastImageHash = hash
 
     // Size threshold
     const sizeMB = buf.length / (1024 * 1024)
@@ -662,23 +577,26 @@ function checkClipboard(): void {
     }
 
     // 图片落盘：DB 只存相对路径（images/xxx.png），避免 SQLite 存 base64 无限膨胀
-    const relPath = saveImageToDisk(image.toDataURL(), hash)
-    const size = image.getSize()
-    const createdAt = nowLocal()
-    recordClipboardCapture({
-      type: 'image',
-      content: relPath || '', // 相对路径；落盘失败时为空（渲染层不再收到 base64）
-      preview: `图片 ${size.width}×${size.height}`,
-      charCount: 0,
-      storageSize: buf.length,
-      createdAt,
-    })
+    const name = `img_${Date.now()}_${randomUUID()}.${imageType === 'image/jpeg' ? 'jpg' : 'png'}`
+    const content = `images/${name}`
+    const imagesDir = getImagesDir()
+    const releaseImage = retainHistoryImage({ type: 'image', content })
+    try {
+      await fs.promises.mkdir(imagesDir, { recursive: true })
+      await fs.promises.writeFile(path.join(imagesDir, name), buf, { flush: true })
+      lastImageHash = hash
+      const { width, height } = nativeImage.createFromBuffer(buf).getSize()
+      recordClipboardCapture({ type: 'image', content, preview: `图片 ${width}×${height}`,
+        charCount: 0, storageSize: buf.length, createdAt: nowLocal() })
+    } catch (error) {
+      log.warn('无法保存剪贴板图片:', error)
+    } finally {
+      releaseImage()
+    }
     return
   }
 
-  // Files path（Windows：资源管理器复制文件时剪贴板带 FileNameW 格式）
-  const filePaths = readClipboardFilePaths()
-  if (filePaths && filePaths.length > 0) {
+  if (filePaths.length > 0) {
     const raw = filePaths.join('\0') + '\0'
     const hash = hashBuffer(Buffer.from(raw, 'utf16le'))
     if (hash === lastFileHash) return
@@ -698,35 +616,31 @@ function checkClipboard(): void {
   }
 
   // HTML path（富文本：浏览器/Word 等复制时同时带 text/plain 与 text/html，优先富文本）
-  if (formats.includes('text/html')) {
-    const html = clipboard.readHTML()
-    if (html && html !== lastHtmlContent) {
-      const plain = htmlToText(html)
-        if (plain) {
-        const maxBytes = (config.maxCaptureKb ?? 1024) * 1024
-        if (maxBytes > 0 && Buffer.byteLength(html, 'utf8') > maxBytes) {
-          mainWindow?.webContents.send('clipboard:capture-skipped', Math.round(maxBytes / 1024))
-          return
-        }
-       lastHtmlContent = html
-        lastTextContent = plain
-        const preview = plain.length > 100 ? plain.slice(0, 100) + '...' : plain
-        const createdAt = nowLocal()
-        recordClipboardCapture({
-          type: 'html',
-          content: html,
-          preview,
-          charCount: plain.length,
-          storageSize: Buffer.byteLength(html, 'utf8'),
-          createdAt,
-        })
+  if (html && html !== lastHtmlContent) {
+    const plain = htmlToText(html)
+    if (plain) {
+      const maxBytes = (config.maxCaptureKb ?? 1024) * 1024
+      const size = Buffer.byteLength(html, 'utf8')
+      if (maxBytes > 0 && size > maxBytes) {
+        mainWindow?.webContents.send('clipboard:capture-skipped', Math.round(maxBytes / 1024))
         return
       }
+      lastHtmlContent = html
+      lastTextContent = plain
+      const preview = plain.length > 100 ? plain.slice(0, 100) + '...' : plain
+      recordClipboardCapture({
+        type: 'html',
+        content: html,
+        preview,
+        charCount: plain.length,
+        storageSize: size,
+        createdAt: nowLocal(),
+      })
+      return
     }
   }
 
   // Text path
-  const text = clipboard.readText().trim()
   if (!text || text === lastTextContent) return
   // 单条捕获超限：交由用户弹窗选择「完整保留 / 截断保留」，确认后经 insert-oversize 入库（永不静默丢弃）
   const maxBytes = (config.maxCaptureKb ?? 1024) * 1024
@@ -762,46 +676,58 @@ function checkClipboard(): void {
   })
 }
 
-function startClipboardMonitor(): void {
-  // 设基线：启动/恢复监听时不捕获当前剪贴板已有内容（各格式行为一致）
-  lastTextContent = clipboard.readText().trim() || ''
-  const formats = clipboard.availableFormats()
-  if (formats.includes('image/png') || formats.includes('image/jpeg')) {
-    lastImageHash = hashBuffer(clipboard.readImage().toPNG())
-  } else {
-    lastImageHash = ''
-  }
-  if (formats.includes('text/html')) {
-    lastHtmlContent = clipboard.readHTML()
-    lastTextContent = htmlToText(lastHtmlContent) || lastTextContent
-  } else {
-    lastHtmlContent = ''
-  }
-  const filePaths = readClipboardFilePaths()
-  if (filePaths && filePaths.length > 0) {
-    lastFileHash = hashBuffer(Buffer.from(filePaths.join('\0') + '\0', 'utf16le'))
-  } else {
-    lastFileHash = ''
-  }
-  clipboardTimer = setInterval(checkClipboard, clipboardPollMs)
+function scheduleClipboardCheck(seed = false, retry = true): void {
+  if (!clipboardMonitoring || clipboardCheckQueued) return
+  clipboardCheckQueued = true
+  const generation = clipboardMonitorGeneration
+  void enqueueClipboard(async () => {
+    if (generation !== clipboardMonitorGeneration) return
+    clipboardCheckQueued = false
+    await checkClipboard(generation, seed)
+  }).catch((error) => {
+    if (generation !== clipboardMonitorGeneration) return
+    if (!retry) {
+      log.warn('Clipboard read failed:', error)
+      return
+    }
+    setTimeout(() => {
+      if (generation === clipboardMonitorGeneration) scheduleClipboardCheck(seed, false)
+    }, 50)
+  })
 }
 
-/** 前台高频捕获，后台降频省电；窗口显示/隐藏时切换 */
+function startClipboardMonitor(): void {
+  if (clipboardMonitoring) return
+  clipboardMonitoring = true
+  scheduleClipboardCheck(true)
+  try {
+    clipboardListener = mainWindow && listenForClipboardChanges(mainWindow, () => scheduleClipboardCheck())
+    if (clipboardListener) log.info('Clipboard monitor: Windows notifications')
+  } catch (error) {
+    log.warn('Native clipboard notifications unavailable:', error)
+  }
+  if (!clipboardListener) clipboardTimer = setInterval(() => scheduleClipboardCheck(), clipboardPollMs)
+}
+
 let clipboardPollMs = 500
 
 function setClipboardPollRate(ms: number): void {
   clipboardPollMs = ms
   if (clipboardTimer) {
     clearInterval(clipboardTimer)
-    clipboardTimer = setInterval(checkClipboard, clipboardPollMs)
+    clipboardTimer = setInterval(() => scheduleClipboardCheck(), clipboardPollMs)
   }
 }
 
 function stopClipboardMonitor(): void {
-  if (clipboardTimer) {
-    clearInterval(clipboardTimer)
-    clipboardTimer = null
-  }
+  clipboardMonitoring = false
+  clipboardMonitorGeneration++
+  clipboardCheckQueued = false
+  clipboardListener?.stop()
+  clipboardListener = null
+  selfClipboardSequence = undefined
+  if (clipboardTimer) clearInterval(clipboardTimer)
+  clipboardTimer = null
 }
 
 // ── Tray ──
@@ -966,10 +892,11 @@ function createWindow(): void {
     height: Math.min(MAIN_WINDOW_DEFAULT_HEIGHT, workArea.height),
     minWidth: 700,
     minHeight: 450,
-    // 真实透明：仅标题栏区域透出桌面/后方窗口，内容区由页面自绘不透明背景承接
-    transparent: process.platform === 'win32',
     frame: false,
-    backgroundColor: '#00000000',
+    roundedCorners: true,
+    backgroundColor: process.platform === 'win32'
+      ? (nativeTheme.shouldUseDarkColors ? '#09090b' : '#fafafa')
+      : '#00000000',
     title: 'Q-Paste',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
     show: false,
@@ -1032,24 +959,24 @@ function createWindow(): void {
   })
 
   mainWindow.on('closed', () => {
+    if (clipboardMonitoring) stopClipboardMonitor()
     mainWindow = null
   })
 }
 
 // ── IPC handlers ──
 
-ipcMain.handle('app:switch-mode', async (event, requestedMode: unknown, requestedDeleteShortcut?: unknown) => {
-  if (!mainWindow || event.sender !== mainWindow.webContents) return { success: false, error: 'invalid-window' }
+async function switchAppMode(window: BrowserWindow, requestedMode: unknown, requestedDeleteShortcut?: unknown) {
   const mode = resolveAppMode(requestedMode)
   if (requestedMode !== mode) return { success: false, error: 'invalid-mode' }
   const previousMode = resolveAppMode(config.activeMode)
   try {
     if (mode === 'floral') {
-      await mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'floral', 'index.html'))
+      await window.loadFile(path.join(app.getAppPath(), 'dist', 'floral', 'index.html'))
     } else if (process.env.VITE_DEV_SERVER_URL) {
-      await mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
+      await window.loadURL(process.env.VITE_DEV_SERVER_URL)
     } else {
-      await mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'))
+      await window.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'))
     }
     if (mode === 'floral' && typeof requestedDeleteShortcut === 'string' && requestedDeleteShortcut.trim()) {
       config.qPasteDeleteShortcut = requestedDeleteShortcut.trim()
@@ -1060,14 +987,19 @@ ipcMain.handle('app:switch-mode', async (event, requestedMode: unknown, requeste
   } catch (error) {
     log.error('Failed to switch application mode:', error)
     try {
-      if (previousMode === 'floral') await mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'floral', 'index.html'))
-      else if (process.env.VITE_DEV_SERVER_URL) await mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
-      else await mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'))
+      if (previousMode === 'floral') await window.loadFile(path.join(app.getAppPath(), 'dist', 'floral', 'index.html'))
+      else if (process.env.VITE_DEV_SERVER_URL) await window.loadURL(process.env.VITE_DEV_SERVER_URL)
+      else await window.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'))
     } catch (rollbackError) {
       log.error('Failed to restore previous application mode:', rollbackError)
     }
     return { success: false, error: 'load-failed' }
   }
+}
+
+ipcMain.handle('app:switch-mode', (event, requestedMode: unknown, requestedDeleteShortcut?: unknown) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return { success: false, error: 'invalid-window' }
+  return switchAppMode(mainWindow, requestedMode, requestedDeleteShortcut)
 })
 
 ipcMain.handle('app:get-q-paste-delete-shortcut', (event) => {
@@ -1125,7 +1057,11 @@ function openFloralSurface(kind: 'notepad' | 'tile', noteId?: string, bounds?: {
   child.once('ready-to-show', () => child.show())
   child.on('closed', () => {
     for (const [registeredKey, window] of floralSurfaceWindows) {
-      if (window === child) floralSurfaceWindows.delete(registeredKey)
+      if (window !== child) continue
+      floralSurfaceWindows.delete(registeredKey)
+      if (registeredKey.startsWith('tile:') && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('floral:event:tile-window-closed', registeredKey.slice('tile:'.length))
+      }
     }
   })
   void child.loadFile(path.join(app.getAppPath(), 'dist', 'floral', 'index.html'), {
@@ -1143,16 +1079,33 @@ function applyFloralShortcuts(saved: { globalShortcut?: string }): void {
   }
 }
 
-ipcMain.handle('floral:invoke', async (event, command: string, input?: any, options?: any) => {
+const floralMigrationGate = new FloralMigrationGate()
+ipcMain.handle('floral:invoke', (event, command: string, input?: any, options?: any) => {
   assertFloralSender(event)
+  const execute = () => handleFloralInvoke(event, command, input, options)
+  if (command === 'config_migrate_data_dir') return floralMigrationGate.migrate(execute)
+  if (/^(notes_|categories_|images_|config_)/.test(command)) return floralMigrationGate.run(execute)
+  return execute()
+})
+
+async function handleFloralInvoke(event: Electron.IpcMainInvokeEvent, command: string, input?: any, options?: any) {
   const store = getFloralStore()
   let result: unknown
+  let savedNote: FloralNoteMetadata | undefined
   let changedEvent: 'notes-changed' | 'config-changed' | null = null
   switch (command) {
     case 'notes_list': result = await store.listNotes(); break
     case 'notes_get': result = await store.getNote(input?.id); break
-    case 'notes_create': result = await store.createNote(input?.request); changedEvent = 'notes-changed'; break
-    case 'notes_update': result = await store.updateNote(input?.id, input?.request); changedEvent = 'notes-changed'; break
+    case 'notes_create':
+    case 'notes_update': {
+      const note = command === 'notes_create'
+        ? await store.createNote(input?.request)
+        : await store.updateNote(input?.id, input?.request)
+      const { content, ...metadata } = note
+      savedNote = metadata
+      result = note
+      break
+    }
     case 'notes_delete': result = await store.deleteNote(input?.id); changedEvent = 'notes-changed'; break
     case 'notes_move_category': result = await store.moveCategory(input?.id, input?.category); changedEvent = 'notes-changed'; break
     case 'notes_reorder': result = await store.reorderNotes(input?.category, input?.orderedIds); changedEvent = 'notes-changed'; break
@@ -1173,10 +1126,11 @@ ipcMain.handle('floral:invoke', async (event, command: string, input?: any, opti
       const nextRoot = path.join(selected, 'floral')
       if (path.resolve(nextRoot) !== path.resolve(store.root)) {
         if (!await copyExistingFloralData(store.root, nextRoot)) throw new Error('目标目录已存在或原花笺数据无效，未覆盖')
+        const nextConfig = { ...config, floralDataDir: selected }
+        writeJsonFile(configPath, nextConfig)
+        config = nextConfig
         floralDataRoot = nextRoot
         floralStore = new FloralNotesStore(nextRoot)
-        config.floralDataDir = selected
-        saveConfig()
       }
       result = { ...(await getFloralStore().getConfig()), dataDir: selected, toggleVisibilityShortcut: config.toggleShortcut }
       changedEvent = 'config-changed'
@@ -1232,7 +1186,14 @@ ipcMain.handle('floral:invoke', async (event, command: string, input?: any, opti
     case 'save_external_file': {
       const file = String(input?.path ?? '')
       if (path.extname(file).toLowerCase() !== '.md') throw new Error('Only Markdown files are supported')
-      await fs.promises.mkdir(path.dirname(file), { recursive: true }); await fs.promises.writeFile(file, String(input?.content ?? ''), 'utf8'); result = undefined; break
+      await fs.promises.mkdir(path.dirname(file), { recursive: true })
+      const target = await fs.promises.realpath(file).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error
+        return file
+      })
+      await replaceFloralFile(target, String(input?.content ?? ''))
+      result = undefined
+      break
     }
     case 'get_file_modified_time': result = (await fs.promises.stat(String(input?.path ?? ''))).mtimeMs; break
     case 'global_shortcut_check': {
@@ -1295,16 +1256,25 @@ ipcMain.handle('floral:invoke', async (event, command: string, input?: any, opti
     }
     default: throw new Error(`Unsupported Floral command: ${command}`)
   }
-  if (changedEvent === 'config-changed') {
+  if (savedNote && store === floralStore) {
+    broadcastFloralEvent(floralSurfaceWindows.values(), mainWindow, 'notes-changed', savedNote)
+  } else if (changedEvent === 'config-changed') {
     broadcastFloralEvent(floralSurfaceWindows.values(), mainWindow, changedEvent, result)
   } else if (changedEvent) {
     mainWindow?.webContents.send(`floral:event:${changedEvent}`, null)
   }
   return result
-})
+}
 
 ipcMain.handle('floral:emit', (event, name: string, payload: unknown) => {
   assertFloralSender(event)
+  if (name === 'tile-window-unpinned') {
+    if (typeof payload !== 'string' || floralSurfaceWindows.get(`notepad:${payload}`)?.webContents !== event.sender) {
+      throw new Error('Invalid Floral tile event')
+    }
+    mainWindow?.webContents.send(`floral:event:${name}`, payload)
+    return
+  }
   if (name !== 'config-changed' && name !== 'notes-changed' && name !== 'open-about-panel') throw new Error('Unsupported Floral event')
   if (name === 'config-changed') {
     broadcastFloralEvent(floralSurfaceWindows.values(), mainWindow, name, payload)
@@ -1341,7 +1311,7 @@ ipcMain.handle('floral:dialog', async (event, kind: string, rawOptions?: any) =>
 ipcMain.handle('floral:clipboard', (event, kind: string, text?: string) => {
   assertFloralSender(event)
   if (kind === 'read') return clipboard.readText()
-  if (kind === 'write') { clipboard.writeText(String(text ?? '')); return }
+  if (kind === 'write') return clipboard.writeText(String(text ?? ''))
   throw new Error('Unsupported Floral clipboard operation')
 })
 
@@ -1398,13 +1368,11 @@ ipcMain.handle('floral:window', (event, method: string, ...args: any[]) => {
   }
 })
 
-ipcMain.handle('db:get-history-ids', () => {
+ipcMain.handle('db:get-history-ids', async () => {
   if (!db) return []
-  const stmt = db.prepare('SELECT id FROM items ORDER BY sort_order DESC, created_at DESC, id DESC LIMIT 500')
-  const ids: number[] = []
-  try { while (stmt.step()) ids.push(Number(stmt.getAsObject().id)) }
-  finally { stmt.free() }
-  return ids
+  const rows = await runDatabaseTask({ kind: 'query', file: dbPath,
+    sql: 'SELECT id FROM items ORDER BY sort_order DESC, created_at DESC, id DESC LIMIT 500' })
+  return rows.map((row) => Number(row.id))
 })
 
 ipcMain.handle('db:get-items', (_event, { limit, offset, search, pinnedOnly, summaryOnly, ids }: { limit: number; offset: number; search?: string; pinnedOnly?: boolean; summaryOnly?: boolean; ids?: number[] }) => {
@@ -1443,105 +1411,46 @@ ipcMain.handle('db:get-items', (_event, { limit, offset, search, pinnedOnly, sum
     : vaultSortOrder
       ? ' ORDER BY vault_sort_order DESC, created_at DESC, id DESC LIMIT :limit OFFSET :offset'
       : ' ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset'
-  const stmt = db.prepare(sql)
-  stmt.bind(binds)
-  const items: StoredItem[] = []
-  while (stmt.step()) {
-    items.push(stmt.getAsObject() as unknown as StoredItem)
-  }
-  stmt.free()
-  return items
+  return runDatabaseTask({ kind: 'query', file: dbPath, sql, bindings: binds })
 })
 
-// 保留最近列表的全文/拼音匹配，每次仅处理一条正文，结果只传递 id。
+// An older search must not replace the results of a newer query.
 const localSearchTasks = new WeakMap<Electron.WebContents, object>()
-ipcMain.handle('db:search-local-items', async (_event, ids: number[], query: string) => {
+ipcMain.handle('db:search-local-items', async (event, ids: number[], query: string) => {
   const task = {}
-  localSearchTasks.set(_event.sender, task)
+  localSearchTasks.set(event.sender, task)
   if (!db || !query.trim() || !ids.length) return []
-  const { searchIncludes } = await import('../src/lib/search')
-  if (!db) return []
-  const hits: number[] = []
-  let processed = 0
-  for (const id of ids) {
-    if (!db || localSearchTasks.get(_event.sender) !== task) return []
-    const stmt = db.prepare("SELECT preview, CASE WHEN type = 'image' THEN '' ELSE content END AS content FROM items WHERE id = :id")
-    let preview = ''
-    let content = ''
-    try {
-      stmt.bind({ ':id': id })
-      if (stmt.step()) {
-        const row = stmt.getAsObject()
-        preview = String(row.preview)
-        content = String(row.content)
-      }
-    } finally { stmt.free() }
-    const fullContent = content.startsWith('texts/') ? getFullItemContent(id) : content
-    if (searchIncludes(preview + '\n' + fullContent, query)) hits.push(id)
-    // 释放游标后再让出事件循环，保存数据库时不会误释放正在使用的游标。
-    if (++processed % 10 === 0) await new Promise<void>((resolve) => setImmediate(resolve))
-  }
-  return hits
+  const result = await runDatabaseTask({ kind: 'search', layout: getStorageLayoutOrThrow(), ids, query })
+  return localSearchTasks.get(event.sender) === task ? result : []
 })
 
 ipcMain.handle('ocr:get-config', () => getOcrConfig())
 
-/** 按 id 取完整 content：图片返回 dataURL（兼容旧 base64 与新落盘路径） */
-function getFullItemContent(id: number): string {
-  if (!db) return ''
-  const stmt = db.prepare('SELECT type, content FROM items WHERE id = :id')
-  stmt.bind({ ':id': id })
-  let type = ''
-  let content = ''
-  if (stmt.step()) {
-    const row = stmt.getAsObject()
-    type = String(row.type || '')
-    content = String(row.content || '')
-  }
-  stmt.free()
-  if (type === 'image' && content && !content.startsWith('data:')) {
-    // 新格式：content 是 images/xxx 相对路径，读文件转 dataURL
-    return readImageAsDataUrl(content) || ''
-  }
-  if (content.startsWith('texts/')) {
-    // 大文本引用：content 是 texts/xxx.txt 相对路径，读取正文返回
-    try {
-      const root = getStorageLayoutOrThrow().rootDir
-      const abs = path.resolve(path.join(root, content))
-      if (abs.startsWith(path.resolve(root) + path.sep) && fs.existsSync(abs)) {
-        return fs.readFileSync(abs, 'utf-8')
-      }
-    } catch {}
-    return ''
-  }
-  return content
-}
-ipcMain.handle('db:get-item-content', (_event, id: number) => getFullItemContent(id))
+ipcMain.handle('db:get-item-content', (_event, id: number) => db
+  ? runDatabaseTask({ kind: 'content', layout: getStorageLayoutOrThrow(), id })
+  : '')
 
 /** 大文本落盘阈值：超过则存为 texts/ 磁盘文件，库内只存引用（防库膨胀） */
-const TEXT_OFFLOAD_BYTES = 64 * 1024
-
-function offloadLargeText(type: string, content: string): string {
-  if ((type === 'text' || type === 'html') && Buffer.byteLength(content, 'utf8') > TEXT_OFFLOAD_BYTES) {
-    try {
-      const dir = getStorageLayoutOrThrow().textsDir
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-      const name = `txt_${Date.now()}_${Math.floor(Math.random() * 1e6)}.txt`
-      fs.writeFileSync(path.join(dir, name), content, 'utf-8')
-      return `texts/${name}`
-    } catch (err) {
-      console.error('[Q-Paste] 大文本落盘失败，改为库内存储:', err)
-    }
+async function insertItemDb(item: HistoryItemInput): Promise<HistoryInsertResult | null> {
+  if (!db) return null
+  const pending = runDatabaseTask({ kind: 'insert', layout: getStorageLayoutOrThrow(), item,
+    options: { dedupe: config.dedupeOnCapture !== false, maxRecords: config.maxRecords } })
+  const releaseImage = retainHistoryImage(item)
+  pendingHistoryWrites.add(pending)
+  try {
+    return await pending
+  } finally {
+    pendingHistoryWrites.delete(pending)
+    releaseImage()
   }
-  return content
 }
 
 /** 入库（重试 3 次）；仍失败缓存到待写队列，下次启动自动补录，绝不丢失复制内容 */
-function insertItemDbWithRetry(item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }): { id: number | null; updated: boolean } | null {
+async function insertItemDbWithRetry(item: HistoryItemInput): Promise<HistoryInsertResult | null> {
   let lastErr: unknown = null
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const r = insertItemDb(item)
+      const r = await insertItemDb(item)
       if (r) return r
       lastErr = new Error('database not ready')
     } catch (err) {
@@ -1552,7 +1461,7 @@ function insertItemDbWithRetry(item: { type: string; content: string; preview: s
     const qPath = path.join(getStorageLayoutOrThrow().databaseDir, 'pending-inserts.json')
     const arr = fs.existsSync(qPath) ? JSON.parse(fs.readFileSync(qPath, 'utf-8')) : []
     arr.push(item)
-    fs.writeFileSync(qPath, JSON.stringify(arr), 'utf-8')
+    writeJsonFile(qPath, arr)
     console.error('[Q-Paste] 入库失败，已加入待写队列:', lastErr)
   } catch (qerr) {
     console.error('[Q-Paste] 待写队列写入失败（内容丢弃风险）:', qerr, lastErr)
@@ -1561,18 +1470,6 @@ function insertItemDbWithRetry(item: { type: string; content: string; preview: s
 }
 
 /** 下一个置顶 sort_order：取当前最大值 +1（越大越靠前），保证新条目排最前 */
-function nextSortOrder(): number {
-  if (!db) return legacyMaxSortOrder + 1
-  const stmt = db.prepare('SELECT MAX(sort_order) AS mx FROM items')
-  let mx: number = legacyMaxSortOrder
-  if (stmt.step()) {
-    const v = Number(stmt.getAsObject().mx)
-    if (Number.isFinite(v)) mx = v
-  }
-  stmt.free()
-  return mx + 1
-}
-
 /** 下一个置顶 vault_sort_order：取当前金库最大值 +1（越大越靠前），新收藏排最前 */
 function nextVaultSortOrder(): number {
   if (!db) return legacyMaxVaultSortOrder + 1
@@ -1587,101 +1484,11 @@ function nextVaultSortOrder(): number {
 }
 
 /** 入库一条记录（去重置顶 + 裁剪），db:insert-item 与手机推送共用；失败重试请用 insertItemDbWithRetry */
-function insertItemDb(item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }): { id: number | null; updated: boolean } | null {
-  if (!db) return null
-
-  // 大文本落盘：库内只存引用（引用串彼此不同，超大同内容不去重，可接受）
-  const storedContent = offloadLargeText(item.type, item.content)
-
-  // 富文本归一：一次复制常被系统先后写入「纯文本」与「HTML」两种格式，
-  // 若已存在同内容的纯文本记录，则原地升级为富文本，避免 text+html 两条重复
-  if (item.type === 'html' && item.content && !item.isSensitive) {
-    const plain = htmlToText(item.content).replace(/\s+/g, ' ').trim()
-    if (plain.length > 0) {
-      const cand = db.prepare("SELECT id, content FROM items WHERE type = 'text' AND is_pinned = 0 ORDER BY id DESC LIMIT 30")
-      let upgradeId: number | null = null
-      while (cand.step()) {
-        const o = cand.getAsObject()
-        const c = String(o.content ?? '')
-        if (c.startsWith('texts/')) continue
-        if (c.replace(/\s+/g, ' ').trim() === plain) {
-          upgradeId = Number(o.id)
-          break
-        }
-      }
-      cand.free()
-      if (upgradeId !== null) {
-        db.run(
-          `UPDATE items SET type = 'html', content = :content, preview = :preview,
-           char_count = :charCount, storage_size = :storageSize, created_at = :createdAt,
-           sort_order = :sortOrder
-           WHERE id = :id`,
-          {
-            ':content': item.content,
-            ':preview': item.preview,
-            ':charCount': item.charCount,
-            ':storageSize': item.storageSize,
-            ':createdAt': item.createdAt,
-            ':sortOrder': nextSortOrder(),
-            ':id': upgradeId,
-          }
-        )
-        return { id: upgradeId, updated: true }
-      }
-    }
-  }
-
-  // 内容去重置顶（可配置）：文本/URL 存在相同内容的未收藏记录时，复用该记录并更新到最新（避免重复堆积）
-  if (config.dedupeOnCapture !== false && item.type !== 'image' && item.content) {
-    const dup = db.prepare('SELECT id FROM items WHERE type = :type AND content = :content AND is_pinned = 0 LIMIT 1')
-    dup.bind({ ':type': item.type, ':content': item.content })
-    let dupId: number | null = null
-    if (dup.step()) dupId = (dup.getAsObject().id as number) ?? null
-    dup.free()
-
-    if (dupId !== null) {
-      db.run(
-        `UPDATE items SET preview = :preview, char_count = :charCount, storage_size = :storageSize, created_at = :createdAt, sort_order = :sortOrder WHERE id = :id`,
-        {
-          ':id': dupId,
-          ':preview': item.preview,
-          ':charCount': item.charCount,
-          ':storageSize': item.storageSize,
-          ':createdAt': item.createdAt,
-          ':sortOrder': nextSortOrder(),
-        }
-      )
-      saveDb()
-      return { id: dupId, updated: true }
-    }
-  }
-
-  db.run(
-    `INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_sensitive, sort_order)
-     VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt, :isSensitive, :sortOrder)`,
-    {
-      ':type': item.type,
-      ':content': storedContent,
-      ':preview': item.preview,
-      ':charCount': item.charCount,
-      ':storageSize': item.storageSize,
-      ':createdAt': item.createdAt,
-      ':isSensitive': item.isSensitive ? 1 : 0,
-      ':sortOrder': nextSortOrder(),
-    }
-  )
-  const res = db.exec('SELECT last_insert_rowid()')
-  const id = res[0]?.values[0]?.[0] ?? null
-  saveDb()
-  enforceMaxRecords()
-  return { id, updated: false }
-}
-
-ipcMain.handle('db:insert-item', (_event, item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean; source?: 'capture' | 'sync' }) => {
-  const inserted = insertItemDbWithRetry(item)
+ipcMain.handle('db:insert-item', async (_event, item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean; source?: 'capture' | 'sync' }) => {
+  const inserted = await insertItemDbWithRetry(item)
   // 本地捕获推送到云端；云端拉取的记录（source='sync'）不回推，避免设备间回声
-  if (inserted && item.source !== 'sync') {
-    void pushCaptureToCloud(item)
+  if (inserted?.id && item.source !== 'sync') {
+    void pushCaptureToCloud({ ...item, id: inserted.id })
   }
   return inserted
 })
@@ -1689,7 +1496,6 @@ ipcMain.handle('db:insert-item', (_event, item: { type: string; content: string;
 ipcMain.handle('db:delete-item', (_event, id: number) => {
   if (!db) return false
   db.run('DELETE FROM items WHERE id = :id', { ':id': id })
-  saveDb()
   cleanupOrphanImages()
   return true
 })
@@ -1708,7 +1514,6 @@ ipcMain.handle('db:delete-items', (_event, ids: number[]) => {
     db.run('ROLLBACK')
     throw err
   }
-  saveDb()
   cleanupOrphanImages()
   return true
 })
@@ -1719,7 +1524,6 @@ ipcMain.handle('db:update-item', (_event, { id, content, preview, charCount, sto
     'UPDATE items SET content = :content, preview = :preview, char_count = :charCount, storage_size = :storageSize WHERE id = :id',
     { ':id': id, ':content': content, ':preview': preview, ':charCount': charCount, ':storageSize': storageSize }
   )
-  saveDb()
   return true
 })
 
@@ -1753,7 +1557,6 @@ ipcMain.handle('db:update-item-meta', (_event, params: { id: number; isPinned?: 
 
   if (sets.length === 0) return false
   db.run(`UPDATE items SET ${sets.join(', ')} WHERE id = :id`, binds)
-  saveDb()
   return true
 })
 
@@ -1778,7 +1581,6 @@ ipcMain.handle('db:reorder-items', (_event, order: number[]) => {
     db.run('ROLLBACK')
     throw err
   }
-  saveDb()
   return true
 })
 
@@ -1803,7 +1605,6 @@ ipcMain.handle('db:vault-reorder-items', (_event, order: number[]) => {
     db.run('ROLLBACK')
     throw err
   }
-  saveDb()
   return true
 })
 
@@ -1818,21 +1619,18 @@ ipcMain.handle('db:get-item-count', () => {
   return count
 })
 
-ipcMain.handle('db:get-storage-usage', () => {
+ipcMain.handle('db:get-storage-usage', async () => {
   if (!db) return { textBytes: 0, imageBytes: 0, totalBytes: 0 }
-  const stmt = db.prepare(
-    "SELECT type, SUM(storage_size) AS size FROM items GROUP BY type"
-  )
+  const file = dbPath
+  const rows = await runDatabaseTask({ kind: 'query', file, sql: 'SELECT type, SUM(storage_size) AS size FROM items GROUP BY type' })
   let textBytes = 0
   let imageBytes = 0
-  while (stmt.step()) {
-    const row = stmt.getAsObject()
+  for (const row of rows) {
     if (row.type === 'image') imageBytes += (row.size as number) || 0
     else textBytes += (row.size as number) || 0
   }
-  stmt.free()
-  // Also count the db file overhead
-  const dbFileBytes = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0
+  const dbFileBytes = ['', '-wal', '-shm'].reduce((size, suffix) =>
+    size + (fs.statSync(file + suffix, { throwIfNoEntry: false })?.size ?? 0), 0)
   return { textBytes, imageBytes, totalBytes: dbFileBytes }
 })
 
@@ -1853,7 +1651,6 @@ ipcMain.handle('force-clear-data', async (_event, type: string) => {
       throw new Error('无效的清理类型：' + type)
     }
 
-    saveDb()
     return { success: true }
   } catch (err: any) {
     return { success: false, error: err?.message ?? String(err) }
@@ -1879,7 +1676,6 @@ ipcMain.handle('settings:set-retention', (_event, settings: { retentionDays?: nu
   }
   saveConfig()
   enforceRetentionRules()
-  saveDb()
   return { success: true }
 })
 
@@ -1920,6 +1716,7 @@ ipcMain.handle('app:get-version', () => app.getVersion())
 
 /** 推送更新状态给渲染层 */
 let currentUpdateStatus: HostUpdateStatus = { status: 'idle' }
+let resumeAfterFailedUpdate: (() => void) | undefined
 function sendUpdateStatus(status: string, payload?: any): void {
   currentUpdateStatus = { status, ...payload }
   mainWindow?.webContents.send('update-status', currentUpdateStatus)
@@ -1949,6 +1746,9 @@ function setupAutoUpdater(): void {
     sendUpdateStatus('downloaded', { version: info.version })
   })
   autoUpdater.on('error', (err: Error) => {
+    const resume = resumeAfterFailedUpdate
+    resumeAfterFailedUpdate = undefined
+    resume?.()
     sendUpdateStatus('error', { message: err?.message ?? String(err) })
   })
 }
@@ -1993,13 +1793,30 @@ async function prepareFloralInstall(): Promise<boolean> {
 
 ipcMain.handle('update:install', async () => {
   if (!autoUpdater) return { success: false, error: '自动更新不可用' }
+  if (resumeAfterFailedUpdate) return { success: false, error: '正在准备安装更新' }
   try {
     if (resolveAppMode(config.activeMode) === 'floral' && !(await prepareFloralInstall())) {
       return { success: false, error: '花笺笔记未能全部保存，安装已取消' }
     }
+    const restoreClipboard = clipboardMonitoring
+    const transfer = ftServer.status
+    resumeAfterFailedUpdate = () => {
+      if (isQuitting) return
+      if (restoreClipboard) startClipboardMonitor()
+      if (transfer.enabled) {
+        void ftServer.start(transfer.port, config.fileTransferAutoClose ?? false, { host: config.fileTransferBindIp ?? '' })
+          .catch((error) => log.error('Failed to restart file transfer after update error:', error))
+      }
+    }
+    stopClipboardMonitor()
+    if (transfer.enabled) ftServer.stop()
+    await flushHistory()
     autoUpdater.quitAndInstall()
     return { success: true }
   } catch (err: any) {
+    const resume = resumeAfterFailedUpdate
+    resumeAfterFailedUpdate = undefined
+    resume?.()
     return { success: false, error: err?.message ?? String(err) }
   }
 })
@@ -2009,50 +1826,25 @@ ipcMain.handle('data:export-db', async () => {
   try {
     if (!db) throw new Error('数据库未就绪')
     if (!mainWindow) throw new Error('窗口未就绪')
-    saveDb() // 确保导出的是最新数据
     const result = await dialog.showSaveDialog(mainWindow, {
       title: '备份数据库文件',
       defaultPath: path.join(getStorageLayoutOrThrow().exportsDir, `q-paste-backup-${new Date().toISOString().slice(0, 10)}.db`),
       filters: [{ name: 'SQLite Database', extensions: ['db'] }],
     })
     if (result.canceled || !result.filePath) return { success: false, canceled: true }
-    fs.copyFileSync(dbPath, result.filePath)
-    // 图片落盘后 DB 只存路径：备份数据库时同步复制 images 目录，保证备份完整
-    const srcImages = getImagesDir()
-    let imagesCopied = false
-    if (fs.existsSync(srcImages)) {
-      const dstImages = result.filePath + '.images'
-      fs.cpSync(srcImages, dstImages, { recursive: true })
-      imagesCopied = true
+    const layout = getStorageLayoutOrThrow()
+    activeDatabaseExports++
+    try {
+      const imagesCopied = await runDatabaseTask({ kind: 'backup-db', layout, target: result.filePath })
+      return { success: true, path: result.filePath, imagesCopied }
+    } finally {
+      activeDatabaseExports--
+      if (!activeDatabaseExports && orphanCleanupPending) cleanupOrphanImages()
     }
-    return { success: true, path: result.filePath, imagesCopied }
   } catch (err: any) {
     return { success: false, error: err?.message ?? String(err) }
   }
 })
-
-/** 构建与「导出 JSON 备份」完全同格式的载荷（图片转 dataURL 自包含） */
-function buildBackupPayload(): Record<string, any> {
-  const rows: Record<string, any>[] = []
-  const stmt = db!.prepare(
-    'SELECT id, type, content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive FROM items ORDER BY id'
-  )
-  while (stmt.step()) {
-    const row = stmt.getAsObject()
-    if (row.type === 'image' && typeof row.content === 'string' && row.content && !row.content.startsWith('data:')) {
-      row.content = readImageAsDataUrl(row.content) || ''
-    }
-    rows.push(row)
-  }
-  stmt.free()
-  return {
-    app: 'Q-Paste',
-    version: app.getVersion(),
-    exportedAt: new Date().toISOString(),
-    count: rows.length,
-    items: rows,
-  }
-}
 
 ipcMain.handle('data:export-json', async () => {
   try {
@@ -2065,35 +1857,13 @@ ipcMain.handle('data:export-json', async () => {
     })
     if (result.canceled || !result.filePath) return { success: false, canceled: true }
 
-    const rows: Record<string, any>[] = []
-    const stmt = db.prepare(
-      'SELECT id, type, content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive FROM items ORDER BY id'
-    )
-    while (stmt.step()) {
-      const row = stmt.getAsObject()
-      // 图片 content 是相对路径：导出时转为 dataURL，保证 JSON 自包含
-      if (row.type === 'image' && typeof row.content === 'string' && row.content && !row.content.startsWith('data:')) {
-        row.content = readImageAsDataUrl(row.content) || ''
-      }
-      rows.push(row)
+    activeDatabaseExports++
+    try {
+      await runDatabaseTask({ kind: 'backup-json', layout: getStorageLayoutOrThrow(), version: app.getVersion(), target: result.filePath })
+    } finally {
+      activeDatabaseExports--
+      if (!activeDatabaseExports && orphanCleanupPending) cleanupOrphanImages()
     }
-    stmt.free()
-
-    fs.writeFileSync(
-      result.filePath,
-      JSON.stringify(
-        {
-          app: 'Q-Paste',
-          version: app.getVersion(),
-          exportedAt: new Date().toISOString(),
-          count: rows.length,
-          items: rows,
-        },
-        null,
-        2
-      ),
-      'utf-8'
-    )
     return { success: true, path: result.filePath }
   } catch (err: any) {
     return { success: false, error: err?.message ?? String(err) }
@@ -2112,127 +1882,74 @@ ipcMain.handle('data:import-json', async () => {
     })
     if (result.canceled || !result.filePaths[0]) return { success: false, canceled: true }
 
-    const raw = fs.readFileSync(result.filePaths[0], 'utf-8')
-    const data = JSON.parse(raw)
-    // 兼容两种结构：数组本身，或 { app, version, items: [...] }
-    const rows: Record<string, any>[] = Array.isArray(data) ? data : (Array.isArray(data.items) ? data.items : [])
-    if (rows.length === 0) return { success: true, count: 0, duplicates: 0 }
-
-    let imported = 0
-    let duplicates = 0
-    db.run('BEGIN TRANSACTION')
+    activeDatabaseExports++
     try {
-      for (const row of rows) {
-        if (!row || typeof row.content !== 'string') continue
-        // 防护：大文本引用（texts/）指向源机本地文件，跨机导入无法还原；空内容同样跳过
-        if (row.content === '' || row.content.startsWith('texts/')) continue
-        const type = ['text', 'url', 'image', 'html', 'files'].includes(row.type) ? row.type : 'text'
-
-        // 图片 content 是 dataURL（旧版或 JSON 自包含导出）：落盘转相对路径
-        let content = row.content
-        if (type === 'image' && content.startsWith('data:')) {
-          const saved = saveImageToDisk(content, hashBuffer(Buffer.from(content)))
-          if (!saved) continue // 图片数据损坏，跳过该条
-          content = saved
-        }
-
-        // 内容去重：相同 type + content 已存在则跳过
-        const dup = db.prepare('SELECT id FROM items WHERE type = :type AND content = :content LIMIT 1')
-        dup.bind({ ':type': type, ':content': content })
-        let exists = false
-        if (dup.step()) exists = true
-        dup.free()
-        if (exists) {
-          duplicates++
-          continue
-        }
-
-        const tags = Array.isArray(row.tags) ? row.tags : []
-        const createdAt = typeof row.created_at === 'string' ? row.created_at : nowLocal()
-        // 收藏时间缺失时按复制时间兜底，保证导入后金库排序稳定
-        const pinnedAt = row.is_pinned
-          ? (typeof row.pinned_at === 'string' && row.pinned_at ? row.pinned_at : createdAt)
-          : null
-        db.run(
-          `INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive, sort_order)
-           VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt, :isPinned, :pinnedAt, :alias, :tags, :isSensitive, :sortOrder)`,
-          {
-            ':type': type,
-            ':content': content,
-            ':preview': typeof row.preview === 'string' ? row.preview : content.slice(0, 100),
-            ':charCount': Number(row.char_count) || 0,
-            ':storageSize': Number(row.storage_size) || Buffer.byteLength(content, 'utf8'),
-            ':createdAt': createdAt,
-            ':isPinned': row.is_pinned ? 1 : 0,
-            ':pinnedAt': pinnedAt,
-            ':alias': typeof row.alias === 'string' ? row.alias : '',
-            ':tags': JSON.stringify(tags),
-            ':isSensitive': row.is_sensitive ? 1 : 0,
-            ':sortOrder': typeof row.sort_order === 'number' ? row.sort_order : localDateToMs(createdAt),
-          }
-        )
-        imported++
-      }
-      db.run('COMMIT')
-    } catch (err) {
-      db.run('ROLLBACK')
-      throw err
+      const summary = await runDatabaseTask({ kind: 'import-json', layout: getStorageLayoutOrThrow(), file: result.filePaths[0] })
+      return { success: true, ...summary }
+    } finally {
+      activeDatabaseExports--
+      if (!activeDatabaseExports && orphanCleanupPending) cleanupOrphanImages()
     }
-    saveDb()
-    return { success: true, count: imported, duplicates }
   } catch (err: any) {
     return { success: false, error: err?.message ?? String(err) }
   }
 })
 
-ipcMain.handle('clipboard:write-text', (_event, text: string) => {
-  clipboard.writeText(text)
-  // 应用自身写入系统剪贴板：更新基线 + 保护窗口，避免下一轮轮询重复捕获
-  lastTextContent = text.trim() || ''
-  lastImageHash = ''
-  selfWriteUntil = Date.now() + 1000
+function writeOwnClipboardText(text: string): Promise<void> {
+  return enqueueClipboard(async () => {
+    await clipboard.writeText(text)
+    lastTextContent = text.trim()
+    lastImageHash = ''
+    rememberOwnClipboardWrite()
+  })
+}
+
+function writeOwnClipboardFiles(files: string[]): Promise<void> {
+  return enqueueClipboard(async () => {
+    await writeClipboardFiles(files)
+    lastFileHash = hashBuffer(Buffer.from(files.join('\0') + '\0', 'utf16le'))
+    lastTextContent = ''
+    lastImageHash = ''
+    rememberOwnClipboardWrite()
+  })
+}
+
+ipcMain.handle('clipboard:write-text', async (_event, text: string) => {
+  await writeOwnClipboardText(text)
   return true
 })
 
 ipcMain.handle('clipboard:read-text', () => clipboard.readText())
 
-ipcMain.handle('clipboard:write-image', (_event, content: string) => {
-  // 兼容两种来源：旧数据 dataURL / 新数据相对路径（images/xxx.png）
-  let img: Electron.NativeImage
+ipcMain.handle('clipboard:write-image', (_event, content: string) => enqueueClipboard(async () => {
+  let image: Electron.NativeImage
   if (content && content.startsWith('data:')) {
-    img = nativeImage.createFromDataURL(content)
+    image = nativeImage.createFromDataURL(content)
   } else {
-    const abs = resolveImagePath(content)
-    if (!abs) return false
-    img = nativeImage.createFromPath(abs)
+    const file = resolveImagePath(content)
+    if (!file) return false
+    image = nativeImage.createFromPath(file)
   }
-  clipboard.writeImage(img)
-  lastImageHash = hashBuffer(img.toPNG())
-  lastTextContent = clipboard.readText().trim() || ''
-  selfWriteUntil = Date.now() + 1000
+  if (image.isEmpty()) return false
+  lastImageHash = hashBuffer(await writeClipboardImage(image))
+  lastTextContent = ''
+  rememberOwnClipboardWrite()
   return true
-})
+}))
 
-ipcMain.handle('clipboard:write-html', (_event, html: string) => {
-  // 写回富文本（同时带纯文本兜底，保证粘贴到不支持 HTML 的程序也正常）
+ipcMain.handle('clipboard:write-html', (_event, html: string) => enqueueClipboard(async () => {
   const plain = htmlToText(html)
-  clipboard.write({ html, text: plain })
+  await clipboard.write([new ClipboardItem({ 'text/html': html, 'text/plain': plain })])
   lastHtmlContent = html
   lastTextContent = plain
   lastImageHash = ''
-  selfWriteUntil = Date.now() + 1000
+  rememberOwnClipboardWrite()
   return true
-})
+}))
 
-ipcMain.handle('clipboard:write-files', (_event, paths: string[]) => {
-  if (!Array.isArray(paths) || paths.length === 0) return false
-  // 重新构造 FileNameW 格式（UTF-16LE，\0 分隔）写回，资源管理器可直接粘贴
-  const raw = paths.join('\0') + '\0'
-  clipboard.writeBuffer('FileNameW', Buffer.from(raw, 'utf16le'))
-  lastFileHash = hashBuffer(Buffer.from(raw, 'utf16le'))
-  lastTextContent = clipboard.readText().trim() || ''
-  lastImageHash = ''
-  selfWriteUntil = Date.now() + 1000
+ipcMain.handle('clipboard:write-files', async (_event, files: string[]) => {
+  if (!Array.isArray(files) || !files.length || files.some((file) => typeof file !== 'string' || !path.isAbsolute(file))) return false
+  await writeOwnClipboardFiles(files)
   return true
 })
 
@@ -2298,50 +2015,36 @@ function getStoredWebDavPassword(): string {
 }
 
 /** 收集本地全部历史为云同步条目（图片转 dataURL；富文本拆 纯文本+HTML；文件类型跳过） */
-function collectLocalForSync(): ClipboardSyncItem[] {
-  if (!db) return []
-  const out: ClipboardSyncItem[] = []
-  try {
-    const res = db.exec("SELECT type, content, preview, created_at FROM items ORDER BY created_at ASC, id ASC")
-    for (const row of res[0]?.values ?? []) {
-      const dbType = String(row[0] ?? '')
-      let content = String(row[1] ?? '')
-      const preview = String(row[2] ?? '')
-      const createdAt = localDateToMs(String(row[3] ?? ''))
-      if (dbType === 'files') continue
-      const st = syncTypeOfDbType(dbType)
-      if (st === 'image') {
-        content = content.startsWith('data:') ? content : readImageAsDataUrl(content) ?? ''
-        if (!content) continue
-      }
-      if (!content.trim()) continue
-      const hash = createHash('sha256').update(st === 'rich_text' ? htmlToText(content) : content, 'utf8').digest('hex')
-      out.push({
-        id: `${st}:${hash}`,
-        type: st,
-        content: st === 'rich_text' ? htmlToText(content) : content,
-        html: st === 'rich_text' ? content : null,
-        hash,
-        preview: preview || [...content].slice(0, 100).join(''),
-        createdAt,
-        updatedAt: createdAt,
-        deviceId: config.cloudSyncDeviceId ?? '',
-        deletedAt: 0,
-      })
-    }
-  } catch (err) {
-    console.error('[Q-Paste] 收集本地历史失败:', err)
+async function collectLocalForSync(): Promise<ClipboardSyncItem[]> {
+  if (!db) throw new Error('History database is not available')
+  activeDatabaseExports++
+  let rows
+  try { rows = await runDatabaseTask({ kind: 'sync-export', layout: getStorageLayoutOrThrow() }) }
+  finally {
+    activeDatabaseExports--
+    if (!activeDatabaseExports && orphanCleanupPending) cleanupOrphanImages()
   }
-  return out
+  return rows.map((row) => {
+    const type = syncTypeOfDbType(row.type)
+    const content = type === 'rich_text' ? htmlToText(row.content) : row.content
+    const hash = createHash('sha256').update(content, 'utf8').digest('hex')
+    const createdAt = localDateToMs(row.createdAt)
+    return { id: type + ':' + hash, type, content, html: type === 'rich_text' ? row.content : null,
+      hash, preview: row.preview || [...content].slice(0, 100).join(''),
+      createdAt, updatedAt: createdAt, deviceId: config.cloudSyncDeviceId ?? '', deletedAt: 0 }
+  })
 }
 
-/** 云同步一轮：首次运行先拉远端全量、再推本地全量（存量历史上云）；此后仅增量拉取 */
-/** 云端快照：与本地「导出 JSON 备份」同格式；数据无变化时自动跳过上传 */
 async function uploadCloudSnapshot(): Promise<void> {
   if (!syncEngine.isEnabled()) return
-  const payload = JSON.stringify(buildBackupPayload(), null, 2)
-  const hash = createHash('sha256').update(payload).digest('hex')
-  if (hash === config.cloudSnapshotHash) {
+  if (!db) throw new Error('数据库未就绪')
+  activeDatabaseExports++
+  const { payload, hash } = await runDatabaseTask({ kind: 'backup-json', layout: getStorageLayoutOrThrow(),
+    version: app.getVersion(), previousHash: config.cloudSnapshotHash }).finally(() => {
+    activeDatabaseExports--
+    if (!activeDatabaseExports && orphanCleanupPending) cleanupOrphanImages()
+  })
+  if (payload === null) {
     console.log('[Q-Paste] 云端快照无变化，跳过上传')
     return
   }
@@ -2355,7 +2058,7 @@ async function runCloudSyncCycle(): Promise<CloudSyncStatus> {
   if (!syncEngine.isEnabled()) throw new Error('cloud sync not enabled')
   if (config.cloudSyncFullPushDone !== true) {
     await syncEngine.pullChanges(0) // 先吸收远端已有数据（按内容去重合并）
-    const items = collectLocalForSync()
+    const items = await collectLocalForSync()
     const pushed = await syncEngine.pushAll(items)
     config.cloudSyncFullPushDone = true
     saveConfig()
@@ -2379,8 +2082,8 @@ async function applyCloudSyncConfig(): Promise<CloudSyncStatus> {
 }
 
 /** 本地捕获 → 推送到云端（图片读盘转 dataURL；富文本拆成 纯文本 + HTML） */
-async function pushCaptureToCloud(item: { type: string; content: string; preview: string; createdAt: string }): Promise<void> {
-  if (!syncEngine.isEnabled()) return
+async function pushCaptureToCloud(item: { id: number; type: string; content: string; preview: string; createdAt: string; isSensitive?: boolean }): Promise<void> {
+  if (!syncEngine.isEnabled() || item.isSensitive || item.type === 'files') return
   try {
     const type = syncTypeOfDbType(item.type)
     let content = item.content
@@ -2389,7 +2092,7 @@ async function pushCaptureToCloud(item: { type: string; content: string; preview
       html = item.content
       content = htmlToText(item.content)
     } else if (type === 'image') {
-      content = readImageAsDataUrl(item.content) ?? ''
+      content = await runDatabaseTask({ kind: 'content', layout: getStorageLayoutOrThrow(), id: item.id })
     }
     if (!content) return
 
@@ -2413,35 +2116,28 @@ async function pushCaptureToCloud(item: { type: string; content: string; preview
 }
 
 /** 云端拉取 → 入库并经 cloud-sync:pulled 事件通知渲染层 */
-syncEngine.onPulled = (items) => {
-  const payload: Array<{ id: number; type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string }> = []
-  for (const it of items) {
-    // 删除墓碑：按内容指纹删除本地行，并通知渲染层移除对应条目
-    // 删除墓碑：云同步删除闭环随 content_hash 回滚一并移除
-    if (it.deletedAt > 0) continue
-    let dbType = dbTypeOfSyncType(it.type)
-    let content = it.type === 'rich_text' ? (it.html ?? it.content) : it.content
-    let preview = it.preview
-    if (it.type === 'image' && content.startsWith('data:')) {
-      const rel = saveImageToDisk(content, it.hash)
-      if (rel) content = rel // 与本地捕获一致：图片存相对路径，落盘失败保留 dataURL
-      preview = preview || '图片'
-    }
-    if (!content) continue
-    if (!preview) preview = content.length > 100 ? content.slice(0, 100) + '...' : content
-    const charCount = it.type === 'image' ? 0 : it.type === 'rich_text' ? htmlToText(content).length : content.length
-    const inserted = insertItemDb({
-      type: dbType,
-      content,
-      preview,
-      charCount,
-      storageSize: Buffer.byteLength(content, 'utf8'),
-      createdAt: epochToLocal(it.createdAt > 0 ? it.createdAt : it.updatedAt),
-    })
-    if (!inserted?.id) continue
-    payload.push({ id: inserted.id, type: dbType, content, preview, charCount, storageSize: Buffer.byteLength(content, 'utf8'), createdAt: epochToLocal(it.createdAt > 0 ? it.createdAt : it.updatedAt) })
+syncEngine.onPulled = async (items) => {
+  if (storageMigrationInProgress || !db) throw new Error('数据库未就绪')
+  const records = items.flatMap((item) => {
+    if (item.deletedAt > 0) return []
+    const type = dbTypeOfSyncType(item.type)
+    const content = item.type === 'rich_text' ? item.html ?? item.content : item.content
+    if (!content) return []
+    const preview = item.preview || (type === 'image' ? '图片' : content.slice(0, 100))
+    const charCount = type === 'image' ? 0 : type === 'html' ? htmlToText(content).length : content.length
+    return [{ type, content, preview, charCount, storageSize: Buffer.byteLength(content, 'utf8'),
+      createdAt: epochToLocal(item.createdAt > 0 ? item.createdAt : item.updatedAt),
+      receipt: JSON.stringify([item.id, item.updatedAt, item.deletedAt]) }]
+  })
+  if (!records.length) return
+  activeDatabaseExports++
+  try {
+    const payload = await runDatabaseTask({ kind: 'sync-import', layout: getStorageLayoutOrThrow(), items: records, maxRecords: config.maxRecords })
+    if (payload.length > 0) mainWindow?.webContents.send('cloud-sync:pulled', payload)
+  } finally {
+    activeDatabaseExports--
+    if (!activeDatabaseExports && orphanCleanupPending) cleanupOrphanImages()
   }
-  if (payload.length > 0) mainWindow?.webContents.send('cloud-sync:pulled', payload)
 }
 
 ipcMain.handle('cloud-sync:get-config', () => cloudSyncConfigFromLocal())
@@ -2460,7 +2156,7 @@ ipcMain.handle('webdav:toggle', async (_event, cfg: { webdavUrl?: string; userna
   const candidate = {
     webdavUrl: (cfg.webdavUrl ?? config.cloudSyncUrl ?? '').trim(),
     username: cfg.username ?? config.cloudSyncUsername ?? '',
-    password: cfg.password ?? config.cloudSyncPassword ?? '',
+    password: cfg.password ?? getStoredWebDavPassword(),
     basePath: cfg.basePath || config.cloudSyncBasePath || 'qpaste-sync',
     intervalSecs: cfg.intervalSecs ?? config.cloudSyncIntervalSecs ?? 120,
   }
@@ -2471,6 +2167,11 @@ ipcMain.handle('webdav:toggle', async (_event, cfg: { webdavUrl?: string; userna
     return { ok: false, reason: verdict.reason, message: verdict.message }
   }
 
+  if (config.cloudSyncUrl !== candidate.webdavUrl || config.cloudSyncBasePath !== candidate.basePath ||
+      config.cloudSyncUsername !== candidate.username) {
+    config.cloudSyncFullPushDone = false
+    config.cloudSnapshotHash = ''
+  }
   config.cloudSyncEnabled = true
   config.cloudSyncUrl = candidate.webdavUrl
   config.cloudSyncUsername = candidate.username
@@ -2483,7 +2184,6 @@ ipcMain.handle('webdav:toggle', async (_event, cfg: { webdavUrl?: string; userna
     // 首次启用：后台执行「拉远端全量 + 本地存量全量上传」，不阻塞开关反馈
     if (config.cloudSyncFullPushDone !== true) {
       void runCloudSyncCycle()
-        .then(() => uploadCloudSnapshot())
         .catch((err: any) => console.error('[Q-Paste] 初始全量同步失败:', err))
     }
     return { ok: true, status }
@@ -2503,7 +2203,7 @@ ipcMain.handle('cloud-sync:sync-now', async (): Promise<{ ok: boolean; error?: s
     // 未完成存量全量上传时，「立即同步」先补全量再增量拉取
     if (config.cloudSyncFullPushDone !== true) {
       await syncEngine.pullChanges(0)
-      const pushed = await syncEngine.pushAll(collectLocalForSync())
+      const pushed = await syncEngine.pushAll(await collectLocalForSync())
       config.cloudSyncFullPushDone = true
       saveConfig()
       console.log(`[Q-Paste] 云同步初始全量上传完成: ${pushed} 条`)
@@ -2577,29 +2277,68 @@ function queueBatchFileCopy(p: string): void {
     batchCopyFiles = []
     batchCopyTimer = null
     if (list.length === 0) return
-    try {
-      const raw = list.join('\0') + '\0'
-      clipboard.writeBuffer('FileNameW', Buffer.from(raw, 'utf16le'))
-      lastFileHash = ''
-      lastTextContent = clipboard.readText().trim() || ''
-      selfWriteUntil = Date.now() + 1000
-    } catch (err) {
-      console.error('[Q-Paste][FT] 批量复制失败:', err)
-    }
+    void writeOwnClipboardFiles(list).catch((error) => console.error('[Q-Paste][FT] 批量复制失败:', error))
   }, 400)
 }
 
+let fileTransferPageRequested = false
+
+async function openFileTransferPage(): Promise<void> {
+  if (isQuitting || fileTransferPageRequested) return
+  fileTransferPageRequested = true
+  if (!mainWindow) createWindow()
+  const window = mainWindow!
+  if (resolveAppMode(config.activeMode) === 'floral') {
+    const result = await switchAppMode(window, 'clipboard')
+    if (!result.success) {
+      fileTransferPageRequested = false
+      return
+    }
+  }
+  if (window.isDestroyed()) {
+    fileTransferPageRequested = false
+    return
+  }
+  if (window.isMinimized()) window.restore()
+  showWindow()
+  window.moveTop()
+  window.webContents.send('ft:open-page')
+}
+
 const ftServer = new FileTransferServer({
+  deviceTrust: {
+    isTrusted: (digest: string) => config.fileTransferTrustedDevices?.includes(digest) ?? false,
+    approve: async (digest: string, address: string) => {
+      if (isQuitting) return false
+      showWindow()
+      const options: Electron.MessageBoxOptions = { type: 'question', title: '局域网文件传输',
+        message: '允许这台设备连接 Q-Paste？', detail: `设备地址 ${address}`,
+        buttons: ['允许', '拒绝'], defaultId: 1, cancelId: 1, noLink: true }
+      const response = mainWindow && !mainWindow.isDestroyed()
+        ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options)
+      if (response.response !== 0 || isQuitting) return false
+      const next = { ...config, fileTransferTrustedDevices: [digest, ...(config.fileTransferTrustedDevices ?? [])].slice(0, 32) }
+      writeJsonFile(configPath, next)
+      config = next
+      return true
+    },
+  },
+  onPhoneShortcutOpen: () => {
+    void openFileTransferPage().catch((error) => {
+      fileTransferPageRequested = false
+      log.error('Failed to open file transfer page:', error)
+    })
+  },
   getTransfersDir: ftSaveDir,
   getTempDir: () => getStorageLayoutOrThrow().tempDir,
   getClipboardText: () => clipboard.readText(),
   getColorMode: () => 'system',
   getLogoBase64: ftLogoBase64,
-  onReceiveText: (content) => {
+  onReceiveText: async (content) => {
     const autoCopy = config.fileTransferAutoCopy !== false
     const preview = [...content].slice(0, 100).join('') + ([...content].length > 100 ? '...' : '')
     // 开关关闭：仅保存到本地历史，不写系统剪贴板
-    const inserted = insertItemDbWithRetry({
+    const inserted = await insertItemDbWithRetry({
       type: 'text', content, preview,
       charCount: content.length,
       storageSize: Buffer.byteLength(content, 'utf8'),
@@ -2607,17 +2346,9 @@ const ftServer = new FileTransferServer({
     })
     if (inserted) notifyRendererItem('text', content, preview, inserted.id)
     if (!autoCopy) return
-    // 开关开启：同步写入系统剪贴板（基线+保护窗口防止自我捕获）
-    try {
-      clipboard.writeText(content)
-      lastTextContent = content
-      lastImageHash = ''
-      selfWriteUntil = Date.now() + 1000
-    } catch (err) {
-      console.error('[Q-Paste][FT] 文本自动复制失败:', err)
-    }
+    void writeOwnClipboardText(content).catch((error) => console.error('[Q-Paste][FT] 文本自动复制失败:', error))
   },
-  onFileReceived: (finalPath, fileName, _contentType, _senderId, _senderName, msgType) => {
+  onFileReceived: async (finalPath, fileName, _contentType, _senderId, _senderName, msgType) => {
     const autoCopy = config.fileTransferAutoCopy !== false
     // 自动打开文件夹：批量接收去重（1.5s 窗口内同目录只开一次），失败落日志
     if (config.fileTransferAutoOpen) {
@@ -2644,7 +2375,7 @@ const ftServer = new FileTransferServer({
     } else if (msgType === 'video') {
       preview = `[Video] ${fileName}`
     }
-    const inserted = insertItemDb({
+    const inserted = await insertItemDb({
       type: dbType, content: dbContent, preview,
       charCount: 0,
       storageSize: Buffer.byteLength(dbContent, 'utf8'),
@@ -2680,6 +2411,11 @@ ipcMain.handle('ft:toggle', async (_event, enabled: boolean, port?: number): Pro
 })
 
 ipcMain.handle('ft:status', (): FtStatus => ftServer.status)
+ipcMain.handle('ft:take-open-page-request', (event) => {
+  if (event.sender !== mainWindow?.webContents || !fileTransferPageRequested) return false
+  fileTransferPageRequested = false
+  return true
+})
 ipcMain.handle('ft:get-available-ips', () => getAvailableIps())
 ipcMain.handle('ft:set-display-ip', (_event, ip: string) => ftServer.setDisplayIp(ip))
 ipcMain.handle('ft:get-chat-history', () => ftServer.getChatHistory())
@@ -2741,14 +2477,14 @@ ipcMain.handle('ft:get-app-logo', () => ftLogoBase64())
 // 超大文本用户确认后的入库入口（完整保留 / 截断保留）
 ipcMain.handle('clipboard:get-pending-oversize', () => pendingOversizeCaptures[0] ?? null)
 
-ipcMain.handle('clipboard:insert-oversize', (_event, { content, truncate }: { content: string; truncate: boolean }) => {
+ipcMain.handle('clipboard:insert-oversize', async (_event, { content, truncate }: { content: string; truncate: boolean }) => {
   const maxBytes = (config.maxCaptureKb ?? 1024) * 1024
   let text = content
   if (truncate && maxBytes > 0) {
     text = Buffer.from(content, 'utf8').subarray(0, maxBytes).toString('utf8').replace(/\uFFFD+$/, '')
   }
   const preview = [...text].slice(0, 100).join('') + ([...text].length > 100 ? '...' : '')
-  const inserted = insertItemDbWithRetry({
+  const inserted = await insertItemDbWithRetry({
     type: 'text', content: text, preview,
     charCount: text.length,
     storageSize: Buffer.byteLength(text, 'utf8'),
@@ -2760,17 +2496,14 @@ ipcMain.handle('clipboard:insert-oversize', (_event, { content, truncate }: { co
 })
 
 // 文本/链接转存为 .txt 文件并写入剪贴板（资源管理器/聊天窗可直接粘贴文件）
-ipcMain.handle('clipboard:write-text-as-file', (_event, { text, name }: { text: string; name?: string }) => {
+ipcMain.handle('clipboard:write-text-as-file', async (_event, { text, name }: { text: string; name?: string }) => {
   try {
     const dir = ftSaveDir()
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     const safe = ((name || 'snippet').replace(/[\\/:*?"<>|]/g, '_').trim() || 'snippet').slice(0, 60)
     const file = path.join(dir, `Q-Paste_${Date.now()}_${safe}.txt`)
     fs.writeFileSync(file, text, 'utf-8')
-    clipboard.writeBuffer('FileNameW', Buffer.from(`${file}\0`, 'utf16le'))
-    lastFileHash = ''
-    lastTextContent = clipboard.readText().trim() || ''
-    selfWriteUntil = Date.now() + 1000
+    await writeOwnClipboardFiles([file])
     return { success: true, path: file }
   } catch (err: any) {
     return { success: false, error: err?.message ?? String(err) }
@@ -2843,54 +2576,13 @@ ipcMain.handle('window:maximize', () => {
 
 ipcMain.handle('window:is-maximized', () => mainWindow?.isMaximized() ?? false)
 
-let windowDragTimer: ReturnType<typeof setInterval> | null = null
-let windowDragOwner: BrowserWindow | null = null
-
-function stopWindowDrag(): void {
-  if (windowDragTimer) clearInterval(windowDragTimer)
-  windowDragTimer = null
-  windowDragOwner = null
-}
-
-ipcMain.on('window:drag-start', (event) => {
-  const targetWindow = BrowserWindow.fromWebContents(event.sender)
-  if (!targetWindow || targetWindow.isDestroyed()) return
-  if (targetWindow !== mainWindow && ![...floralSurfaceWindows.values()].includes(targetWindow)) return
-  stopWindowDrag()
-  if (targetWindow.isMaximized()) return
-
-  const startBounds = targetWindow.getBounds()
-  const startCursor = screen.getCursorScreenPoint()
-  let lastX = startBounds.x
-  let lastY = startBounds.y
-  windowDragOwner = targetWindow
-  windowDragTimer = setInterval(() => {
-    if (targetWindow.isDestroyed()) return stopWindowDrag()
-    const cursor = screen.getCursorScreenPoint()
-    const dx = cursor.x - startCursor.x
-    const dy = cursor.y - startCursor.y
-    if (Math.hypot(dx, dy) < 4) return
-    const x = Math.round(startBounds.x + dx)
-    const y = Math.round(startBounds.y + dy)
-    if (lastX === x && lastY === y) return
-    lastX = x
-    lastY = y
-    // Windows 缩放比例非 100% 时，反复 setPosition 会逐次增大窗口；每次固定起始宽高。
-    targetWindow.setBounds({ x, y, width: startBounds.width, height: startBounds.height })
-  }, 16)
-})
-
-ipcMain.on('window:drag-end', (event) => {
-  if (windowDragOwner?.webContents === event.sender) stopWindowDrag()
-})
-
 ipcMain.handle('window:restore-default-size', (event) => {
   if (!mainWindow || event.sender !== mainWindow.webContents) return false
   restoreMainWindowDefaultSize()
   return true
 })
 
-// 无边框透明窗口的自定义关闭按钮：走 close 事件，保留「关闭即隐藏到托盘」
+// 无边框窗口的自定义关闭按钮：走 close 事件，保留「关闭即隐藏到托盘」
 ipcMain.handle('window:close', () => {
   mainWindow?.close()
   return true
@@ -2989,45 +2681,55 @@ ipcMain.handle('shell:open-folder', (_event, dirPath: string) => {
   shell.openPath(dirPath)
 })
 
-ipcMain.handle('storage:change-path', async (_event, newPath: string) => {
+let storageMigrationInProgress = false
+ipcMain.handle('storage:change-path', (_event, newPath: string) => floralMigrationGate.migrate(async () => {
+  const previousTransfer = ftServer.status
+  if (storageMigrationInProgress) return { success: false, error: '正在迁移数据目录' }
   try {
     const oldLayout = getStorageLayoutOrThrow()
-    const newRoot = path.resolve(newPath)
-    if (oldLayout.rootDir === newRoot) {
-      return { success: true }
+    const target = getStorageLayout(newPath)
+    const from = process.platform === 'win32' ? oldLayout.rootDir.toLowerCase() : oldLayout.rootDir
+    const to = process.platform === 'win32' ? target.rootDir.toLowerCase() : target.rootDir
+    if (from === to) return { success: true }
+    if (to.startsWith(from + path.sep) || from.startsWith(to + path.sep)) {
+      return { success: false, error: '请选择与原数据目录独立的位置' }
     }
+    storageMigrationInProgress = true
     stopClipboardMonitor()
-    if (db) saveDb()
-    const target = getStorageLayout(newRoot)
-    ensureStorageLayout(target)
-    if (fs.existsSync(oldLayout.dbPath)) fs.copyFileSync(oldLayout.dbPath, target.dbPath)
-    for (const [from, to] of [
-      [oldLayout.imagesDir, target.imagesDir], [oldLayout.textsDir, target.textsDir], [oldLayout.transfersDir, target.transfersDir],
-      [oldLayout.exportsDir, target.exportsDir], [oldLayout.logsDir, target.logsDir],
-      [oldLayout.syncDir, target.syncDir],
-    ] as const) {
-      if (fs.existsSync(from)) fs.cpSync(from, to, { recursive: true, force: false })
-    }
-    if (fs.existsSync(target.dbPath)) {
-      if (fs.statSync(target.dbPath).size === 0 || !sqlModule) throw new Error('数据库文件迁移失败')
-      const probe = new sqlModule.Database(fs.readFileSync(target.dbPath))
-      try { probe.exec('SELECT COUNT(*) FROM sqlite_master') } finally { probe.close() }
-    }
-    config.storagePath = target.rootDir
-    fs.writeFileSync(target.configPath, JSON.stringify(config, null, 2), 'utf8')
-    writeStorageRootPointer(path.join(app.getPath('userData'), 'q-paste-storage-root.json'), target.rootDir)
+    stopRetentionTimer()
+    syncEngine.stopAutoSync()
+    if (previousTransfer.enabled) ftServer.stop()
+    await flushHistory()
+    await stageStorageMigration(target, async (staged) => {
+      if (db) await runDatabaseTask({ kind: 'snapshot', source: oldLayout.dbPath, target: staged.dbPath })
+      for (const key of ['imagesDir', 'textsDir', 'transfersDir', 'exportsDir', 'logsDir', 'syncDir', 'backupsDir', 'floralDir'] as const) {
+        if (fs.existsSync(oldLayout[key])) await fs.promises.cp(oldLayout[key], staged[key], { recursive: true })
+      }
+      const pending = path.join(oldLayout.databaseDir, 'pending-inserts.json')
+      if (fs.existsSync(pending)) await fs.promises.copyFile(pending, path.join(staged.databaseDir, 'pending-inserts.json'))
+      writeJsonFile(staged.configPath, { ...config, storagePath: target.rootDir })
+    }, () => writeStorageRootPointer(path.join(app.getPath('userData'), 'q-paste-storage-root.json'), target.rootDir))
     if (db) { db.close(); db = null }
     isQuitting = true
     app.relaunch()
     app.exit(0)
     return { success: true }
   } catch (err: any) {
-    // 迁移失败：恢复剪贴板监听，应用继续使用旧数据目录
-    if (!clipboardTimer) startClipboardMonitor()
+    if (storageMigrationInProgress) {
+      startClipboardMonitor()
+      startRetentionTimer()
+      if (syncEngine.isEnabled()) syncEngine.startAutoSync(config.cloudSyncIntervalSecs ?? 120)
+      if (previousTransfer.enabled) {
+        void ftServer.start(previousTransfer.port, config.fileTransferAutoClose ?? false, { host: config.fileTransferBindIp ?? '' })
+          .catch((error) => log.error('无法恢复局域网传输:', error))
+      }
+    }
     console.error('[Q-Paste] 存储路径迁移失败:', err)
     return { success: false, error: err?.message ?? String(err) }
+  } finally {
+    storageMigrationInProgress = false
   }
-})
+}))
 
 // ── Single instance lock ──
 const gotTheLock = app.requestSingleInstanceLock()
@@ -3083,16 +2785,33 @@ if (!gotTheLock) {
     registerGlobalShortcut()
     void getFloralStore().getConfig().then(applyFloralShortcuts).catch((error) => log.warn('Floral shortcuts unavailable:', error))
     startClipboardMonitor()
+    powerMonitor.on('resume', () => {
+      if (isQuitting) return
+      scheduleClipboardCheck()
+      mainWindow?.webContents.send('ft:status-changed', ftServer.status)
+      if (syncEngine.isEnabled()) void syncEngine.pullChanges(0).catch((error) => log.warn('休眠恢复后云同步失败:', error))
+    })
 
     // ft-file:// → 本地文件流（带 Range 支持，供聊天视图图片/视频预览）
-    protocol.handle('ft-file', (request) => {
+    protocol.handle('ft-file', async (request) => {
       const u = new URL(request.url)
-      const filePath = path.resolve(decodeURIComponent(`${u.host}${u.pathname}`))
+      let decoded: string
+      try { decoded = decodeURIComponent(u.pathname) }
+      catch { return new Response('Bad Request', { status: 400 }) }
+      if (process.platform === 'win32' && /^\/[a-z]:\//i.test(decoded)) decoded = decoded.slice(1)
+      if (u.host || !path.isAbsolute(decoded)) return new Response('Forbidden', { status: 403 })
       // 白名单：仅允许图片资源目录与文件传输保存目录，防任意本地文件读取
-      const allowed = [path.resolve(getImagesDir()), path.resolve(ftSaveDir())]
-      const inside = allowed.some((root) => filePath === root || filePath.startsWith(root + path.sep))
+      const real = (file: string) => fs.promises.realpath(file).catch(() => null)
+      const [filePath, ...allowed] = await Promise.all([real(decoded), real(getImagesDir()), real(ftSaveDir())])
+      if (!filePath) return new Response('Not Found', { status: 404 })
+      const inside = allowed.some((root) => {
+        if (!root) return false
+        const relative = path.relative(root, filePath)
+        return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+      })
       if (!inside) return new Response('Forbidden', { status: 403 })
-      return net.fetch(pathToFileURL(filePath).toString())
+      const range = request.headers.get('Range')
+      return net.fetch(pathToFileURL(filePath).toString(), { headers: range ? { Range: range } : undefined })
     })
 
     // 非关键服务错峰初始化：首窗可交互后再启动，不拖慢冷启动
@@ -3100,7 +2819,6 @@ if (!gotTheLock) {
       try {
         startRetentionTimer()
         enforceRetentionRules()
-        saveDb()
 
         // 云端同步（WebDAV）：初始化引擎；未启用时仅加载配置，不发网络请求
         applyCloudSyncConfig().catch((err) => console.error('[Q-Paste] 云同步初始化失败:', err))
@@ -3133,15 +2851,30 @@ if (!gotTheLock) {
     // macOS: re-create window when dock icon clicked
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow()
+      startClipboardMonitor()
     }
   })
 
-  app.on('before-quit', () => {
+  let drainingBeforeQuit = false
+  let quitDrained = false
+  app.on('before-quit', (event) => {
+    if (quitDrained) return
+    event.preventDefault()
+    if (drainingBeforeQuit) return
+    drainingBeforeQuit = true
     isQuitting = true
     stopClipboardMonitor()
     stopRetentionTimer()
     ftServer.stop()
     globalShortcut.unregisterAll()
-    if (db) { saveDb(); db.close() }
+    void (async () => {
+      await flushHistory()
+      if (!db) return
+      db.close()
+      db = null
+    })().catch((error) => log.error('Failed to close the history database:', error)).finally(() => {
+      quitDrained = true
+      app.quit()
+    })
   })
 }

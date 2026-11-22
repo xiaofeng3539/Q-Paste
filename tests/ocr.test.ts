@@ -1,10 +1,73 @@
 import { describe, expect, it } from 'vitest'
-import { canSaveOcrResult, fitOcrCanvas, invalidateOcrTask, isValidOcrRegion, mapViewportOcrRegionToImage, normalizeOcrText, ocrActionErrorMessage, ocrErrorMessage, openOcrSelection, shouldApplyOcrResult, validateOcrConfig } from '../src/lib/ocr'
+import { canSaveOcrResult, createOcrWorkerSession, fitOcrCanvas, invalidateOcrTask, isValidOcrRegion, mapViewportOcrRegionToImage, normalizeOcrText, ocrActionErrorMessage, ocrErrorMessage, openOcrSelection, shouldApplyOcrResult, validateOcrConfig } from '../src/lib/ocr'
 
 describe('OCR 本地资源配置', () => {
   it('缺少本地语言模型时返回可读错误', () => {
     expect(validateOcrConfig({ langPath: '', workerPath: 'worker.js', corePath: 'core.wasm.js' }))
       .toBe('缺少 OCR 语言模型')
+  })
+})
+
+describe('OCR worker session', () => {
+  it('reuses one initialized worker and sends progress to the current request', async () => {
+    let initializations = 0
+    const session = createOcrWorkerSession(async (reportProgress) => {
+      const workerId = ++initializations
+      return {
+        recognize: async (blob) => {
+          reportProgress(0.5)
+          return { data: { text: `${workerId}:${await blob.text()}` } }
+        },
+        terminate: async () => {},
+      }
+    })
+    const firstProgress: number[] = []
+    const secondProgress: number[] = []
+    try {
+      expect(await session.recognize(new Blob(['first']), (progress) => firstProgress.push(progress))).toBe('1:first')
+      expect(await session.recognize(new Blob(['second']), (progress) => secondProgress.push(progress))).toBe('1:second')
+      expect(firstProgress).toEqual([0.5])
+      expect(secondProgress).toEqual([0.5])
+    } finally {
+      session.dispose()
+    }
+  })
+
+  it('settles a cancelled request and terminates a worker that finishes initializing late', async () => {
+    const ready = Promise.withResolvers<void>()
+    const terminated = Promise.withResolvers<void>()
+    const session = createOcrWorkerSession(async () => {
+      await ready.promise
+      return {
+        recognize: async () => ({ data: { text: 'stale' } }),
+        terminate: async () => terminated.resolve(),
+      }
+    })
+    const pending = session.recognize(new Blob(['first']), () => {})
+    session.cancelActive()
+    await expect(pending).rejects.toThrow('OCR cancelled')
+    ready.resolve()
+    await terminated.promise
+  })
+
+  it('recreates the worker after a recognition failure', async () => {
+    let initializations = 0
+    const session = createOcrWorkerSession(async () => {
+      const workerId = ++initializations
+      return {
+        recognize: async () => {
+          if (workerId === 1) throw new Error('worker failed')
+          return { data: { text: 'recovered' } }
+        },
+        terminate: async () => {},
+      }
+    })
+    try {
+      await expect(session.recognize(new Blob(), () => {})).rejects.toThrow('worker failed')
+      expect(await session.recognize(new Blob(), () => {})).toBe('recovered')
+    } finally {
+      session.dispose()
+    }
   })
 })
 

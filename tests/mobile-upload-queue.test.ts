@@ -12,13 +12,11 @@ function makeQueue(send: (task: any, progress: (percent: number) => void) => Pro
 }
 const tick = () => new Promise(resolve => setTimeout(resolve, 0))
 function makeSender(fetch: typeof globalThis.fetch) {
-  const start = page.indexOf('        function matchesUpload(')
+  const start = page.indexOf('        async function pollMessages(')
   expect(start).toBeGreaterThan(0)
-  const matches = page.slice(start, page.indexOf('        function createMessageElement('))
-  const uploads = page.slice(page.indexOf('        async function pollUploads('), page.indexOf('        // ── 获取电脑剪贴板'))
-  return runInNewContext(matches + uploads + '\nuploadFile', {
+  const uploads = page.slice(start, page.indexOf('        // ── 获取电脑剪贴板', start))
+  return runInNewContext(uploads + '\nuploadFile', {
     fetch, FormData, AbortSignal, crypto, deviceId: 'phone', deviceName: 'Mobile', lastId: 0, seenMessages: new Set(),
-    extractNameFromContent: (content: string) => decodeURIComponent(content.split('?name=')[1]),
   })
 }
 
@@ -79,13 +77,29 @@ describe('系统相册确认后直接发送', () => {
       if (String(url).startsWith('/poll')) return new Response(JSON.stringify(history))
       sends++
       const meta = JSON.parse((options!.body as FormData).get('metadata') as string)
-      history.push({ id: 1, direction: 'in', sender_id: 'phone', msg_type: 'image', content: '/download/token?name=' + encodeURIComponent('20261010120000_1_' + meta.file_name) })
+      history.push({ id: 1, direction: 'in', sender_id: 'phone', msg_type: 'image', upload_id: meta.upload_id })
       throw new Error('完成响应丢失')
     })
     const task = { name: '1_照片.jpg', file: new File(['原图'], '1_照片.jpg', { type: 'image/jpeg' }) }
     await send(task, () => {})
     await send(task, () => {})
     expect(sends).toBe(1)
+  })
+
+  it('分块响应中断后从未确认的分块继续，保留同一个上传 ID', async () => {
+    const chunks: { id: string; index: number }[] = []
+    const send = makeSender(async (url, options) => {
+      if (String(url).startsWith('/poll')) return new Response('[]')
+      const meta = JSON.parse((options!.body as FormData).get('metadata') as string)
+      chunks.push({ id: meta.upload_id, index: meta.chunk_index })
+      if (chunks.length === 2) throw new Error('连接中断')
+      return new Response('ok')
+    })
+    const task = { name: 'photo.jpg', file: new File([new Uint8Array(512 * 1024 + 1)], 'photo.jpg') }
+    await expect(send(task, () => {})).rejects.toThrow('连接中断')
+    await send(task, () => {})
+    expect(chunks.map(chunk => chunk.index)).toEqual([0, 1, 1])
+    expect(new Set(chunks.map(chunk => chunk.id)).size).toBe(1)
   })
 
   it('一次确认后全部按原顺序入队，单图兼容，取消选择不入队', () => {

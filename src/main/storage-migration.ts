@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { ensureStorageLayout, getStorageLayout, type StorageLayout } from './storage-layout'
 
 interface RootPointer { rootPath?: unknown }
@@ -18,9 +19,46 @@ export function readStorageRootPointer(pointerPath: string): string | null {
 export function writeStorageRootPointer(pointerPath: string, rootPath: string): void {
   const target = path.resolve(rootPath)
   fs.mkdirSync(path.dirname(pointerPath), { recursive: true })
-  const tempPath = `${pointerPath}.${process.pid}.tmp`
-  fs.writeFileSync(tempPath, JSON.stringify({ rootPath: target }, null, 2), 'utf8')
-  fs.renameSync(tempPath, pointerPath)
+  writeJsonFile(pointerPath, { rootPath: target })
+}
+
+export function writeJsonFile(file: string, value: unknown): void {
+  const temp = `${file}.${randomUUID()}.tmp`
+  try {
+    fs.writeFileSync(temp, JSON.stringify(value, null, 2), { encoding: 'utf8', flush: true })
+    fs.renameSync(temp, file)
+  } finally {
+    try { fs.rmSync(temp, { force: true }) } catch { /* Best-effort staging cleanup. */ }
+  }
+}
+
+/** Publish a prepared layout without overwriting another installation. */
+export async function stageStorageMigration(target: StorageLayout,
+  prepare: (staged: StorageLayout) => Promise<void>, commit: () => void): Promise<void> {
+  await fs.promises.mkdir(target.rootDir, { recursive: true })
+  const stage = await fs.promises.mkdtemp(path.join(target.rootDir, '.qpaste-migration-'))
+  const staged = getStorageLayout(stage)
+  const moved: string[] = []
+  try {
+    ensureStorageLayout(staged)
+    await prepare(staged)
+    const folders = await fs.promises.readdir(stage)
+    for (const name of folders) {
+      if (fs.existsSync(path.join(target.rootDir, name))) throw new Error(`目标目录已有 ${name}，未覆盖`)
+    }
+    for (const name of folders) {
+      await fs.promises.rename(path.join(stage, name), path.join(target.rootDir, name))
+      moved.push(name)
+    }
+    commit()
+  } catch (error) {
+    for (const name of moved.reverse()) {
+      await fs.promises.rename(path.join(target.rootDir, name), path.join(stage, name))
+    }
+    throw error
+  } finally {
+    await fs.promises.rm(stage, { recursive: true, force: true }).catch(() => undefined)
+  }
 }
 
 function copyFileIfMissing(source: string, target: string): void {

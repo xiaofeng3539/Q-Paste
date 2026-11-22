@@ -26,25 +26,32 @@ function parseContentDisposition(value: string): { name?: string; filename?: str
 
 /** 读取完整请求体；超过上限抛 BODY_TOO_LARGE */
 export function readRawBody(req: import('http').IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Buffer> {
+  if (Number(req.headers['content-length']) > maxBytes) {
+    req.resume()
+    return Promise.reject(new Error('BODY_TOO_LARGE'))
+  }
   return new Promise((resolve, reject) => {
     let size = 0
     const chunks: Buffer[] = []
-    req.on('data', (c: Buffer) => {
+    const onData = (c: Buffer): void => {
       size += c.length
       if (size > maxBytes) {
-        req.destroy()
+        chunks.length = 0
+        req.off('data', onData)
+        req.resume()
         reject(new Error('BODY_TOO_LARGE'))
         return
       }
       chunks.push(c)
-    })
-    req.on('end', () => resolve(Buffer.concat(chunks)))
-    req.on('error', reject)
+    }
+    req.on('data', onData)
+    req.once('end', () => resolve(Buffer.concat(chunks)))
+    req.once('error', reject)
   })
 }
 
 /** 按名称取第一个匹配的 part */
-export async function parseMultipart(req: import('http').IncomingMessage): Promise<MultipartPart[] | null> {
+export async function parseMultipart(req: import('http').IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<MultipartPart[] | null> {
   const ctype = req.headers['content-type'] ?? ''
   const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(ctype)
   if (!m) return null
@@ -52,7 +59,7 @@ export async function parseMultipart(req: import('http').IncomingMessage): Promi
 
   let body: Buffer
   try {
-    body = await readRawBody(req)
+    body = await readRawBody(req, maxBytes)
   } catch (err) {
     if (err instanceof Error && err.message === 'BODY_TOO_LARGE') return null
     throw err

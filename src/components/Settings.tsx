@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef } from 'react'
 import { ArrowLeft, Monitor, Keyboard, Info, Palette, Database, Minus, Plus, X, RotateCcw, FileClock, HelpCircle, Cloud, User, Github, Star, AlertCircle, ClipboardList } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { Lang, tr, setLang } from '../i18n'
@@ -13,6 +13,7 @@ import { QRCodeCanvas } from 'qrcode.react'
 type Theme = 'light' | 'dark' | 'auto'
 
 interface SettingsProps {
+  fileTransferRequest: number
   theme: Theme
   onThemeChange: (t: Theme) => void
   language: Lang
@@ -72,10 +73,14 @@ function FtSwitch({ checked, onChange }: { checked: boolean; onChange: (v: boole
   )
 }
 
-export default function Settings({ theme, onThemeChange, language, onLanguageChange, accentColor, onAccentChange, listDensity, onDensityChange, useMonospace, onMonospaceChange, autoHideOnCopy, onAutoHideChange, shortcuts, onShortcutChange, onBack, onDataImported, onClearData, onToast }: SettingsProps) {
-  const [activeMenu, setActiveMenu] = useState<MenuKey>('general')
+export default function Settings({ fileTransferRequest, theme, onThemeChange, language, onLanguageChange, accentColor, onAccentChange, listDensity, onDensityChange, useMonospace, onMonospaceChange, autoHideOnCopy, onAutoHideChange, shortcuts, onShortcutChange, onBack, onDataImported, onClearData, onToast }: SettingsProps) {
+  const [activeMenu, setActiveMenu] = useState<MenuKey>(fileTransferRequest ? 'fileTransfer' : 'general')
   const menuItems = useMenuItems()
   const { alert, confirm } = useDialog()
+
+  useEffect(() => {
+    if (fileTransferRequest) setActiveMenu('fileTransfer')
+  }, [fileTransferRequest])
 
   // General toggle state
   const [autoStart, setAutoStart] = useState(true)
@@ -183,13 +188,20 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
   const [availableIps, setAvailableIps] = useState<string[]>([])
   const [localIp, setLocalIp] = useState('')
   const [showAutoCloseHint, setShowAutoCloseHint] = useState(false)
+  const settingsContentRef = useRef<HTMLDivElement>(null)
+  const lastScrolledTransferRequest = useRef(0)
+
+  useLayoutEffect(() => {
+    const content = settingsContentRef.current
+    if (!content || activeMenu !== 'fileTransfer' || !ftEnabled || !ftStatus?.enabled ||
+      fileTransferRequest === lastScrolledTransferRequest.current) return
+
+    content.scrollTop = content.scrollHeight
+    lastScrolledTransferRequest.current = fileTransferRequest
+  }, [activeMenu, fileTransferRequest, ftEnabled, ftStatus?.enabled])
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.electronAPI?.ftGetSettings) return
-    window.electronAPI.ftGetAvailableIps().then((ips) => {
-      setAvailableIps(ips)
-      setLocalIp((cur) => cur || ips[0] || '')
-    }).catch(() => {})
     window.electronAPI.ftGetOnlineDevices().then(setFtOnlineDevices).catch(() => {})
     const offStatus = window.electronAPI.onFtStatusChanged((st) => {
       setFtStatus(st)
@@ -206,9 +218,15 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
   useEffect(() => {
     if (activeMenu !== 'fileTransfer' || !window.electronAPI?.ftGetSettings) return
     let cancelled = false
+    void window.electronAPI.ftGetAvailableIps().then((ips) => {
+      if (cancelled) return
+      setAvailableIps(ips)
+      setLocalIp((current) => current || ips[0] || '')
+    }).catch(() => {})
     void (async () => {
-      const settings = await window.electronAPI.ftGetSettings()
-      let status = await window.electronAPI.ftStatus()
+      const [settings, currentStatus] = await Promise.all([window.electronAPI.ftGetSettings(), window.electronAPI.ftStatus()])
+      if (cancelled) return
+      let status = currentStatus
       if (settings.enabled && !status.enabled) {
         const result = await window.electronAPI.ftToggle(true, settings.port)
         if (!result.success) onToast?.(result.error || 'error')
@@ -608,7 +626,7 @@ export default function Settings({ theme, onThemeChange, language, onLanguageCha
 
       {/* Right — settings content (floating card) */}
       <div className="flex-1 flex flex-col min-w-0 p-4 pt-8 pl-0">
-        <div className="flex-1 overflow-y-auto bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-zinc-200/60 dark:border-zinc-800/50 p-6">
+        <div ref={settingsContentRef} className="flex-1 overflow-y-auto bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-zinc-200/60 dark:border-zinc-800/50 p-6">
           {activeMenu === 'general' && (
             <div className="space-y-4">
               <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">

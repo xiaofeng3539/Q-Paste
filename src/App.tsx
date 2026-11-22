@@ -9,7 +9,7 @@ import { mockItems } from './mock'
 import { Lang, loadLang, setLang, tr } from './i18n'
 import { stripHtml, cn } from './lib/utils'
 import { searchIncludes } from './lib/search'
-import { historySummary, loadHistorySummaries, readHistoryContent } from './lib/history-memory'
+import { appendHistorySummaries, applyClipboardChanges, historySummary, loadHistorySummaries, mergeVisibleOrder, readHistoryContent } from './lib/history-memory'
 import { selectRangeIds } from './lib/selection-range'
 import { assignVaultSortOrders } from './lib/vault-order'
 import { useDialog } from './components/DialogProvider'
@@ -93,11 +93,14 @@ function compareByVaultOrder(a: ClipboardItem, b: ClipboardItem): number {
 
 export default function App() {
   const [items, setItems] = useState<ClipboardItem[]>(isElectron ? [] : mockItems)
+  const itemsRef = useRef(items)
+  itemsRef.current = items
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [selectedContent, setSelectedContent] = useState<{ summary: ClipboardItem; content: string } | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [toast, setToast] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  const [fileTransferRequest, setFileTransferRequest] = useState(0)
   const [theme, setTheme] = useState<Theme>(loadTheme)
   const [language, setLanguage] = useState<Lang>(loadLang)
   const [accentColor, setAccentColor] = useState<AccentColor>(() => {
@@ -252,19 +255,19 @@ export default function App() {
     return () => mq.removeEventListener('change', onChange)
   }, [theme])
 
-  function showToast(msg: string) {
+  const showToast = useCallback((msg: string) => {
     setToast(msg)
     if (toastTimer.current) clearTimeout(toastTimer.current)
     toastTimer.current = setTimeout(() => setToast(null), 1500)
-  }
+  }, [])
 
   useEffect(() => {
     if (!isElectron) return
     loadHistorySummaries(window.electronAPI.getItems, window.electronAPI.getHistoryIds).then((loaded) => {
       const normalized = normalizeItems(loaded)
-      setItems((prev) => [...prev, ...normalized.filter((item) => !prev.some((existing) => existing.id === item.id))])
+      setItems((prev) => appendHistorySummaries(prev, normalized))
       if (normalized.length > 0) {
-        setSelectedId(normalized[0].id)
+        setSelectedId((current) => current ?? normalized[0].id)
       }
     })
   }, [])
@@ -279,86 +282,60 @@ export default function App() {
     }
     let cancelled = false
     const timer = setTimeout(async () => {
-      let loaded: ClipboardItem[] = []
-      if (isElectron) {
+      try {
         const dbRes = await window.electronAPI.getItems({ limit: 300, offset: 0, search: q, pinnedOnly: activeTab === 'vault', summaryOnly: true })
-        loaded = normalizeItems(dbRes).map(historySummary)
+        if (cancelled) return
+        const loaded = normalizeItems(dbRes).map(historySummary)
+        // 拼音搜索：补充最近加载条目中的匹配，按 id 去重。
+        const known = new Set(loaded.map((it) => it.id))
+        const candidates = items.filter((it) => !known.has(it.id) && (it.is_pinned || activeTab !== 'vault'))
+        const localIds = candidates.length ? await window.electronAPI.searchLocalItems(candidates.map((it) => it.id), q) : []
+        if (cancelled) return
+        const hitIds = new Set(localIds)
+        setSearchResults([...loaded, ...candidates.filter((it) => hitIds.has(it.id))])
+      } catch (error) {
+        if (!cancelled) console.error('搜索历史记录失败:', error)
       }
-      // 拼音搜索：对本地已加载条目（最近 500 条）额外做拼音/子串匹配，与 DB 结果去重合并
-      const known = new Set(loaded.map((it) => it.id))
-      const candidates = items.filter((it) => !known.has(it.id) && (it.is_pinned || activeTab !== 'vault'))
-      const hitIds = new Set(await window.electronAPI.searchLocalItems(candidates.map((it) => it.id), q))
-      const localHits = candidates.filter((it) => hitIds.has(it.id))
-      if (localHits.length) loaded = [...loaded, ...localHits]
-      if (!cancelled) setSearchResults(loaded)
     }, 250)
     return () => { cancelled = true; clearTimeout(timer) }
   }, [searchQuery, activeTab, items])
 
   useEffect(() => {
     if (!isElectron) return
-    const cleanup = window.electronAPI.onClipboardChanged((data: ClipboardChangedData) => {
-      if (data.fromCapture && data.id !== undefined) {
-        const id = data.id
-        setItems((prev) => {
-          const existing = prev.find((it) => it.id === id)
-          const item: ClipboardItem = {
-            id,
-            type: data.type,
-            content: '',
-            content_loaded: false,
-            preview: data.preview,
-            char_count: data.charCount ?? 0,
-            storage_size: data.storageSize ?? 0,
-            created_at: data.createdAt,
-            is_pinned: existing?.is_pinned ?? false,
-            alias: existing?.alias ?? '',
-            tags: existing?.tags ?? [],
-            is_sensitive: data.isSensitive ?? existing?.is_sensitive ?? false,
-          }
-          return [item, ...prev.filter((it) => it.id !== id)]
-        })
-        setSelectedId(id)
-        setPendingDeleteId(null)
-        showToast(data.updated ? tr('toast.repinned') : data.isSensitive ? tr('toast.sensitiveDetected') : tr('toast.captured'))
-        return
-      }
-      // 来自文件传输/超大文本确认入库的内容已在主进程入库，直接更新列表，不再重复插入
-      if ((data.fromFt || data.fromOversize) && data.id !== undefined) {
-        const newItem: ClipboardItem = {
-          id: data.id,
-          type: data.type,
-          content: '',
-          content_loaded: false,
-          preview: data.preview,
-          char_count: data.charCount ?? 0,
-          storage_size: data.storageSize ?? 0,
-          created_at: data.createdAt,
-          is_pinned: false,
-          alias: '',
-          tags: [],
-          is_sensitive: false,
-        }
-        setItems((prev) => [newItem, ...prev])
-        setSelectedId(data.id)
-        setPendingDeleteId(null)
-        showToast(tr('toast.ftReceived', { preview: data.preview }))
-        return
-      }
-
+    let pending: ClipboardChangedData[] = []
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const flush = () => {
+      clearTimeout(timer)
+      timer = undefined
+      const changes = pending
+      pending = []
+      const latest = changes[changes.length - 1]
+      if (!latest || latest.id === undefined) return
+      setItems((prev) => applyClipboardChanges(prev, changes))
+      setSelectedId(latest.id)
+      setPendingDeleteId(null)
+      const toastKey = latest.updated ? 'toast.repinned' : latest.isSensitive ? 'toast.sensitiveDetected' : 'toast.captured'
+      showToast(latest.fromCapture ? tr(toastKey) : tr('toast.ftReceived', { preview: latest.preview }))
+    }
+    const removeClipboardListener = window.electronAPI.onClipboardChanged((data: ClipboardChangedData) => {
+      // 这些事件均已在主进程入库，可在一次更新内合并。
+      if (data.id === undefined || !(data.fromCapture || data.fromFt || data.fromOversize)) return
+      pending.push(data)
+      timer ??= setTimeout(flush, 16)
     })
-    return cleanup
-  }, [])
 
-  // 云端同步：主进程入库后的远端记录直接并入列表（按 id 去重，最新在前）
-  useEffect(() => {
-    if (!isElectron) return
-    const cleanup = window.electronAPI.onCloudSyncPulled((rows) => {
+    // 云端记录按到达顺序并入列表，保持最新在前。
+    const removeCloudListener = window.electronAPI.onCloudSyncPulled((rows) => {
       if (!rows.length) return
+      flush()
       setItems((prev) => {
         const known = new Set(prev.map((it) => it.id))
         const incoming = rows
-          .filter((r) => !known.has(r.id))
+          .filter((row) => {
+            if (known.has(row.id)) return false
+            known.add(row.id)
+            return true
+          })
           .map((r) => ({
             id: r.id,
             type: r.type as ClipboardItem['type'],
@@ -373,12 +350,16 @@ export default function App() {
             tags: [],
             is_sensitive: false,
           }))
-        return [...incoming.reverse(), ...prev]
+        return incoming.length ? [...incoming.reverse(), ...prev] : prev
       })
       showToast(tr('toast.cloudSyncPulled', { n: rows.length }))
     })
-    return cleanup
-  }, [])
+    return () => {
+      clearTimeout(timer)
+      removeClipboardListener()
+      removeCloudListener()
+    }
+  }, [showToast])
 
   // 超大文本：等待用户选择「完整保留 / 截断保留」（主进程捕获到超限内容时触发）
   const [oversizePending, setOversizePending] = useState<{ content: string; kb: number } | null>(null)
@@ -411,6 +392,20 @@ export default function App() {
   useEffect(() => {
     if (!isElectron) return
     const cleanup = window.electronAPI.onOpenSettings(() => setShowSettings(true))
+    return cleanup
+  }, [])
+
+  useEffect(() => {
+    if (!isElectron) return
+    const openFileTransfer = () => {
+      void window.electronAPI.ftTakeOpenPageRequest().then((requested) => {
+        if (!requested) return
+        setFileTransferRequest((current) => current + 1)
+        setShowSettings(true)
+      }).catch(console.error)
+    }
+    const cleanup = window.electronAPI.onFtOpenPage(openFileTransfer)
+    openFileTransfer()
     return cleanup
   }, [])
 
@@ -545,10 +540,13 @@ export default function App() {
 
   /** 历史列表拖拽重排：按拖拽结果重组数组，并立即持久化到本地 DB */
   const handleReorder = useCallback(async (ordered: ClipboardItem[]) => {
-    setItems(ordered)
+    const visibleIds = ordered.map((it) => it.id)
+    const current = itemsRef.current
+    const next = mergeVisibleOrder(current, visibleIds)
+    setItems((prev) => prev === current ? next : mergeVisibleOrder(prev, visibleIds))
     if (!isElectron) return
     try {
-      await window.electronAPI.reorderItems(ordered.map((it) => it.id))
+      await window.electronAPI.reorderItems(next.map((it) => it.id))
     } catch (err: any) {
       showToast(tr('toast.error', { error: err?.message ?? String(err) }))
     }
@@ -557,14 +555,16 @@ export default function App() {
   /** 金库列表拖拽重排：重赋收藏条目的 vault_sort_order（越大越靠前），并立即持久化到本地 DB */
   const handleVaultReorder = useCallback(
     async (ordered: ClipboardItem[]) => {
-      const n = ordered.length
-      const byId = new Map(ordered.map((it, i) => [it.id, n - i]))
-      setItems((prev) =>
-        prev.map((it) => (it.is_pinned && byId.has(it.id) ? { ...it, vault_sort_order: byId.get(it.id) } : it)),
-      )
+      const pinned = itemsRef.current.filter((it) => it.is_pinned).sort(compareByVaultOrder)
+      const next = mergeVisibleOrder(pinned, ordered.map((it) => it.id))
+      const byId = new Map(next.map((it, i) => [it.id, next.length - i]))
+      setItems((prev) => prev.map((it) => {
+        const order = byId.get(it.id)
+        return it.is_pinned && order !== undefined && order !== it.vault_sort_order ? { ...it, vault_sort_order: order } : it
+      }))
       if (!isElectron) return
       try {
-        await window.electronAPI.vaultReorderItems(ordered.map((it) => it.id))
+        await window.electronAPI.vaultReorderItems(next.map((it) => it.id))
       } catch (err: any) {
         showToast(tr('toast.error', { error: err?.message ?? String(err) }))
       }
@@ -1021,7 +1021,10 @@ export default function App() {
     return (
       <div className={`relative h-screen overflow-hidden pt-9 bg-zinc-50 dark:bg-zinc-950 ${winRadius}`}>
         <TitleBar />
-        <Settings theme={theme} onThemeChange={setTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} autoHideOnCopy={autoHideOnCopy} onAutoHideChange={setAutoHideOnCopy} shortcuts={shortcuts} onShortcutChange={handleShortcutChange} onBack={() => setShowSettings(false)} onToast={showToast} onDataImported={async () => {
+        <Settings fileTransferRequest={fileTransferRequest} theme={theme} onThemeChange={setTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} autoHideOnCopy={autoHideOnCopy} onAutoHideChange={setAutoHideOnCopy} shortcuts={shortcuts} onShortcutChange={handleShortcutChange} onBack={() => {
+          setShowSettings(false)
+          setFileTransferRequest(0)
+        }} onToast={showToast} onDataImported={async () => {
             // 导入 JSON 后重新拉取列表
             if (!isElectron) return
             const loaded = await loadHistorySummaries(window.electronAPI.getItems, window.electronAPI.getHistoryIds)

@@ -10,32 +10,36 @@
     "build:floral": "tsc --noEmit -p vendor/floral-notepaper/tsconfig.json && vite build --config vendor/floral-notepaper/vite.config.ts",
     "build": "tsc && vite build && tsc --noEmit -p vendor/floral-notepaper/tsconfig.json && vite build --config vendor/floral-notepaper/vite.config.ts && electron-builder",
     "build:win": "tsc && vite build && tsc --noEmit -p vendor/floral-notepaper/tsconfig.json && vite build --config vendor/floral-notepaper/vite.config.ts && electron-builder --win",
+    "build:win:web": "tsc && vite build && npm run build:floral && electron-builder --win nsis-web --x64 --publish never --config.directories.output=release/web-installer",
+    "verify:win": "npm test && npm --prefix vendor/floral-notepaper test && node --test tests/installer-packaging.test.cjs",
     "preview": "vite preview",
     "test": "vitest run"
   },
   "dependencies": {
     "clsx": "^2.1.1",
     "electron-log": "^5.4.4",
-    "electron-updater": "6.3.9",
+    "electron-updater": "6.8.11",
+    "koffi": "3.3.8",
     "lucide-react": "^0.468.0",
     "pinyin-pro": "^3.29.3",
     "qrcode.react": "^4.2.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "sortablejs": "^1.15.7",
-    "sql.js": "^1.12.0",
     "tailwind-merge": "^2.6.0",
     "tesseract.js": "5.1.1"
   },
   "devDependencies": {
+    "@types/node": "^24.19.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@types/sortablejs": "^1.15.9",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
-    "electron": "^33.3.1",
+    "electron": "45.4.1",
     "electron-builder": "^25.1.8",
     "postcss": "^8.4.49",
+    "sql.js": "^1.12.0",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
@@ -64,15 +68,13 @@
       "!**/*.map",
       "!node_modules/lucide-react/dist/**/*",
       "!node_modules/{react,react-dom}/cjs/**/*",
+      "!node_modules/{pinyin-pro,sortablejs}/dist/**/*",
+      "!node_modules/zlibjs/bin/**/*",
+      "!node_modules/koffi/{doc,vendor}/**/*",
       "!node_modules/tesseract.js/{dist,src}/**/*",
-      "!node_modules/tesseract.js-core/*.wasm*",
-      "!node_modules/sql.js/dist/{sql-asm*,worker*,sql-wasm-browser*,sql-wasm-debug*,*.zip,*.wasm}"
+      "!node_modules/tesseract.js-core/*.wasm*"
     ],
     "extraResources": [
-      {
-        "from": "node_modules/sql.js/dist/sql-wasm.wasm",
-        "to": "sql-wasm.wasm"
-      },
       {
         "from": "build/icon.png",
         "to": "icon.png"
@@ -85,8 +87,11 @@
         "from": "build/ocr",
         "to": "ocr",
         "filter": [
-          "**/*",
-          "!core/*.wasm"
+          "worker.min.js",
+          "chi_sim.traineddata.gz",
+          "eng.traineddata.gz",
+          "core/tesseract-core-lstm.wasm.js",
+          "core/tesseract-core-simd-lstm.wasm.js"
         ]
       },
       {
@@ -132,6 +137,9 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "shortcutName": "Q-Paste"
+    },
+    "nsisWeb": {
+      "artifactName": "${productName}.WebSetup.v${version}.${ext}"
     }
   }
 }

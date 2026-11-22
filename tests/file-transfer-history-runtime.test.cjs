@@ -5,12 +5,12 @@ const os = require('node:os')
 const assert = require('node:assert/strict')
 
 if (!process.versions.electron) {
-  require('node:test').test('电脑右键和手机长按独立清除聊天记录', { timeout: 45000 }, () => {
+  require('node:test').test('双端独立清除聊天记录，手机快捷方式打开电脑传输页', { timeout: 60000 }, () => {
     const output = fs.mkdtempSync(path.join(os.tmpdir(), 'qpaste-chat-history-'))
     const env = { ...process.env, QPASTE_HISTORY_OUTPUT: output }
     delete env.ELECTRON_RUN_AS_NODE
     const run = require('node:child_process').spawnSync(require('electron'), [__filename], {
-      env, encoding: 'utf8', windowsHide: true, timeout: 40000,
+      env, encoding: 'utf8', windowsHide: true, timeout: 55000,
     })
     assert.equal(run.status, 0, `${run.error || ''}\n${run.stdout}\n${run.stderr}`)
     console.log(run.stdout.split('\n').filter(line => line.startsWith('LAN HTTP verified:')).join('\n'))
@@ -18,7 +18,7 @@ if (!process.versions.electron) {
     console.log(`History UI evidence: ${output}`)
   })
 } else {
-  const { app, BrowserWindow } = require('electron')
+  const { app, BrowserWindow, dialog } = require('electron')
   const workspace = path.resolve(__dirname, '..')
   const root = process.env.QPASTE_SMOKE_APP_ROOT || workspace
   const output = process.env.QPASTE_HISTORY_OUTPUT
@@ -27,6 +27,15 @@ if (!process.versions.electron) {
   const getPath = app.getPath.bind(app)
   app.getPath = (key) => key === 'documents' ? output : getPath(key)
   app.setLoginItemSettings = () => {}
+  const showMessageBox = dialog.showMessageBox.bind(dialog)
+  let approvals = 0
+  dialog.showMessageBox = async (...args) => {
+    if (args.at(-1)?.message === '允许这台设备连接 Q-Paste？') {
+      approvals++
+      return { response: 0, checkboxChecked: false }
+    }
+    return showMessageBox(...args)
+  }
   const Module = require('node:module'), load = Module._load
   Module._load = function (id) {
     const result = load.apply(this, arguments)
@@ -82,7 +91,11 @@ if (!process.versions.electron) {
       const phone = (code) => evaluate(mobile, code)
       await mobile.loadURL(`http://${lan.ip}:${lan.port}/`)
       mobile.showInactive()
+      assert.equal((await fetch(`http://${lan.ip}:${lan.port}/poll`)).status, 401)
+      await until(() => phone(`Boolean(document.querySelector('#trust-device'))`))
+      await phone(`document.querySelector('#trust-device').click()`)
       await until(() => phone(`typeof socket !== 'undefined' && socket.readyState === 1`))
+      assert.equal(approvals, 1)
       await pc(`window.electronAPI.ftSendChatText('手机待清除消息')`)
       await until(() => phone(`chatBox.textContent.includes('手机待清除消息')`))
       assert.ok(await pc(`(await window.electronAPI.ftGetChatHistory()).at(-1).id`) > oldId)
@@ -105,6 +118,56 @@ if (!process.versions.electron) {
       await until(() => phone(`chatBox.textContent.includes('清空后继续通信')`))
       await pc(`window.electronAPI.ftClearChatHistory()`)
       assert.ok(await phone(`chatBox.textContent.includes('清空后继续通信')`))
+
+      const transferUrl = `http://${lan.ip}:${lan.port}/`
+      const transferVisible = async () => main.isVisible() && main.isFocused()
+        && await pc(`Boolean(document.querySelector('[data-testid="ft-message-list"]'))`)
+      const transferAtBottom = () => pc(`(() => {
+        const panel = document.querySelector('[data-testid="ft-message-list"]')?.parentElement.closest('.overflow-y-auto');
+        return Boolean(panel && panel.scrollTop > 0 && panel.scrollHeight - panel.clientHeight - panel.scrollTop <= 1);
+      })()`)
+      await pc(`[...document.querySelectorAll('button')].find(el => el.textContent.trim() === '通用').click()`)
+      main.hide()
+      assert.equal(main.isVisible(), false)
+      mobile.show()
+      await mobile.loadURL(transferUrl)
+      await until(transferVisible)
+      assert.equal(approvals, 1, '已信任的手机应直接打开传输页')
+      assert.ok(await transferAtBottom(), '手机唤起应滚到桌面传输页底部')
+      assert.equal(await pc(`document.body.textContent.includes('手机桌面快捷方式')`), false)
+
+      await pc(`document.querySelector('[data-testid="ft-message-list"]').parentElement.closest('.overflow-y-auto').scrollTop = 0`)
+      mobile.hide()
+      await until(() => phone(`document.visibilityState === 'hidden'`))
+      main.minimize()
+      assert.equal(main.isMinimized(), true)
+      mobile.show()
+      await until(transferVisible)
+      assert.equal(main.isMinimized(), false)
+      await until(transferAtBottom)
+
+      await pc(`[...document.querySelectorAll('button')].find(el => el.textContent.trim() === '通用').click()`)
+      // Cover the desktop window without letting Windows occlusion hide the simulated phone page.
+      await mobile.loadURL('about:blank')
+      mobile.focus()
+      assert.equal(main.isFocused(), false)
+      const [credential] = await mobile.webContents.session.cookies.get({ url: transferUrl, name: 'qpaste_lan_device' })
+      const wakeResponse = await fetch(new URL('/api/open-desktop', transferUrl), {
+        method: 'POST', headers: { Origin: new URL(transferUrl).origin, Cookie: `${credential.name}=${credential.value}` },
+      })
+      assert.equal(wakeResponse.status, 204)
+      await until(transferVisible)
+
+      // The switch replaces the renderer that initiated it. Wait for the new page instead of its IPC reply.
+      void pc(`window.electronAPI.switchAppMode('floral')`).catch(() => {})
+      await until(() => main.webContents.getURL().includes('/dist/floral/index.html') && !main.webContents.isLoading())
+      main.hide()
+      mobile.show()
+      await mobile.loadURL(`${transferUrl}shortcut/${'a'.repeat(32)}`)
+      await until(transferVisible)
+      await until(transferAtBottom)
+      assert.equal(mobile.webContents.getURL(), transferUrl)
+
       fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ passed: true, appRoot: root }))
       app.exit(0)
     } catch (error) { console.error(error); app.exit(1) }

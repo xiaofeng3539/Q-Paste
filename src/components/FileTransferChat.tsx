@@ -26,7 +26,9 @@ type ContextMenuState = {
 
 /** 本地绝对路径 → ft-file 流式预览 URL（Electron 自定义协议，等价 Tiez convertFileSrc） */
 function ftFileUrl(p: string): string {
-  return `ft-file:///${p.replace(/\\/g, '/').replace(/^\//, '')}`
+  if (p.startsWith('ft-file:')) return p
+  const segments = p.replace(/\\/g, '/').replace(/^\//, '').split('/')
+  return `ft-file:///${segments.map(encodeURIComponent).join('/')}`
 }
 
 const URL_REGEX = /((https?:\/\/|www\.)[^\s<]+|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,})(?:\/[^\s<]*)?)/gi

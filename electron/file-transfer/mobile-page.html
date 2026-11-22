@@ -582,6 +582,21 @@
     </div>
 
     <script>
+        if (window.top === window.self) {
+            const openDesktop = () => {
+                if (document.visibilityState !== 'visible') return;
+                void fetch('/api/open-desktop', {
+                    method: 'POST',
+                    mode: 'same-origin',
+                    redirect: 'error',
+                }).then(response => {
+                    if (response.status === 401) location.reload();
+                }).catch(() => {});
+            };
+            document.addEventListener('visibilitychange', openDesktop);
+            openDesktop();
+        }
+
         const fileInput = document.getElementById('file-input');
         const textInput = document.getElementById('text-input');
         const sendBtn = document.getElementById('send-btn');
@@ -639,7 +654,6 @@
                 retry(task) {
                     if (task.status !== 'failed') return;
                     task.status = 'waiting';
-                    task.progress = 0;
                     onChange(task);
                     void drain();
                 }
@@ -782,13 +796,6 @@
             }
             return file_path || content || '';
         }
-        function matchesUpload(msg, task) {
-            if (msg.direction !== 'in' || msg.sender_id !== deviceId || !['file', 'image', 'video'].includes(msg.msg_type)) return false;
-            const savedName = extractNameFromContent(msg.content, msg.file_path).split('/').pop().split('\\').pop();
-            const safeName = task.name.replace(/[\\/:*?"<>|]/g, '_');
-            const withoutTimestamp = savedName.replace(/^\d{8,}_/, '');
-            return withoutTimestamp === safeName || withoutTimestamp.replace(/^\d+_/, '') === safeName;
-        }
         function createMessageElement(direction, content, senderName, msgType, file_path) {
             const div = document.createElement('div');
             div.className = `message ${direction}`;
@@ -892,43 +899,61 @@
 
         // WebSocket Setup
         let socket;
-        function connectWS() {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
-            
-            socket.onopen = () => {
-                socket.send(JSON.stringify({ type: 'identity', device_id: deviceId, device_name: deviceName }));
-                console.log('WS Connected');
-            };
-            
-            socket.onmessage = (e) => {
-                const msg = JSON.parse(e.data);
-                if (msg.id) {
-                    if (seenMessages.has(msg.id)) return;
-                    seenMessages.add(msg.id);
-                    lastId = Math.max(lastId, msg.id);
+        let reconnectTimer;
+        let connectedBefore = false;
+        let catchupAfter = null;
+        function receiveMessage(msg) {
+            if (!msg.id || seenMessages.has(msg.id)) return;
+            seenMessages.add(msg.id);
+            if (msg.direction === 'in' && msg.sender_id === deviceId && msg.upload_id) {
+                const task = uploadQueue.tasks.find(item => item.attempt?.id === msg.upload_id);
+                if (task) {
+                    task.receipt = msg;
+                    renderUpload(task);
+                    return;
                 }
-                if (msg.direction === 'in' && msg.sender_id === deviceId) {
-                    const task = uploadQueue.tasks.find(item => item.attempt && !item.receipt && msg.id > item.attempt.afterId && matchesUpload(msg, item));
-                    if (task) {
-                        task.receipt = msg;
-                        renderUpload(task);
-                        return;
-                    }
-                }
-                if (msg.direction === 'out') {
-                    const el = createMessageElement('received', msg.content, msg.sender_name, msg.msg_type, msg.file_path);
-                    chatBox.appendChild(el);
-                    scrollToBottom();
-                } else if (msg.direction === 'in') {
-                    const el = createMessageElement('sent', msg.content, 'You', msg.msg_type, msg.file_path);
-                    chatBox.appendChild(el);
-                    scrollToBottom();
-                }
-            };
-            
-            socket.onclose = () => setTimeout(connectWS, 3000);
+            }
+            if (msg.direction === 'out' || msg.direction === 'in') {
+                const incoming = msg.direction === 'out';
+                const el = createMessageElement(incoming ? 'received' : 'sent', msg.content, incoming ? msg.sender_name : 'You', msg.msg_type, msg.file_path);
+                chatBox.appendChild(el);
+                scrollToBottom();
+            }
         }
+
+        function connectWS() {
+            if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
+            clearTimeout(reconnectTimer);
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const connection = new WebSocket(`${protocol}//${window.location.host}/ws`);
+            socket = connection;
+            connection.onopen = () => {
+                connection.send(JSON.stringify({ type: 'identity', device_id: deviceId, device_name: deviceName }));
+                if (connectedBefore) {
+                    catchupAfter ??= lastId;
+                    void pollMessages(catchupAfter).then(messages => {
+                        for (const msg of messages) {
+                            lastId = Math.max(lastId, msg.id);
+                            receiveMessage(msg);
+                        }
+                        if (socket === connection) catchupAfter = null;
+                    }).catch(() => {});
+                }
+                connectedBefore = true;
+            };
+            connection.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+                if (msg.id) lastId = Math.max(lastId, msg.id);
+                receiveMessage(msg);
+            };
+            connection.onclose = () => {
+                if (socket === connection) reconnectTimer = setTimeout(connectWS, 3000);
+            };
+        }
+        window.addEventListener('online', connectWS);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) connectWS();
+        });
         connectWS();
 
         function clearMobileChatHistory() {
@@ -1004,38 +1029,40 @@
             } catch(e) { alert('Send failed'); }
         };
 
-        async function pollUploads(afterId) {
+        async function pollMessages(afterId) {
             const response = await fetch('/poll?last_id=' + afterId, { signal: AbortSignal.timeout(15000) });
             if (!response.ok) throw new Error('无法确认电脑接收状态，请检查连接后重试');
             return response.json();
         }
 
         async function confirmUpload(task) {
-            if (task.receipt) return true;
-            const messages = await pollUploads(task.attempt.afterId);
-            const receipt = messages.find(msg => matchesUpload(msg, task));
-            if (!receipt) return false;
-            task.receipt = receipt;
-            seenMessages.add(receipt.id);
-            lastId = Math.max(lastId, receipt.id);
-            return true;
+            if (task.receipt) return;
+            const messages = await pollMessages(task.attempt.afterId);
+            const receipt = messages.find(msg => msg.direction === 'in' && msg.upload_id === task.attempt.id && msg.sender_id === deviceId);
+            if (receipt) {
+                task.receipt = receipt;
+                seenMessages.add(receipt.id);
+            }
         }
 
         async function uploadFile(task, progress) {
-            // 最后一块响应丢失时，先核对接收记录，不能直接重发造成重复落盘。
-            if (task.attempt && task.attempt.finalSent && await confirmUpload(task)) return;
-            const history = await pollUploads(0);
-            const afterId = history.reduce((id, msg) => Math.max(id, msg.id), lastId);
-            task.attempt = { afterId, finalSent: false };
+            if (task.receipt) return;
             const file = task.file;
             const CHUNK_SIZE = 1024 * 512;
             const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
-            const uploadId = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : Date.now() + '-' + task.id + '-' + Math.random().toString(36).slice(2);
-            for (let i = 0; i < totalChunks; i++) {
+            const startAttempt = () => ({
+                id: typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : Date.now() + '-' + task.id + '-' + Math.random().toString(36).slice(2),
+                nextChunk: 0,
+                afterId: lastId
+            });
+            task.attempt ??= startAttempt();
+            let restarted = false;
+            while (task.attempt.nextChunk < totalChunks) {
+                const i = task.attempt.nextChunk;
                 const formData = new FormData();
                 formData.append('file', file.slice(i * CHUNK_SIZE, Math.min(file.size, (i + 1) * CHUNK_SIZE)));
                 formData.append('metadata', JSON.stringify({
-                    upload_id: uploadId,
+                    upload_id: task.attempt.id,
                     chunk_index: i,
                     total_chunks: totalChunks,
                     file_name: file.name,
@@ -1044,14 +1071,24 @@
                     total_size: file.size,
                     content_type: file.type
                 }));
-                task.attempt.finalSent = i === totalChunks - 1;
+                let response;
                 try {
-                    const response = await fetch('/upload-chunk', { method: 'POST', body: formData, signal: AbortSignal.timeout(60000) });
-                    if (!response.ok) throw new Error('电脑接收失败（' + response.status + '）');
+                    response = await fetch('/upload-chunk', { method: 'POST', body: formData, signal: AbortSignal.timeout(60000) });
                 } catch (error) {
-                    if (task.attempt.finalSent && await confirmUpload(task)) return;
+                    if (i === totalChunks - 1) {
+                        try { await confirmUpload(task); } catch (_) {}
+                        if (task.receipt) return;
+                    }
                     throw error;
                 }
+                if (response.status === 410 && i > 0 && !restarted) {
+                    task.attempt = startAttempt();
+                    progress(0);
+                    restarted = true;
+                    continue;
+                }
+                if (!response.ok) throw new Error('电脑接收失败（' + response.status + '）');
+                task.attempt.nextChunk += 1;
                 progress(Math.round((i + 1) / totalChunks * 100));
             }
             // HTTP 成功已表示完成；轮询仅用于取得可预览的下载地址。

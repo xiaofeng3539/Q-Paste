@@ -9,7 +9,7 @@ import { reportInstallPreparation } from "../features/update/api";
 import type { UpdateInstallPrepareRequest } from "../features/update/types";
 import { showToast } from "./Toast";
 import type { Note, NoteMetadata } from "../features/notes/types";
-import { countNoteChars, metadataFromNote } from "../features/notes/noteUtils";
+import { countNoteChars, mergeNoteMetadata, metadataFromNote } from "../features/notes/noteUtils";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -184,12 +184,22 @@ export function NotePad({
   );
   statusRef.current = status;
 
+  const noteListRevision = useRef(0);
+  const applyNoteMetadata = useCallback((metadata: NoteMetadata) => {
+    noteListRevision.current++;
+    setNotes((current) => mergeNoteMetadata(current, metadata));
+  }, []);
+
   const refreshNotes = useCallback(async () => {
     // 池中休眠的窗口不拉取笔记列表，激活时会统一刷新
-    if (dormantRef.current) return [] as NoteMetadata[];
-    const loadedNotes = await listNotes();
-    setNotes(loadedNotes);
-    return loadedNotes;
+    while (!dormantRef.current) {
+      const revision = noteListRevision.current;
+      const loadedNotes = await listNotes();
+      if (revision !== noteListRevision.current) continue;
+      if (!dormantRef.current) setNotes(loadedNotes);
+      return loadedNotes;
+    }
+    return [];
   }, []);
 
   const applyNote = useCallback((note: Note) => {
@@ -234,13 +244,15 @@ export function NotePad({
   }, [applyNote, initialNoteId, refreshNotes]);
 
   useEffect(() => {
-    const unlisten = listen("notes-changed", () => {
-      void refreshNotes().catch(() => undefined);
+    const unlisten = listen<NoteMetadata | null>("notes-changed", ({ payload }) => {
+      if (dormantRef.current) return;
+      if (payload) applyNoteMetadata(payload);
+      else void refreshNotes().catch(() => undefined);
     });
     return () => {
       void unlisten.then((fn) => fn());
     };
-  }, [refreshNotes]);
+  }, [applyNoteMetadata, refreshNotes]);
 
   useEffect(() => {
     if (isStandby.current) return;
@@ -336,25 +348,16 @@ export function NotePad({
   }, [applyNote, initialNoteId, refreshNotes]);
 
   const saveNote = useCallback(async () => {
-    const existingCategory = notes.find((n) => n.id === editingNoteId)?.category ?? "";
-    const request = { title, content, category: existingCategory };
     const note = editingNoteId
-      ? await updateNote(editingNoteId, request)
-      : await createNote(request);
+      ? await updateNote(editingNoteId, { title, content })
+      : await createNote({ title, content, category: "" });
 
     setEditingNoteId(note.id);
-    setNotes((current) => {
-      const metadata = metadataFromNote(note);
-      const exists = current.some((item) => item.id === note.id);
-      const next = exists
-        ? current.map((item) => (item.id === note.id ? metadata : item))
-        : [metadata, ...current];
-      return [...next].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-    });
+    applyNoteMetadata(metadataFromNote(note));
     const contentChanged = contentValueRef.current !== content || titleValueRef.current !== title;
     setStatus(contentChanged ? "dirty" : "saved");
     return note;
-  }, [content, editingNoteId, notes, title]);
+  }, [applyNoteMetadata, content, editingNoteId, title]);
 
   // 通过 ref 持有最新的 saveNote，让下方的 Tauri 监听只注册一次，
   // 避免每次输入（content 变化）都注销再重注册事件监听

@@ -5,6 +5,7 @@ import {
   filterNotes,
   getDisplayTitle,
   groupNotesByCategory,
+  mergeNoteMetadata,
 } from "./noteUtils";
 import type { NoteMetadata } from "./types";
 
@@ -32,6 +33,14 @@ const notes: NoteMetadata[] = [
 ];
 
 describe("note utilities", () => {
+  it("merges only the saved note and ignores an older save response", () => {
+    const saved = { ...notes[0], updatedAt: "2026-04-28T03:00:00Z", preview: "新摘要" };
+    const next = mergeNoteMetadata(notes, saved);
+    expect(next).toEqual([saved, notes[1]]);
+    expect(next[1]).toBe(notes[1]);
+    expect(mergeNoteMetadata(next, notes[0])).toBe(next);
+  });
+
   it("uses title, preview, then untitled fallback for display title", () => {
     expect(getDisplayTitle(notes[0])).toBe("读书笔记");
     expect(getDisplayTitle(notes[1])).toBe("周末采购清单");

@@ -1,10 +1,9 @@
 /**
- * 页内标题栏（Windows 无边框真实透明窗口）：
- * - 纯透明底，透出桌面/后方窗口；仅内容区自绘不透明背景
+ * 页内标题栏（Windows 无边框窗口）：
  * - 左上角应用官方图标 + 标题；右上角自绘最小化/最大化/关闭（关闭走托盘隐藏）
  * - 整条拖拽区：拖动、双击恢复原大小、右键原生系统菜单
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Minus, Square, X, Copy } from 'lucide-react'
 
 function getConfiguredDeleteShortcut(): string {
@@ -18,7 +17,6 @@ function getConfiguredDeleteShortcut(): string {
 export default function TitleBar() {
   const [icon, setIcon] = useState('')
   const [maximized, setMaximized] = useState(false)
-  const dragPointerId = useRef<number | null>(null)
   const isWindows = navigator.platform.toLowerCase().startsWith('win') || navigator.userAgent.includes('Windows')
   useEffect(() => {
     window.electronAPI?.getAppIcon?.().then(setIcon).catch(() => {})
@@ -30,24 +28,9 @@ export default function TitleBar() {
   const btnBase =
     'no-drag w-11 h-9 flex items-center justify-center text-zinc-600 dark:text-zinc-300 transition-colors'
 
-  const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (dragPointerId.current !== event.pointerId) return
-    dragPointerId.current = null
-    window.electronAPI?.endWindowDrag()
-  }
-
   return (
     <div
-      className={`${isWindows ? 'no-drag' : 'drag-region'} absolute top-0 left-0 right-0 h-9 z-50 flex items-center pl-3 select-none bg-transparent border-b border-zinc-200 dark:border-zinc-800`}
-      onPointerDown={(event) => {
-        if (!isWindows || event.button !== 0 || (event.target as HTMLElement).closest('button')) return
-        dragPointerId.current = event.pointerId
-        event.currentTarget.setPointerCapture(event.pointerId)
-        window.electronAPI?.startWindowDrag()
-      }}
-      onPointerUp={endDrag}
-      onPointerCancel={endDrag}
-      onLostPointerCapture={endDrag}
+      className={`drag-region absolute top-0 left-0 right-0 h-9 z-50 flex items-center pl-3 select-none border-b border-zinc-200 dark:border-zinc-800 ${isWindows ? 'bg-zinc-50 dark:bg-zinc-950' : 'bg-transparent'}`}
       onContextMenu={(e) => {
         e.preventDefault()
         void window.electronAPI?.showWindowSystemMenu?.()

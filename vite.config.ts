@@ -14,9 +14,14 @@ export default defineConfig({
           build: {
             outDir: 'dist-electron',
             rollupOptions: {
-              external: ['sql.js', 'electron-updater'],
+              input: {
+                main: path.resolve(__dirname, 'electron/main.ts'),
+                'database-worker': path.resolve(__dirname, 'electron/database-worker.ts'),
+              },
+              external: ['node:sqlite', 'koffi', 'electron-updater'],
               output: {
                 format: 'cjs',
+                entryFileNames: (entry) => entry.name === 'main' ? 'main.js' : '[name].cjs',
               },
             },
           },

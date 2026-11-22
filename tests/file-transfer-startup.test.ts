@@ -43,13 +43,17 @@ describe('文件传输服务启动', () => {
     const transfer = createServer()
     let resolveBind!: () => void
     const binding = new Promise<void>((resolve) => { resolveBind = resolve })
+    let startBind!: () => void
+    const bindingStarted = new Promise<void>((resolve) => { startBind = resolve })
     const listener = { on: () => listener, close: vi.fn() }
     ;(transfer as any).bindListener = async () => {
+      startBind()
       await binding
       return { server: listener, port: 18888 }
     }
 
     const starting = transfer.start(18888, false)
+    await bindingStarted
     transfer.stop()
     resolveBind()
     await expect(starting).rejects.toThrow()

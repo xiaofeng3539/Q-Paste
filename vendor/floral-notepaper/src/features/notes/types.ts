@@ -12,6 +12,7 @@ export interface NoteMetadata {
 
 export interface Note extends Omit<NoteMetadata, "preview"> {
   content: string;
+  preview?: string;
 }
 
 export interface SaveNoteRequest {

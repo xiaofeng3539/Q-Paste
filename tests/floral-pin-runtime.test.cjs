@@ -97,7 +97,7 @@ if (!process.versions.electron) {
         assert.ok(layout.scrollWidth <= layout.width + 1, 'Long links must wrap, not clip horizontally')
         fs.writeFileSync(path.join(output, `${name}.png`), (await tile.webContents.capturePage()).toPNG())
         dimensions.push({ name, bounds, layout })
-        return { tile, bounds, layout }
+        return { tile, note, bounds, layout }
       }
       const short = await checkTile('short', '待办：买牛奶')
       assert.ok(short.bounds.height <= 150, 'Short notes should no longer use the fixed square size')
@@ -175,11 +175,16 @@ if (!process.versions.electron) {
       fs.writeFileSync(path.join(output, 'editing.png'), (await huge.tile.webContents.capturePage()).toPNG())
       // A manual resize must not immediately be undone by automatic fitting.
       short.tile.setSize(360, 260)
+      const manualBounds = short.tile.getBounds()
+      assert.ok(Math.abs(manualBounds.width - 360) <= 2)
+      assert.ok(Math.abs(manualBounds.height - 260) <= 2)
       await sleep(500)
-      assert.equal(short.tile.getBounds().width, 360)
-      assert.equal(short.tile.getBounds().height, 260)
+      assert.equal(short.tile.getBounds().width, manualBounds.width)
+      assert.equal(short.tile.getBounds().height, manualBounds.height)
+      await main.webContents.executeJavaScript('window.unpinned = []; window.electronAPI.floralListen("tile-window-unpinned", event => window.unpinned.push(event.payload)).then(() => true)')
       await short.tile.webContents.executeJavaScript(`window.dispatchEvent(new CustomEvent('floral-notepaper:surface-mode', { detail: { mode: 'pad' } }))`)
       await until(() => short.tile.webContents.executeJavaScript(`Boolean(document.querySelector('textarea'))`))
+      await until(() => main.webContents.executeJavaScript(`window.unpinned.includes(${JSON.stringify(short.note.id)})`))
       assert.ok(short.tile.getBounds().width >= 360 && short.tile.getBounds().height >= 440, 'Editing a compact tile must restore usable editor bounds')
       fs.writeFileSync(path.join(output, 'dimensions.json'), JSON.stringify(dimensions, null, 2))
       fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ passed: true, appRoot: root }))

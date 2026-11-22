@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>连接 Q-Paste</title>
+    <style>
+        :root { color-scheme: light dark; font: 16px system-ui, sans-serif; }
+        body { min-height: 100vh; margin: 0; display: grid; place-items: center; }
+        main { width: min(25rem, calc(100% - 3rem)); }
+        h1 { margin: 0 0 1rem; font-size: 1.75rem; }
+        p { line-height: 1.55; }
+        button { min-height: 44px; padding: .6rem 1rem; border: 0; border-radius: .5rem; background: #295bcc; color: #fff; font: inherit; }
+        button:disabled { opacity: .65; }
+        #trust-status { min-height: 3em; }
+    </style>
+</head>
+<body>
+    <main>
+        <h1>连接 Q-Paste</h1>
+        <p>首次连接需要在电脑上批准。批准后，可用同一浏览器直接打开传输页。</p>
+        <button id="trust-device" type="button">请求电脑授权</button>
+        <p id="trust-status" role="status"></p>
+    </main>
+    <script nonce="__NONCE__">
+        const button = document.getElementById('trust-device');
+        const statusText = document.getElementById('trust-status');
+        button.onclick = async () => {
+            button.disabled = true;
+            statusText.textContent = '等待电脑批准…';
+            try {
+                const response = await fetch('/api/trust-device', { method: 'POST', mode: 'same-origin', redirect: 'error' });
+                if (response.status === 204) {
+                    location.reload();
+                    return;
+                }
+                if (response.status === 429) statusText.textContent = '电脑正在处理其他请求，请稍后重试。';
+                else if (response.status === 403) statusText.textContent = '电脑未批准连接。';
+                else statusText.textContent = '授权请求失败，请重试。';
+            } catch (_) {
+                statusText.textContent = '无法连接电脑，请检查网络后重试。';
+            }
+            button.disabled = false;
+        };
+    </script>
+</body>
+</html>

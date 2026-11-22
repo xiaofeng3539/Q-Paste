@@ -8,7 +8,7 @@ import {
   Suspense,
   lazy,
 } from "react";
-import type { MouseEvent, PointerEvent as ReactPointerEvent } from "react";
+import type { MouseEvent } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -88,6 +88,7 @@ import {
   getDisplayTitle,
   groupNotesByCategory,
   metadataFromNote,
+  mergeNoteMetadata,
 } from "../features/notes/noteUtils";
 import type { CategoryGroup } from "../features/notes/noteUtils";
 import {
@@ -456,13 +457,6 @@ export function MainWindow({
       (/Mac|iPhone|iPad/.test(navigator.platform) || navigator.userAgent.includes("Mac"))
     );
   }, []);
-  const isWindows = useMemo(() => {
-    return (
-      typeof navigator !== "undefined" &&
-      (navigator.platform.toLowerCase().startsWith("win") || navigator.userAgent.includes("Windows"))
-    );
-  }, []);
-  const titleBarDragPointerId = useRef<number | null>(null);
   saveStateRef.current = saveState;
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
@@ -470,8 +464,7 @@ export function MainWindow({
   contentValueRef.current = content;
   const titleValueRef = useRef(title);
   titleValueRef.current = title;
-  const notesRef = useRef(notes);
-  notesRef.current = notes;
+  const noteListRevision = useRef(0);
   const externalFilesRef = useRef(externalFiles);
   externalFilesRef.current = externalFiles;
   // 每次"应用/切换当前笔记"都会自增；异步加载完成后若 epoch 已变化，说明用户
@@ -726,15 +719,24 @@ export function MainWindow({
     [loadEpoch],
   );
 
+  const applyNoteMetadata = useCallback((metadata: NoteMetadata) => {
+    noteListRevision.current++;
+    setNotes((current) => mergeNoteMetadata(current, metadata));
+    if (metadata.category) {
+      setCategories((current) => current.includes(metadata.category) ? current : [...current, metadata.category].sort());
+    }
+  }, []);
+
   const replaceNoteMetadata = useCallback((note: Note) => {
-    const metadata = metadataFromNote(note);
-    setNotes((current) => {
-      const exists = current.some((item) => item.id === metadata.id);
-      const next = exists
-        ? current.map((item) => (item.id === metadata.id ? metadata : item))
-        : [metadata, ...current];
-      return [...next].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-    });
+    applyNoteMetadata(metadataFromNote(note));
+  }, [applyNoteMetadata]);
+
+  const readNoteList = useCallback(async () => {
+    while (true) {
+      const revision = noteListRevision.current;
+      const result = await Promise.all([listNotes(), listCategories()]);
+      if (revision === noteListRevision.current) return result;
+    }
   }, []);
 
   const loadNote = useCallback(
@@ -750,11 +752,11 @@ export function MainWindow({
   );
 
   const refreshNotes = useCallback(async () => {
-    const [loadedNotes, loadedCategories] = await Promise.all([listNotes(), listCategories()]);
+    const [loadedNotes, loadedCategories] = await readNoteList();
     setNotes(loadedNotes);
     setCategories(loadedCategories);
     return loadedNotes;
-  }, []);
+  }, [readNoteList]);
 
   const clearCurrentNote = useCallback(() => {
     loadEpoch.bump();
@@ -825,11 +827,7 @@ export function MainWindow({
     async function bootstrap() {
       setIsLoading(true);
       try {
-        const [loadedConfig, loadedNotes, loadedCategories] = await Promise.all([
-          getConfig(),
-          listNotes(),
-          listCategories(),
-        ]);
+        const [loadedConfig, [loadedNotes, loadedCategories]] = await Promise.all([getConfig(), readNoteList()]);
         if (cancelled) return;
         setSettingsConfig(loadedConfig);
         setSavedDataDir(loadedConfig.dataDir);
@@ -861,7 +859,7 @@ export function MainWindow({
     return () => {
       cancelled = true;
     };
-  }, [applyNote, clearCurrentNote]);
+  }, [applyNote, clearCurrentNote, readNoteList]);
 
   useEffect(() => {
     let active = true;
@@ -991,11 +989,30 @@ export function MainWindow({
   }, [mountedSidePanel, visibleSidePanel]);
 
   useEffect(() => {
-    const unlisten = listen("notes-changed", () => {
+    const unlisten = listen<NoteMetadata | null>("notes-changed", ({ payload }) => {
       // 记录事件到达时的 epoch；其间用户一旦切换/加载了笔记，本次同步即过期，
       // 不再用过期的列表快照去改选中或回填内容，避免把选中"拉回"刚保存的旧笔记
       const epochAtEvent = loadEpoch.peek();
       const isStale = () => !loadEpoch.isCurrent(epochAtEvent);
+      const reloadBody = (id: string) => {
+        const canReload = () => saveStateRef.current === "saved" || saveStateRef.current === "idle";
+        if (!canReload()) return;
+        void getNote(id).then((note) => {
+          if (isStale() || selectedIdRef.current !== id) return;
+          if (!canReload()) return;
+          titleValueRef.current = note.title;
+          contentValueRef.current = note.content;
+          saveStateRef.current = "saved";
+          setTitle(note.title);
+          setContent(note.content);
+          setSaveState("saved");
+        }).catch(() => undefined);
+      };
+      if (payload) {
+        applyNoteMetadata(payload);
+        if (selectedIdRef.current === payload.id) reloadBody(payload.id);
+        return;
+      }
       void refreshNotes()
         .then((loaded) => {
           if (isStale()) return;
@@ -1003,23 +1020,7 @@ export function MainWindow({
           if (!currentId) return;
           const stillExists = loaded.some((n) => n.id === currentId);
           if (stillExists) {
-            if (saveStateRef.current !== "dirty" && saveStateRef.current !== "saving") {
-              void getNote(currentId)
-                .then((note) => {
-                  if (isStale()) return;
-                  if (selectedIdRef.current !== currentId) return;
-                  if (saveStateRef.current === "dirty" || saveStateRef.current === "saving") {
-                    return;
-                  }
-                  titleValueRef.current = note.title;
-                  contentValueRef.current = note.content;
-                  saveStateRef.current = "saved";
-                  setTitle(note.title);
-                  setContent(note.content);
-                  setSaveState("saved");
-                })
-                .catch(() => undefined);
-            }
+            reloadBody(currentId);
           } else if (selectedNoteRef.current) {
             if (loaded[0]) {
               void loadNote(loaded[0].id);
@@ -1033,7 +1034,7 @@ export function MainWindow({
     return () => {
       void unlisten.then((fn) => fn());
     };
-  }, [refreshNotes, loadNote, clearCurrentNote, loadEpoch]);
+  }, [refreshNotes, loadNote, clearCurrentNote, loadEpoch, applyNoteMetadata]);
 
   useEffect(() => {
     function handleFocus() {
@@ -1310,11 +1311,9 @@ export function MainWindow({
           }
           settleSaveState(contentValueRef.current === contentSnapshot ? "saved" : "dirty");
         } else {
-          const category = notesRef.current.find((note) => note.id === id)?.category ?? "";
           const note = await updateNote(id, {
             title: titleSnapshot,
             content: contentSnapshot,
-            category,
           });
           replaceNoteMetadata(note);
           const contentChanged =
@@ -2309,12 +2308,6 @@ export function MainWindow({
     void startCurrentWindowDrag().catch(() => undefined);
   };
 
-  const handleTitleBarPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (titleBarDragPointerId.current !== event.pointerId) return;
-    titleBarDragPointerId.current = null;
-    window.electronAPI?.endWindowDrag();
-  };
-
   const handleMinimize = () => {
     void minimizeCurrentWindow();
   };
@@ -2391,19 +2384,10 @@ export function MainWindow({
       <div className="relative noise-bg bg-cloud overflow-hidden flex flex-col flex-1">
         <BackgroundLayer config={settingsConfig} />
         <div
-          className={`relative z-10 flex items-center justify-between h-11 bg-paper/55 backdrop-blur-[1px] border-b border-paper-deep/30 shrink-0 select-none cursor-default ${isWindows ? "electron-no-drag" : "electron-drag-region"} ${
+          className={`relative z-10 flex items-center justify-between h-11 bg-paper/55 backdrop-blur-[1px] border-b border-paper-deep/30 shrink-0 select-none cursor-default electron-drag-region ${
             isMacOS ? "pl-20 pr-5" : "pl-5 pr-0"
           }`}
-          onMouseDown={isWindows ? undefined : handleTitleBarMouseDown}
-          onPointerDown={(event) => {
-            if (!isWindows || event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
-            titleBarDragPointerId.current = event.pointerId;
-            event.currentTarget.setPointerCapture(event.pointerId);
-            window.electronAPI?.startWindowDrag();
-          }}
-          onPointerUp={handleTitleBarPointerEnd}
-          onPointerCancel={handleTitleBarPointerEnd}
-          onLostPointerCapture={handleTitleBarPointerEnd}
+          onMouseDown={handleTitleBarMouseDown}
           onDoubleClick={(event) => {
             if ((event.target as HTMLElement).closest("button")) return;
             event.preventDefault();

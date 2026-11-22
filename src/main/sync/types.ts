@@ -89,6 +89,8 @@ export interface WireOpBatch {
 
 /** 本地持久化状态（写入 userData/sync-state.json） */
 export interface SyncState {
+  /** WebDAV 地址、目录、帐号和本机设备标识的摘要 */
+  remoteKey?: string
   localSeq: number
   opCursors: Record<string, number>
   pushedDigests: Record<string, string>

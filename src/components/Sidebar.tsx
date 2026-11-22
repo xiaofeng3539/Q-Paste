@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import Sortable from 'sortablejs'
 import { ClipboardItem, ItemType } from '../types'
@@ -62,6 +62,77 @@ function typeIcon(type: string) {
   }
 }
 
+interface SidebarItemProps {
+  item: ClipboardItem
+  itemPy: string
+  isVault: boolean
+  isCurrent: boolean
+  isSelected: boolean
+  hasMultiSelection: boolean
+  searchQuery: string
+  fallback: string
+  relativeTime: string
+  onPointerDown: (id: number, event: ReactPointerEvent<HTMLButtonElement>) => void
+  onClick: (id: number, event: ReactMouseEvent<HTMLButtonElement>) => void
+  onKeyDown: () => void
+}
+
+const SidebarItem = memo(function SidebarItem({
+  item, itemPy, isVault, isCurrent, isSelected, hasMultiSelection, searchQuery, fallback,
+  relativeTime, onPointerDown, onClick, onKeyDown,
+}: SidebarItemProps) {
+  const renderHighlighted = (value: string) => {
+    if (!searchQuery) return value
+    return highlightSegments(value, searchQuery).map((segment, index) => segment.hit
+      ? <mark key={index} className="bg-amber-200/70 dark:bg-amber-400/40 text-inherit rounded-[2px] px-px">{segment.text}</mark>
+      : <span key={index}>{segment.text}</span>)
+  }
+
+  return (
+    <div
+      data-id={item.id}
+      className={cn(
+        'js-item mb-1 w-full flex items-center gap-2 rounded-lg border border-transparent',
+        itemPy,
+        isVault && 'border-l-2 border-l-transparent',
+        isVault && !isCurrent && !isSelected && 'rounded-l-none hover:rounded-l-lg',
+        !isVault && item.is_pinned && !isCurrent && 'border-l-2 border-l-amber-400 rounded-l-none',
+        isCurrent && !hasMultiSelection
+          ? isVault
+            ? 'bg-amber-500/10 dark:bg-amber-400/15 text-zinc-900 dark:text-zinc-100'
+            : 'bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] dark:bg-[color-mix(in_srgb,var(--accent)_20%,transparent)] text-zinc-900 dark:text-zinc-100'
+          : isSelected
+            ? isVault ? 'qp-vault-item-multi-selected' : 'qp-item-multi-selected'
+            : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50',
+      )}
+    >
+      <button
+        onPointerDown={(event) => onPointerDown(item.id, event)}
+        onKeyDown={onKeyDown}
+        onClick={(event) => onClick(item.id, event)}
+        className={`qp-item-content flex-1 min-w-0 flex items-center gap-2.5 text-left outline-none ${item.alias && item.preview ? 'qp-item-content-two-lines' : ''}`}
+      >
+        <span className="flex-shrink-0 mt-0.5">
+          {isVault || item.is_pinned ? <Pin className="w-4 h-4 text-amber-500" /> : typeIcon(item.type)}
+        </span>
+        <span className="flex-1 min-w-0 overflow-hidden text-left">
+          <span className="block truncate text-[13px] leading-tight">
+            {renderHighlighted(item.alias || item.preview || fallback)}
+          </span>
+          {item.alias && item.preview && (
+            <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">
+              {renderHighlighted(item.preview)}
+            </span>
+          )}
+        </span>
+        <span aria-hidden={isVault || undefined} className={cn('flex-shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600', isVault && 'invisible')}>
+          {relativeTime}
+        </span>
+      </button>
+    </div>
+  )
+})
+
 function groupedItems(items: ClipboardItem[]) {
   const groups: { label: string; items: ClipboardItem[] }[] = []
   let currentLabel = ''
@@ -121,20 +192,26 @@ export default function Sidebar({
   onBatchDelete,
   onBatchAddTag,
 }: SidebarProps) {
-  const groups = activeTab === 'vault' ? groupedByTag(items) : groupedItems(items)
+  const groupLanguage = tr('sidebar.earlier')
+  const currentMinute = Math.floor(Date.now() / 60_000)
   // 分组拍平为 [表头, 条目...] 交错序列（普通 DOM 渲染，替代虚拟滚动以支持整表拖拽）
   const flatRows = useMemo(
     () =>
-      groups.flatMap((group) => [
+      (activeTab === 'vault' ? groupedByTag(items) : groupedItems(items)).flatMap((group) => [
         { kind: 'header' as const, id: `h_${group.label}`, label: group.label },
-        ...group.items.map((item) => ({ kind: 'item' as const, id: `i_${item.id}`, item })),
+        ...group.items.map((item) => ({
+          kind: 'item' as const,
+          id: `i_${item.id}`,
+          item,
+          relativeTime: formatRelativeTime(item.created_at),
+        })),
       ]),
-    [groups],
+    [items, activeTab, groupLanguage, currentMinute],
   )
   const itemPy = `py-1.5 ${density === 'compact' ? 'py-0.5' : 'py-3'}`
   const isVault = activeTab === 'vault'
   const [batchTagDraft, setBatchTagDraft] = useState('')
-  // 拖拽仅在未搜索、未标签过滤时启用（此时 items 即完整列表，可安全重排），历史/金库 tab 均可拖
+  // 历史和金库支持按类型筛选后拖拽。搜索与标签筛选时停用拖拽。
   const draggable = !searchQuery.trim() && selectedTag === null
   const hasRows = flatRows.length > 0
 
@@ -143,8 +220,11 @@ export default function Sidebar({
   const handledSelectionPointerRef = useRef<number | null>(null)
   const itemsRef = useRef(items)
   itemsRef.current = items
+  const selectionActions = useRef({ onRangeSelect, onToggleSelect, onClearSelection, onSelect, selectedIds })
+  selectionActions.current = { onRangeSelect, onToggleSelect, onClearSelection, onSelect, selectedIds }
 
-  const handleItemPointerDown = (id: number, event: ReactPointerEvent<HTMLButtonElement>) => {
+  const handleItemPointerDown = useCallback((id: number, event: ReactPointerEvent<HTMLButtonElement>) => {
+    const { onRangeSelect, onToggleSelect } = selectionActions.current
     handledSelectionPointerRef.current = null
     if (event.button !== 0 || !(event.shiftKey || event.ctrlKey || event.metaKey)) return
     event.preventDefault()
@@ -152,9 +232,10 @@ export default function Sidebar({
     handledSelectionPointerRef.current = id
     if (event.shiftKey) onRangeSelect?.(id, event.ctrlKey || event.metaKey)
     else onToggleSelect?.(id)
-  }
+  }, [])
 
-  const handleItemClick = (id: number, event: ReactMouseEvent<HTMLButtonElement>) => {
+  const handleItemClick = useCallback((id: number, event: ReactMouseEvent<HTMLButtonElement>) => {
+    const { onRangeSelect, onToggleSelect, onClearSelection, onSelect, selectedIds } = selectionActions.current
     if (handledSelectionPointerRef.current === id) {
       handledSelectionPointerRef.current = null
       return
@@ -166,7 +247,9 @@ export default function Sidebar({
       if (selectedIds && selectedIds.size > 0) onClearSelection?.()
       onSelect(id)
     }
-  }
+  }, [])
+
+  const clearPointerSelection = useCallback(() => { handledSelectionPointerRef.current = null }, [])
 
   useEffect(() => {
     if (!draggable || !hasRows || !listRef.current) return
@@ -309,6 +392,34 @@ export default function Sidebar({
         : itemBottom - container.clientHeight + margin
   }, [selectedId, activeTab])
 
+  const imageFallback = tr('detail.image')
+  const emptyFallback = tr('detail.emptyContent')
+  const query = searchQuery.trim()
+  const listRows = useMemo(() => flatRows.map((row, index) => row.kind === 'header'
+    ? <div key={`${row.id}_${index}`} className="px-3 py-2 text-[11px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
+        {isVault ? `\u{1F3F7}\uFE0F ${row.label}` : row.label}
+      </div>
+    : <SidebarItem
+        key={row.id}
+        item={row.item}
+        itemPy={itemPy}
+        isVault={isVault}
+        isCurrent={selectedId === row.item.id}
+        isSelected={selectedIds?.has(row.item.id) ?? false}
+        hasMultiSelection={selectedId === row.item.id && Boolean(selectedIds)}
+        searchQuery={query}
+        fallback={row.item.type === 'image' ? imageFallback : emptyFallback}
+        relativeTime={row.relativeTime}
+        onPointerDown={handleItemPointerDown}
+        onClick={handleItemClick}
+        onKeyDown={clearPointerSelection}
+      />
+  ), [flatRows, isVault, itemPy, selectedId, selectedIds, query, imageFallback, emptyFallback, handleItemPointerDown, handleItemClick, clearPointerSelection])
+
+  const emptyKey = isVault
+    ? (query || selectedTag ? 'sidebar.noResults' : 'sidebar.noVaultRecords')
+    : (query || selectedTag ? 'sidebar.noResults' : 'sidebar.noRecords')
+
   return (
     <div className="h-full flex flex-col bg-[#FAFBFC] dark:bg-zinc-900 rounded-2xl border border-zinc-200/60 dark:border-zinc-800/50 shadow-sm overflow-hidden select-none">
       {/* Tab bar */}
@@ -412,149 +523,19 @@ export default function Sidebar({
         </div>
       )}
 
-      {/* Items list — 普通滚动列表；历史 tab 支持整表拖拽排序 */}
-      {(() => {
-        if (flatRows.length === 0) {
-          const emptyKey = isVault
-            ? (searchQuery || selectedTag ? 'sidebar.noResults' : 'sidebar.noVaultRecords')
-            : (searchQuery || selectedTag ? 'sidebar.noResults' : 'sidebar.noRecords')
-          return (
-            <div className="px-3 py-8 text-center text-xs text-zinc-400 dark:text-zinc-600">
-              {tr(emptyKey)}
-            </div>
-          )
-        }
-
-        const renderHeader = (label: string) => (
-          <div className="px-3 py-2 text-[11px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
-            {isVault ? `\u{1F3F7}\uFE0F ${label}` : label}
-          </div>
-        )
-
-        const renderHighlighted = (text: string) => {
-          if (!searchQuery.trim()) return text
-          return highlightSegments(text, searchQuery).map((seg, i) =>
-            seg.hit ? (
-              <mark key={i} className="bg-amber-200/70 dark:bg-amber-400/40 text-inherit rounded-[2px] px-px">
-                {seg.text}
-              </mark>
-            ) : (
-              <span key={i}>{seg.text}</span>
-            ),
-          )
-        }
-
-        // 金库条目：DOM 结构与 class 序列与 renderHistoryItem 完全对齐，仅配色保留金库的琥珀色标识。
-        const renderVaultItem = (item: ClipboardItem) => (
-          <div
-            key={item.id}
-            data-id={item.id}
-            className={cn(
-              // 与历史视图同构：外层不再有 px-3（历史条目靠列表容器的 padding: 0 8px 定位），
-              // 并渲染 2px 的完全透明左边框作为黄色时间线的等宽占位，
-              // 使 Pin 图标距左边缘的像素值与历史视图分毫不差。
-              'js-item mb-1 w-full flex items-center gap-2 rounded-lg border border-transparent',
-              itemPy,
-              'border-l-2 border-l-transparent',
-              selectedId !== item.id && !selectedIds?.has(item.id) && 'rounded-l-none hover:rounded-l-lg',
-              // 当前选中项使用琥珀色浅底，多选项只做轻微提示。
-              selectedId === item.id && !selectedIds
-                ? 'bg-amber-500/10 dark:bg-amber-400/15 text-zinc-900 dark:text-zinc-100'
-                : selectedIds?.has(item.id)
-                  ? 'qp-vault-item-multi-selected'
-                  : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50',
-            )}
-          >
-            <button
-              onPointerDown={(e) => handleItemPointerDown(item.id, e)}
-              onKeyDown={() => { handledSelectionPointerRef.current = null }}
-              onClick={(e) => handleItemClick(item.id, e)}
-              className="flex-1 min-w-0 flex items-center gap-2.5 text-left outline-none"
-            >
-              <span className="flex-shrink-0 mt-0.5 text-amber-500">
-                <Pin className="w-4 h-4" />
-              </span>
-              {/* 中间文本：flex:1 + min-width:0 + overflow:hidden，配合内部 truncate 触发省略号 */}
-              <span className="flex-1 min-w-0 overflow-hidden text-left">
-                <span className="block truncate text-[13px] leading-tight">
-                  {renderHighlighted(item.alias || item.preview || (item.type === 'image' ? tr('detail.image') : tr('detail.emptyContent')))}
-                </span>
-                {item.alias && item.preview && (
-                  <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">
-                    {renderHighlighted(item.preview)}
-                  </span>
-                )}
-              </span>
-              {/*
-                右侧时间标签隐形占位：复用历史视图的时间标签（同样的 class 与同样的字符串），
-                仅用 visibility: hidden 隐藏。这样占位宽度与该条目在历史视图中的真实标签宽度逐像素相同，
-                中间文本的截断点才能与历史视图完全一致——固定 w-[50px] 会因“刚刚/5分钟前/11个月前”宽度不一而错位。
-              */}
-              <span
-                aria-hidden="true"
-                className="invisible flex-shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600"
-              >
-                {formatRelativeTime(item.created_at)}
-              </span>
-            </button>
-          </div>
-        )
-
-        const renderHistoryItem = (item: ClipboardItem) => (
-          <div
-            key={item.id}
-            data-id={item.id}
-            className={cn(
-              'js-item mb-1 w-full flex items-center gap-2 rounded-lg border border-transparent',
-              itemPy,
-              item.is_pinned && selectedId !== item.id && 'border-l-2 border-l-amber-400 rounded-l-none',
-              selectedId === item.id && !selectedIds
-                ? 'bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] dark:bg-[color-mix(in_srgb,var(--accent)_20%,transparent)] text-zinc-900 dark:text-zinc-100'
-                : selectedIds?.has(item.id)
-                  ? 'qp-item-multi-selected'
-                  : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50',
-            )}
-          >
-            <button
-              onPointerDown={(e) => handleItemPointerDown(item.id, e)}
-              onKeyDown={() => { handledSelectionPointerRef.current = null }}
-              onClick={(e) => handleItemClick(item.id, e)}
-              className="flex-1 min-w-0 flex items-center gap-2.5 text-left outline-none"
-            >
-              <span className="flex-shrink-0 mt-0.5">
-                {item.is_pinned ? (
-                  <Pin className="w-4 h-4 text-amber-500" />
-                ) : (
-                  typeIcon(item.type)
-                )}
-              </span>
-              <span className="flex-1 min-w-0 overflow-hidden text-left">
-                <span className="block truncate text-[13px] leading-tight">
-                  {renderHighlighted(item.alias || item.preview || (item.type === 'image' ? tr('detail.image') : tr('detail.emptyContent')))}
-                </span>
-                {item.alias && item.preview && (
-                  <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">
-                    {renderHighlighted(item.preview)}
-                  </span>
-                )}
-              </span>
-              <span className="flex-shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600">
-                {formatRelativeTime(item.created_at)}
-              </span>
-            </button>
-          </div>
-        )
-
-        return (
-<div
-              ref={listRef}
-              className="qp-list-scroll flex-1 min-h-0 min-w-0 max-w-full overflow-y-auto overflow-x-hidden"
-              style={{ padding: '0 8px' }}
-            >
-            {flatRows.map((row) => (row.kind === 'header' ? renderHeader(row.label) : isVault ? renderVaultItem(row.item) : renderHistoryItem(row.item)))}
-          </div>
-        )
-      })()}
+      {hasRows ? (
+        <div
+          ref={listRef}
+          className="qp-list-scroll flex-1 min-h-0 min-w-0 max-w-full overflow-y-auto overflow-x-hidden"
+          style={{ padding: '0 8px' }}
+        >
+          {listRows}
+        </div>
+      ) : (
+        <div className="px-3 py-8 text-center text-xs text-zinc-400 dark:text-zinc-600">
+          {tr(emptyKey)}
+        </div>
+      )}
     </div>
   )
 }

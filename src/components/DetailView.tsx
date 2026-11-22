@@ -8,7 +8,7 @@ import { QRCodeCanvas } from 'qrcode.react'
 import { tr } from '../i18n'
 import OcrRegionSelector from './OcrRegionSelector'
 import OcrResultPanel from './OcrResultPanel'
-import { canSaveOcrResult, cropImageForOcr, invalidateOcrTask, isValidOcrRegion, mapViewportOcrRegionToImage, normalizeOcrText, ocrActionErrorMessage, ocrErrorMessage, openOcrSelection, shouldApplyOcrResult, type OcrRegion } from '../lib/ocr'
+import { canSaveOcrResult, createOcrWorkerSession, cropImageForOcr, invalidateOcrTask, isValidOcrRegion, mapViewportOcrRegionToImage, normalizeOcrText, ocrActionErrorMessage, ocrErrorMessage, openOcrSelection, shouldApplyOcrResult, type OcrRegion } from '../lib/ocr'
 import { appendRichTextPasteValue, appendTextContextPasteValue, getTextContextCopyValue, insertTextAtSelection, supportsTextContextMenu } from '../lib/text-context-menu'
 
 interface DetailViewProps {
@@ -111,7 +111,19 @@ export default function DetailView({
   const [ocrActionError, setOcrActionError] = useState<string | null>(null)
   const ocrTaskIdRef = useRef(0)
   const currentItemIdRef = useRef<number | null>(item?.id ?? null)
-  const ocrWorkerRef = useRef<{ terminate: () => Promise<void> } | null>(null)
+  const [ocrSession] = useState(() => createOcrWorkerSession(async (reportProgress) => {
+    const [Tesseract, config] = await Promise.all([
+      import('tesseract.js'),
+      window.electronAPI.getOcrConfig(),
+    ])
+    return Tesseract.createWorker(['chi_sim', 'eng'], Tesseract.OEM.LSTM_ONLY, {
+      langPath: config.langPath,
+      workerPath: config.workerPath,
+      corePath: config.corePath,
+      cacheMethod: 'none',
+      logger: (message) => reportProgress(message.progress ?? 0),
+    })
+  }))
 
   // 选中图片记录时加载完整图片内容
   useEffect(() => {
@@ -134,9 +146,7 @@ export default function DetailView({
   // Reset edit modes when item changes
   useEffect(() => {
     ocrTaskIdRef.current = invalidateOcrTask(ocrTaskIdRef.current)
-    const activeWorker = ocrWorkerRef.current
-    ocrWorkerRef.current = null
-    if (activeWorker) void activeWorker.terminate().catch(() => {})
+    ocrSession.cancelActive()
     currentItemIdRef.current = item?.id ?? null
     setIsEditing(false)
     setEditContent('')
@@ -152,7 +162,7 @@ export default function DetailView({
     setOcrActionError(null)
     setOcrBusy(false)
     setOcrStage('')
-  }, [item?.id])
+  }, [item?.id, ocrSession])
 
   useEffect(() => {
     if (!isEditing) setEditContent('')
@@ -170,10 +180,9 @@ export default function DetailView({
   }, [ocrRegion, ocrImageLayout, scale, pos])
 
   useEffect(() => () => {
-    const activeWorker = ocrWorkerRef.current
-    ocrWorkerRef.current = null
-    if (activeWorker) void activeWorker.terminate().catch(() => {})
-  }, [])
+    ocrTaskIdRef.current = invalidateOcrTask(ocrTaskIdRef.current)
+    ocrSession.dispose()
+  }, [ocrSession])
 
   // Auto-focus textarea when entering edit mode
   useEffect(() => {
@@ -476,52 +485,28 @@ export default function DetailView({
     }
     const taskId = ++ocrTaskIdRef.current
     const itemId = item.id
-    let worker: any = null
+    const isCurrent = () => shouldApplyOcrResult({ startedItemId: itemId, currentItemId: currentItemIdRef.current ?? -1, startedTaskId: taskId, currentTaskId: ocrTaskIdRef.current })
     setOcrBusy(true)
     setOcrError(null)
     setOcrActionError(null)
     try {
       setOcrStage('正在准备本地 OCR…')
-      const [Tesseract, config] = await Promise.all([
-        import('tesseract.js'),
-        window.electronAPI.getOcrConfig(),
-      ])
       const cropped = await cropImageForOcr(src, ocrCropRegion)
-      worker = await Tesseract.createWorker(['chi_sim', 'eng'], 1, {
-        langPath: config.langPath,
-        workerPath: config.workerPath,
-        corePath: config.corePath,
-        cacheMethod: 'none',
-        logger: (message: { progress?: number }) => {
-          if (shouldApplyOcrResult({ startedItemId: itemId, currentItemId: currentItemIdRef.current ?? -1, startedTaskId: taskId, currentTaskId: ocrTaskIdRef.current })) {
-            setOcrStage((message.progress ?? 0) > 0 ? `正在识别 ${Math.round((message.progress ?? 0) * 100)}%` : '正在初始化 OCR…')
-          }
-        },
+      if (!isCurrent()) return
+      const result = await ocrSession.recognize(cropped, (progress) => {
+        if (isCurrent()) setOcrStage(progress > 0 ? `正在识别 ${Math.round(progress * 100)}%` : '正在初始化 OCR…')
       })
-      ocrWorkerRef.current = worker
-      const { data } = await worker.recognize(cropped)
-      if (ocrWorkerRef.current === worker) {
-        ocrWorkerRef.current = null
-        await worker.terminate()
-      }
-      worker = null
-      const text = normalizeOcrText(data.text ?? '')
-      if (!shouldApplyOcrResult({ startedItemId: itemId, currentItemId: currentItemIdRef.current ?? -1, startedTaskId: taskId, currentTaskId: ocrTaskIdRef.current })) return
+      if (!isCurrent()) return
+      const text = normalizeOcrText(result ?? '')
       if (!text) {
         setOcrError('未识别到文字，请调整选区后重试')
         return
       }
       setOcrResult(text)
-    } catch (err: any) {
-      if (shouldApplyOcrResult({ startedItemId: itemId, currentItemId: currentItemIdRef.current ?? -1, startedTaskId: taskId, currentTaskId: ocrTaskIdRef.current })) {
-        setOcrError(ocrErrorMessage(err))
-      }
+    } catch (error) {
+      if (isCurrent()) setOcrError(ocrErrorMessage(error))
     } finally {
-      if (worker && ocrWorkerRef.current === worker) {
-        ocrWorkerRef.current = null
-        await worker.terminate().catch(() => {})
-      }
-      if (shouldApplyOcrResult({ startedItemId: itemId, currentItemId: currentItemIdRef.current ?? -1, startedTaskId: taskId, currentTaskId: ocrTaskIdRef.current })) {
+      if (isCurrent()) {
         setOcrBusy(false)
         setOcrStage('')
       }

@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { getStorageLayout } from '../src/main/storage-layout'
-import { migrateLegacyStorage, readStorageRootPointer, writeStorageRootPointer } from '../src/main/storage-migration'
+import { migrateLegacyStorage, readStorageRootPointer, stageStorageMigration, writeStorageRootPointer } from '../src/main/storage-migration'
 
 const roots: string[] = []
 function tempRoot(): string {
@@ -51,5 +51,15 @@ describe('旧版存储迁移', () => {
     expect(readStorageRootPointer(pointer)).toBe(root)
     fs.writeFileSync(pointer, '{"rootPath":"relative"}')
     expect(readStorageRootPointer(pointer)).toBeNull()
+  })
+
+  it('removes an unpublished layout on failure and leaves other files alone', async () => {
+    const layout = getStorageLayout(tempRoot())
+    fs.writeFileSync(path.join(layout.rootDir, 'keep.txt'), 'original')
+    const prepare = async (stage: ReturnType<typeof getStorageLayout>) => { fs.writeFileSync(stage.dbPath, 'new') }
+    await expect(stageStorageMigration(layout, prepare, () => { throw new Error('pointer failed') })).rejects.toThrow('pointer failed')
+    expect(fs.readdirSync(layout.rootDir)).toEqual(['keep.txt'])
+    await stageStorageMigration(layout, prepare, () => expect(fs.readFileSync(layout.dbPath, 'utf8')).toBe('new'))
+    expect(fs.readFileSync(path.join(layout.rootDir, 'keep.txt'), 'utf8')).toBe('original')
   })
 })

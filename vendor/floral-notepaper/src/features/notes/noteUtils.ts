@@ -35,9 +35,16 @@ export function metadataFromNote(note: Note): NoteMetadata {
     createdAt: note.createdAt,
     updatedAt: note.updatedAt,
     wordCount: note.wordCount,
-    preview: buildPreview(note.content),
+    preview: note.preview ?? buildPreview(note.content),
     sortOrder: note.sortOrder,
   };
+}
+
+export function mergeNoteMetadata(notes: NoteMetadata[], saved: NoteMetadata): NoteMetadata[] {
+  const previous = notes.find((note) => note.id === saved.id);
+  if (previous && previous.updatedAt >= saved.updatedAt) return notes;
+  return [saved, ...notes.filter((note) => note !== previous)]
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
 export interface CategoryGroup {

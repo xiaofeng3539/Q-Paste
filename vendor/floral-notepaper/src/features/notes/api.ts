@@ -35,7 +35,7 @@ export function createNote(request: SaveNoteRequest): Promise<Note> {
   return invoke("notes_create", { request });
 }
 
-export function updateNote(id: string, request: SaveNoteRequest): Promise<Note> {
+export function updateNote(id: string, request: Omit<SaveNoteRequest, "category">): Promise<Note> {
   return invoke("notes_update", { id, request });
 }
 

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { readFile, rename, writeFile } from 'node:fs/promises'
+import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import type {
   ClipboardSyncItem,
   CloudSyncStatus,
@@ -22,6 +22,7 @@ const BLOB_CACHE_MAX_ENTRIES = 5000
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504])
 const PROPFIND_BODY =
   '<?xml version="1.0" encoding="utf-8" ?><d:propfind xmlns:d="DAV:"><d:prop><d:getlastmodified/></d:prop></d:propfind>'
+const SHA256_HEX = /^[\da-f]{64}$/
 
 /** 内容 SHA-256 指纹（图片针对完整 data URL 计算） */
 export function computeContentHash(content: string): string {
@@ -46,13 +47,33 @@ function opsFileName(deviceId: string, seq: number): string {
   return `${deviceId}__${String(seq).padStart(20, '0')}.json`
 }
 
+function emptyState(): SyncState {
+  return { localSeq: 0, opCursors: {}, pushedDigests: {}, blobCache: {} }
+}
+
+function isWireItem(raw: unknown, deviceId: string): raw is WireSyncItem {
+  if (!raw || typeof raw !== 'object') return false
+  const item = raw as Partial<WireSyncItem>
+  return item.deviceId === deviceId &&
+    (item.type === 'text' || item.type === 'link' || item.type === 'image' || item.type === 'rich_text') &&
+    typeof item.content === 'string' &&
+    (item.html === null || typeof item.html === 'string') &&
+    (item.contentBlobHash === null || (typeof item.contentBlobHash === 'string' && SHA256_HEX.test(item.contentBlobHash))) &&
+    (item.htmlBlobHash === null || (typeof item.htmlBlobHash === 'string' && SHA256_HEX.test(item.htmlBlobHash))) &&
+    typeof item.hash === 'string' && SHA256_HEX.test(item.hash) &&
+    typeof item.preview === 'string' &&
+    Number.isFinite(item.createdAt) && Number.isFinite(item.updatedAt) && Number.isFinite(item.deletedAt)
+}
+
 export class SyncEngine {
   private cfg: SyncConfig | null = null
   private statePath = ''
-  private state: SyncState = { localSeq: 0, opCursors: {}, pushedDigests: {}, blobCache: {} }
+  private state = emptyState()
   private knownDirs = new Set<string>()
   private pullTimer: ReturnType<typeof setInterval> | null = null
-  private pulling = false
+  private work = Promise.resolve()
+  private pulling: Promise<ClipboardSyncItem[]> | null = null
+  private publishedSeq = 0
   private ready = false
 
   status: CloudSyncStatus = {
@@ -63,18 +84,23 @@ export class SyncEngine {
     receivedItems: 0,
   }
 
-  /** 拉取到远端新条目时的回调（宿主负责入库并通知渲染层） */
+  /** 宿主须在持久化条目后才完成回调，失败时抛错。游标落盘失败时同一批次会重放。 */
   onPulled: (items: ClipboardSyncItem[]) => void | Promise<void> = () => {}
 
   /**
    * 初始化与鉴权配置：加载本地游标并确保远端目录就绪。
    * enabled=false 时仅记录配置，不发起任何网络请求。
    */
-  async init(config: SyncConfig, statePath: string): Promise<void> {
+  init(config: SyncConfig, statePath: string): Promise<void> {
+    this.stopAutoSync()
+    return this.enqueue(() => this.configure(config, statePath))
+  }
+
+  private async configure(config: SyncConfig, statePath: string): Promise<void> {
     const cfg: SyncConfig = {
       ...config,
       webdavUrl: config.webdavUrl.trim().replace(/\/+$/, ''),
-      username: config.username ?? '',
+      username: (config.username ?? '').trim(),
       password: config.password ?? '',
       basePath: (config.basePath || 'qpaste-sync').replace(/\\/g, '/').split('/').map((s) => s.trim()).filter(Boolean).join('/') || 'qpaste-sync',
       deviceId: config.deviceId.trim(),
@@ -82,11 +108,7 @@ export class SyncEngine {
     this.cfg = cfg
     this.statePath = statePath
     this.stopAutoSync()
-    try {
-      this.state = JSON.parse(await readFile(statePath, 'utf8')) as SyncState
-    } catch {
-      this.state = { localSeq: 0, opCursors: {}, pushedDigests: {}, blobCache: {} }
-    }
+    this.ready = false
     this.status = { ...this.status, ready: false }
 
     if (!cfg.enabled) return
@@ -95,8 +117,24 @@ export class SyncEngine {
     }
     if (!cfg.deviceId) throw new SyncError('deviceId 不能为空')
 
+    const remoteKey = computeContentHash(JSON.stringify([cfg.webdavUrl, cfg.basePath, cfg.username, cfg.deviceId]))
+    const previousKey = this.state.remoteKey
+    const saved = await readFile(statePath, 'utf8')
+      .then((json) => JSON.parse(json) as SyncState | null)
+      .catch(() => null)
+    const useSaved = saved && (!saved.remoteKey || saved.remoteKey === remoteKey)
+    this.state = { ...(useSaved ? saved : emptyState()), remoteKey }
+    if ((previousKey || saved?.remoteKey) && (previousKey || saved?.remoteKey) !== remoteKey) {
+      this.status = { ...this.status, lastSyncAt: null }
+    }
     this.knownDirs.clear()
     await this.ensureRemoteDirs()
+    // 已发布的批次可能在保存本地序号前中断。重启后从远端恢复序号，避免覆盖批次。
+    this.publishedSeq = this.state.localSeq
+    for (const ref of await this.listOpRefs()) {
+      if (ref.deviceId === cfg.deviceId) this.publishedSeq = Math.max(this.publishedSeq, ref.seq)
+    }
+    if (useSaved && !saved.remoteKey) await this.saveState(this.state)
     this.ready = true
     this.status = { ...this.status, ready: true, lastError: null }
     if (cfg.intervalSecs > 0) this.startAutoSync(cfg.intervalSecs)
@@ -106,7 +144,7 @@ export class SyncEngine {
     this.stopAutoSync()
     if (intervalSecs <= 0) return
     this.pullTimer = setInterval(() => {
-      void this.pullChanges(this.status.lastSyncAt ?? 0).catch(() => {/* 状态已记录 */})
+      void this.pullChanges().catch(() => {/* 状态已记录 */})
     }, Math.max(intervalSecs, 5) * 1000)
   }
 
@@ -124,7 +162,11 @@ export class SyncEngine {
    * 增量上传一条剪贴板记录。
    * 返回 false = 内容因校验/尺寸被拒；抛出 SyncError = 网络失败（可直接重试）。
    */
-  async pushItem(item: ClipboardSyncItem): Promise<boolean> {
+  pushItem(item: ClipboardSyncItem): Promise<boolean> {
+    return this.enqueue(() => this.pushOne(item))
+  }
+
+  private async pushOne(item: ClipboardSyncItem): Promise<boolean> {
     if (!this.ready || !this.cfg) throw new SyncError('云同步未启用')
     const updatedAt = item.updatedAt > 0 ? item.updatedAt : Date.now()
     const tombstone = item.deletedAt > 0
@@ -159,109 +201,114 @@ export class SyncEngine {
       if (wire.html !== null) await this.offloadField(wire, 'html')
     }
 
-    // 上传成功后才推进本地序号，失败时下次重试复用同一文件名（原子覆盖）
-    const seq = this.state.localSeq + 1
-    const batch: WireOpBatch = { deviceId: this.cfg.deviceId, seq, uploadedAt: Date.now(), entries: [wire] }
-    await this.uploadAtomic(this.rp(`ops/${opsFileName(this.cfg.deviceId, seq)}`), Buffer.from(JSON.stringify(batch), 'utf8'))
-
-    this.state.localSeq = seq
-    this.state.pushedDigests[id] = digest
-    await this.saveState()
+    await this.publishBatch([wire], { ...this.state.pushedDigests, [id]: digest })
     this.status = { ...this.status, uploadedItems: this.status.uploadedItems + 1 }
     return true
   }
 
   /**
-   * 拉取自 sinceTimestamp（epoch ms）以来其它设备的变更，
-   * 返回按 updatedAt 升序的去重条目（重复键按 LWW 归并）。
-   */
-  /**
    * 全量上传（首次启用/迁移）：把调用方给定的本地历史按 400 条/批写入 ops 序列。
    * 拉取端按既有「同类型同内容」去重合并，不会产生重复记录。
    */
-  async pushAll(items: ClipboardSyncItem[]): Promise<number> {
-    if (!this.ready || !this.cfg) throw new SyncError('云同步未启用')
+  pushAll(items: ClipboardSyncItem[]): Promise<number> {
+    return this.enqueue(() => this.pushBulk(items))
+  }
+
+  private async pushBulk(items: ClipboardSyncItem[]): Promise<number> {
+    const deviceId = this.cfg?.deviceId
+    if (!this.ready || !deviceId) throw new SyncError('云同步未启用')
     const BATCH = 400
     let pushed = 0
     for (let i = 0; i < items.length; i += BATCH) {
       const slice = items.slice(i, i + BATCH)
-      const seq = this.state.localSeq + 1
-      const batch: WireOpBatch = {
-        deviceId: this.cfg.deviceId,
-        seq,
-        uploadedAt: Date.now(),
-        entries: slice.map((it) => ({
-          deviceId: this.cfg!.deviceId,
-          type: it.type,
-          content: it.deletedAt > 0 ? '' : it.content,
-          html: it.html,
-          contentBlobHash: null,
-          htmlBlobHash: null,
-          hash: it.hash,
-          preview: it.preview,
-          createdAt: it.createdAt,
-          updatedAt: it.updatedAt,
-          deletedAt: it.deletedAt,
-        })),
-      }
-      await this.uploadAtomic(
-        this.rp(`ops/${opsFileName(this.cfg.deviceId, seq)}`),
-        Buffer.from(JSON.stringify(batch), 'utf8'),
-      )
-      this.state.localSeq = seq
+      await this.publishBatch(slice.map((it) => ({
+        deviceId,
+        type: it.type,
+        content: it.deletedAt > 0 ? '' : it.content,
+        html: it.html,
+        contentBlobHash: null,
+        htmlBlobHash: null,
+        hash: it.hash,
+        preview: it.preview,
+        createdAt: it.createdAt,
+        updatedAt: it.updatedAt,
+        deletedAt: it.deletedAt,
+      })))
       pushed += slice.length
     }
-    if (pushed > 0) await this.saveState()
     return pushed
   }
 
-  /** 上传任意文件到引擎目录（供云端快照备份使用），走原子上传通道 */
-  async uploadFile(relative: string, data: Buffer): Promise<void> {
-    if (!this.ready || !this.cfg) throw new SyncError('云同步未启用')
-    await this.uploadAtomic(this.rp(relative), data)
+  private async publishBatch(entries: WireSyncItem[], pushedDigests = this.state.pushedDigests): Promise<void> {
+    const deviceId = entries[0].deviceId
+    const seq = this.publishedSeq + 1
+    const batch: WireOpBatch = { deviceId, seq, uploadedAt: Date.now(), entries }
+    await this.uploadAtomic(this.rp(`ops/${opsFileName(deviceId, seq)}`), Buffer.from(JSON.stringify(batch), 'utf8'))
+    this.publishedSeq = seq
+    await this.saveState({ ...this.state, localSeq: seq, pushedDigests })
   }
 
-  async pullChanges(sinceTimestamp: number): Promise<ClipboardSyncItem[]> {
+  /** 上传任意文件到引擎目录（供云端快照备份使用），走原子上传通道 */
+  uploadFile(relative: string, data: Buffer): Promise<void> {
+    return this.enqueue(async () => {
+      if (!this.ready || !this.cfg) throw new SyncError('云同步未启用')
+      await this.uploadAtomic(this.rp(relative), data)
+    })
+  }
+
+  /** 旧调用方可保留时间戳参数。增量范围仅由各设备的批次游标决定。 */
+  pullChanges(_sinceTimestamp?: number): Promise<ClipboardSyncItem[]> {
+    this.pulling ??= this.enqueue(() => this.pullPendingBatches()).finally(() => { this.pulling = null })
+    return this.pulling
+  }
+
+  private async pullPendingBatches(): Promise<ClipboardSyncItem[]> {
     if (!this.ready || !this.cfg) throw new SyncError('云同步未启用')
-    if (this.pulling) return []
-    this.pulling = true
     const collected = new Map<string, ClipboardSyncItem>()
+    const cursors = new Map(Object.entries(this.state.opCursors))
+    const blockedDevices = new Set<string>()
+    let batchError: SyncError | undefined
+    let changed = false
 
     try {
       const refs = await this.listOpRefs()
       for (const ref of refs) {
-        if (ref.deviceId === this.cfg.deviceId) continue
-        const cursor = this.state.opCursors[ref.deviceId] ?? 0
+        if (ref.deviceId === this.cfg.deviceId || blockedDevices.has(ref.deviceId)) continue
+        const cursor = cursors.get(ref.deviceId) ?? 0
         if (ref.seq <= cursor) continue
 
-        const batch = await this.fetchJsonOrNull<WireOpBatch>(this.rp(`ops/${opsFileName(ref.deviceId, ref.seq)}`))
-        if (!batch || batch.deviceId !== ref.deviceId) continue // 文件残缺，下次重试
-
-        for (const raw of batch.entries) {
-          const item = await this.inflateWireItem(raw)
-          if (item.updatedAt <= sinceTimestamp) continue
-          const prev = collected.get(item.id)
-          if (!prev || item.updatedAt > prev.updatedAt) collected.set(item.id, item)
+        try {
+          if (ref.seq !== cursor + 1) throw new SyncError(`缺少远端同步批次 ${opsFileName(ref.deviceId, cursor + 1)}`)
+          const batch = await this.fetchBatch(ref.deviceId, ref.seq)
+          const items = []
+          for (const raw of batch.entries) items.push(await this.inflateWireItem(raw))
+          for (const item of items) {
+            const prev = collected.get(item.id)
+            if (!prev || item.updatedAt > prev.updatedAt) collected.set(item.id, item)
+          }
+          cursors.set(ref.deviceId, ref.seq)
+          changed = true
+        } catch (err) {
+          blockedDevices.add(ref.deviceId)
+          const message = err instanceof Error ? err.message : String(err)
+          batchError ??= new SyncError(`无法拉取同步批次 ${opsFileName(ref.deviceId, ref.seq)}: ${message}`, err)
         }
-        this.state.opCursors[ref.deviceId] = Math.max(ref.seq, batch.seq)
-        await this.saveState() // 逐设备落盘，中断时不回退已完成设备
       }
 
       const result = [...collected.values()].sort((a, b) => a.updatedAt - b.updatedAt)
+      if (result.length > 0) await this.onPulled(result)
+      if (changed) await this.saveState({ ...this.state, opCursors: Object.fromEntries(cursors) })
       this.status = {
         ...this.status,
         receivedItems: this.status.receivedItems + result.length,
-        lastSyncAt: Date.now(),
-        lastError: null,
       }
-      if (result.length > 0) await this.onPulled(result)
+      if (batchError) throw batchError
+      this.status = { ...this.status, lastSyncAt: Date.now(), lastError: null }
       return result
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       this.status = { ...this.status, lastError: msg }
       throw err instanceof SyncError ? err : new SyncError('拉取失败', err)
-    } finally {
-      this.pulling = false
     }
   }
 
@@ -274,22 +321,34 @@ export class SyncEngine {
 
   /* ================= WebDAV 传输层（私有） ================= */
 
-  private async saveState(): Promise<void> {
+  private enqueue<T>(run: () => Promise<T>): Promise<T> {
+    const pending = this.work.then(run)
+    this.work = pending.then(() => undefined, () => undefined)
+    return pending
+  }
+
+  private async saveState(state: SyncState): Promise<void> {
     // 截断 blob 缓存，防止无限增长
-    const entries = Object.entries(this.state.blobCache)
+    const entries = Object.entries(state.blobCache)
       .sort((a, b) => b[1] - a[1])
       .slice(0, BLOB_CACHE_MAX_ENTRIES)
-    this.state.blobCache = Object.fromEntries(entries)
+    const next = { ...state, blobCache: Object.fromEntries(entries) }
     const tmp = `${this.statePath}.${randomUUID()}.tmp`
-    await writeFile(tmp, JSON.stringify(this.state), 'utf8')
-    await rename(tmp, this.statePath)
+    try {
+      await writeFile(tmp, JSON.stringify(next), 'utf8')
+      await rename(tmp, this.statePath)
+    } catch (err) {
+      await rm(tmp, { force: true }).catch(() => undefined)
+      throw err
+    }
+    this.state = next
   }
 
   private async davRequest(
     method: string,
     relativePath: string,
-    options: { body?: Uint8Array; headers?: Record<string, string>; treat404AsNull?: boolean } = {},
-  ): Promise<{ status: number; text: string; ok: boolean }> {
+    options: { body?: Uint8Array; headers?: Record<string, string>; treat404AsNull?: boolean; readBytes?: boolean } = {},
+  ): Promise<{ status: number; text: string; ok: boolean; bytes?: Buffer }> {
     if (!this.cfg) throw new SyncError('云同步未配置')
     const url = `${this.cfg.webdavUrl}/${encodeRelPath(relativePath)}`
     let lastErr: unknown
@@ -309,13 +368,14 @@ export class SyncEngine {
           body: options.body ? new Uint8Array(options.body) : undefined,
           signal: ac.signal,
         })
-        const text = await res.text()
+        const bytes = options.readBytes && res.ok ? Buffer.from(await res.arrayBuffer()) : undefined
+        const text = bytes ? bytes.toString('utf8') : await res.text()
         if (RETRYABLE_STATUS.has(res.status) && attempt < MAX_RETRIES) {
           lastErr = new SyncError(`暂时性错误 ${res.status}: ${text.slice(0, 200)}`)
         } else if (options.treat404AsNull && (res.status === 404 || res.status === 409)) {
           return { status: res.status, text: '', ok: false } // 409 兼容坚果云父目录未建
         } else {
-          return { status: res.status, text, ok: res.status >= 200 && res.status < 300 }
+          return { status: res.status, text, ok: res.ok, bytes }
         }
       } catch (err) {
         lastErr = err
@@ -394,14 +454,20 @@ export class SyncEngine {
     throw new SyncError(`发布失败 ${relative}: ${mv.status} ${mv.text.slice(0, 200)}`)
   }
 
-  private async fetchJsonOrNull<T>(relative: string): Promise<T | null> {
-    const res = await this.davRequest('GET', relative, { treat404AsNull: true })
-    if (!res.ok) return null
+  private async fetchBatch(deviceId: string, seq: number): Promise<WireOpBatch> {
+    const res = await this.davRequest('GET', this.rp(`ops/${opsFileName(deviceId, seq)}`), { treat404AsNull: true })
+    if (!res.ok) throw new SyncError(`读取远端批次失败 (HTTP ${res.status})`)
+    let batch: WireOpBatch | null
     try {
-      return JSON.parse(res.text) as T
+      batch = JSON.parse(res.text) as WireOpBatch | null
     } catch {
-      return null // 上次中断残留的半截文件，等待下次覆盖
+      throw new SyncError('远端批次不是有效 JSON')
     }
+    if (!batch || batch.deviceId !== deviceId || batch.seq !== seq || !Number.isFinite(batch.uploadedAt) ||
+        !Array.isArray(batch.entries) || !batch.entries.every((raw) => isWireItem(raw, deviceId))) {
+      throw new SyncError('远端批次标识或条目无效')
+    }
+    return batch
   }
 
   private blobRel(kind: string, hash: string): string {
@@ -430,8 +496,7 @@ export class SyncEngine {
         await this.ensureDir(this.rp(`blobs/${blobHash.slice(0, 2)}`))
         await this.uploadAtomic(rel, Buffer.from(value, 'utf8'))
       }
-      this.state.blobCache[cacheKey] = Date.now()
-      await this.saveState()
+      await this.saveState({ ...this.state, blobCache: { ...this.state.blobCache, [cacheKey]: Date.now() } })
     }
     if (field === 'content') {
       wire.contentBlobHash = blobHash
@@ -450,8 +515,14 @@ export class SyncEngine {
       kind: string,
     ): Promise<string | null> => {
       if (!blobHash) return value ?? ''
-      const res = await this.davRequest('GET', this.rp(this.blobRel(kind, blobHash)), { treat404AsNull: true })
-      if (!res.ok) throw new SyncError(`远端缺少内容分片 blob: ${blobHash}`)
+      const res = await this.davRequest('GET', this.rp(this.blobRel(kind, blobHash)), {
+        treat404AsNull: true,
+        readBytes: true,
+      })
+      if (!res.bytes) throw new SyncError(`远端内容分片读取失败 (HTTP ${res.status}): ${blobHash}`)
+      if (createHash('sha256').update(res.bytes).digest('hex') !== blobHash) {
+        throw new SyncError(`远端内容分片校验失败: ${blobHash}`)
+      }
       return res.text
     }
     const content = await resolve(raw.contentBlobHash, raw.content, raw.type === 'image' ? 'image' : 'content')
@@ -488,9 +559,16 @@ export class SyncEngine {
     const nameRe = /^(.+)__(\d{20})\.json$/
     const refs = new Map<string, { deviceId: string; seq: number }>()
     for (const [, rawHref] of res.text.matchAll(hrefRe)) {
-      const fileName = decodeURIComponent(rawHref.trim()).replace(/\/$/, '').split('/').pop() ?? ''
+      let fileName: string
+      try {
+        fileName = decodeURIComponent(rawHref.trim()).replace(/\/$/, '').split('/').pop() ?? ''
+      } catch {
+        continue
+      }
       const m = nameRe.exec(fileName)
-      if (m) refs.set(`${m[1]}:${m[2]}`, { deviceId: m[1], seq: Number(m[2]) })
+      if (!m) continue
+      const seq = Number(m[2])
+      if (Number.isSafeInteger(seq) && seq > 0) refs.set(`${m[1]}:${m[2]}`, { deviceId: m[1], seq })
     }
     return [...refs.values()].sort((a, b) => a.deviceId.localeCompare(b.deviceId) || a.seq - b.seq)
   }
