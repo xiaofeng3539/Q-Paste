@@ -5,16 +5,26 @@ function harness() {
   const hooks = new Map<number, (w: Buffer, l: Buffer) => void>()
   let move!: () => void
   const edit = vi.fn()
-  installFloralNativeDrag({ hookWindowMessage: (id, callback) => hooks.set(id, callback), on: (_, callback) => { move = callback } }, edit)
+  const wheel = vi.fn()
+  installFloralNativeDrag(
+    { hookWindowMessage: (id, callback) => hooks.set(id, callback), on: (_, callback) => { move = callback } },
+    edit,
+    wheel,
+  )
   function message(id: number, code: number, x = 80, y = 80) {
     const w = Buffer.alloc(8), l = Buffer.alloc(8)
     w.writeUInt32LE(code); l.writeInt16LE(x, 0); l.writeInt16LE(y, 2)
     hooks.get(id)!(w, l)
   }
-  return { message, edit, move: () => move() }
+  function sendWheel(delta: number) {
+    const w = Buffer.alloc(8), l = Buffer.alloc(8)
+    w.writeInt16LE(delta, 2)
+    hooks.get(0x020a)!(w, l)
+  }
+  return { message, sendWheel, edit, wheel, move: () => move() }
 }
 
-describe('磁贴原生双击', () => {
+describe('磁贴原生双击与滚轮', () => {
   it('兼容原生标题区双击消息', () => {
     const h = harness(); h.message(0x00a3, 2)
     expect(h.edit).toHaveBeenCalledTimes(1)
@@ -44,5 +54,13 @@ describe('磁贴原生双击', () => {
       h.message(0x0210, 0x0201); vi.advanceTimersByTime(600); h.message(0x0210, 0x0201)
       expect(h.edit).not.toHaveBeenCalled()
     } finally { vi.useRealTimers() }
+  })
+  it('转发 WM_MOUSEWHEEL 上下与触控板精细滚轮增量', () => {
+    const h = harness()
+    h.sendWheel(-120)
+    h.sendWheel(120)
+    h.sendWheel(-30)
+    h.sendWheel(0)
+    expect(h.wheel.mock.calls).toEqual([[96], [-96], [24]])
   })
 })

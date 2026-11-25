@@ -77,9 +77,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   searchLocalItems: (ids: number[], query: string) => ipcRenderer.invoke('db:search-local-items', ids, query) as Promise<number[]>,
   getItemContent: (id: number) =>
     ipcRenderer.invoke('db:get-item-content', id) as Promise<string>,
+  getItemThumbnail: (id: number) =>
+    ipcRenderer.invoke('db:get-item-thumbnail', id) as Promise<string>,
   getOcrConfig: () =>
     ipcRenderer.invoke('ocr:get-config') as Promise<{ langPath: string; workerPath: string; corePath: string }>,
-  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) =>
+  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean; sourceApp?: string }) =>
     ipcRenderer.invoke('db:insert-item', item),
   deleteItem: (id: number) =>
     ipcRenderer.invoke('db:delete-item', id),
@@ -89,7 +91,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('force-clear-data', type) as Promise<{ success: boolean; error?: string }>,
   updateItem: (params: { id: number; content: string; preview: string; charCount: number; storageSize: number }) =>
     ipcRenderer.invoke('db:update-item', params),
-  updateItemMeta: (params: { id: number; isPinned?: boolean; alias?: string; tags?: string; isSensitive?: boolean }) =>
+  updateItemMeta: (params: { id: number; isPinned?: boolean; alias?: string; tags?: string; isSensitive?: boolean; ocrText?: string }) =>
     ipcRenderer.invoke('db:update-item-meta', params) as Promise<boolean>,
   reorderItems: (order: number[]) =>
     ipcRenderer.invoke('db:reorder-items', order) as Promise<boolean>,
@@ -111,6 +113,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('clipboard:write-html', html),
   writeFiles: (paths: string[]) =>
     ipcRenderer.invoke('clipboard:write-files', paths),
+  pasteToPrevious: () =>
+    ipcRenderer.invoke('clipboard:paste-to-previous') as Promise<{ pasted: boolean }>,
+  saveToFloral: (payload: {
+    mode: 'new' | 'append'
+    itemId?: number
+    type: string
+    title?: string
+    alias?: string
+    preview?: string
+    text?: string
+    files?: string[]
+  }) =>
+    ipcRenderer.invoke('clipboard:save-to-floral', payload) as Promise<{ success: boolean; noteId?: string; title?: string; created?: boolean; error?: string }>,
   openUrl: (url: string) =>
     ipcRenderer.invoke('shell:open-url', url) as Promise<boolean>,
   openFile: (filePath: string) =>

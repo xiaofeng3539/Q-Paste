@@ -55,15 +55,15 @@ export function AboutPanel({ onClose }: AboutPanelProps) {
   }, [tipSegments, checkTipOverflow]);
 
   return (
-    <aside className="w-[360px] h-full shrink-0 border-l border-paper-deep/30 bg-cloud/92 backdrop-blur-sm flex flex-col">
-      <div className="flex items-center justify-between h-11 px-4 border-b border-paper-deep/25">
-        <h2 className="text-[13px] font-display font-medium text-ink-soft">
+    <aside className="w-[360px] h-full shrink-0 border-l border-paper-deep/60 bg-cloud/96 backdrop-blur-sm flex flex-col">
+      <div className="flex items-center justify-between h-11 px-4 border-b border-paper-deep/50 bg-paper/50">
+        <h2 className="text-[13px] font-display font-semibold text-ink">
           {t("about.title", { defaultValue: "关于" })}
         </h2>
         <button
           type="button"
           onClick={onClose}
-          className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-ghost hover:text-ink-soft hover:bg-paper-warm transition-colors cursor-pointer"
+          className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-faint hover:text-ink hover:bg-paper-warm transition-colors cursor-pointer"
           title={t("about.closeTitle", { defaultValue: "关闭关于" })}
         >
           <svg
@@ -82,19 +82,19 @@ export function AboutPanel({ onClose }: AboutPanelProps) {
 
       <div className="flex-1 overflow-y-auto scrollbar-hidden px-4 py-4 space-y-5">
         <section className="space-y-1.5">
-          <h3 className="text-[20px] font-serif font-medium text-ink-soft">
+          <h3 className="text-[20px] font-serif font-medium text-ink">
             {t("about.productName", { defaultValue: "花笺" })}
           </h3>
-          <p className="text-[11px] text-ink-ghost font-body">
+          <p className="text-[11px] text-ink-faint font-body">
             {t("about.summary", { defaultValue: "轻量、优雅、现代化的本地便签工具" })}
           </p>
-          <p className="text-[11px] text-ink-ghost font-body">
+          <p className="text-[11px] text-ink-faint font-body">
             Copyright © 2026 Floral Notepaper Contributors,
             <br />
             Licensed under the MIT License. <br />
           </p>
           {version && (
-            <p className="text-[11px] text-ink-ghost font-mono">
+            <p className="text-[11px] text-ink-faint font-mono">
               {t("about.version", { defaultValue: "版本：v{{version}}", version })}
             </p>
           )}
@@ -234,14 +234,14 @@ export function AboutPanel({ onClose }: AboutPanelProps) {
         </div>
       </div>
 
-      <div className="flex items-center px-4 h-7 border-t border-paper-deep/20 bg-paper/30 shrink-0 overflow-hidden">
-        <span className="text-[10px] text-ink-ghost font-body shrink-0 mr-1">
+      <div className="flex items-center px-4 h-7 border-t border-paper-deep/50 bg-paper/70 shrink-0 overflow-hidden">
+        <span className="text-[10px] text-ink-faint font-body shrink-0 mr-1">
           {t("about.tipPrefix", { defaultValue: "您知道吗：" })}
         </span>
         <div ref={tipContainerRef} className="flex-1 overflow-hidden min-w-0 flex items-center">
           <span
             ref={tipInnerRef}
-            className={`text-[10px] text-ink-ghost font-body whitespace-nowrap inline-block ${tipScrollable ? "animate-tip-marquee" : ""}`}
+            className={`text-[10px] text-ink-faint font-body whitespace-nowrap inline-block ${tipScrollable ? "animate-tip-marquee" : ""}`}
             style={
               tipScrollable ? { ["--tip-scroll-offset" as string]: tipScrollOffset } : undefined
             }

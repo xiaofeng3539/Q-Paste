@@ -80,7 +80,18 @@ function nextSortOrder(db: NativeDatabase): number {
   return mx + 1
 }
 
+function hasSourceAppColumn(db: NativeDatabase): boolean {
+  try {
+    const rows = db.exec('PRAGMA table_info(items)')[0]?.values ?? []
+    return rows.some((row) => String(row[1]) === 'source_app')
+  } catch {
+    return false
+  }
+}
+
 export function insertHistoryItem(db: NativeDatabase, layout: StorageLayout, item: HistoryItemInput, options: { dedupe: boolean; maxRecords?: number }): HistoryInsertResult {
+  const sourceApp = (item.sourceApp || '').trim()
+  const withSourceApp = hasSourceAppColumn(db)
 
   // 大文本落盘：库内只存引用（引用串彼此不同，超大同内容不去重，可接受）
   const storedContent = offloadLargeText(layout, item.type, item.content)
@@ -103,21 +114,40 @@ export function insertHistoryItem(db: NativeDatabase, layout: StorageLayout, ite
       }
       cand.free()
       if (upgradeId !== null) {
-        db.run(
-          `UPDATE items SET type = 'html', content = :content, preview = :preview,
-           char_count = :charCount, storage_size = :storageSize, created_at = :createdAt,
-           sort_order = :sortOrder
-           WHERE id = :id`,
-          {
-            ':content': item.content,
-            ':preview': item.preview,
-            ':charCount': item.charCount,
-            ':storageSize': item.storageSize,
-            ':createdAt': item.createdAt,
-            ':sortOrder': nextSortOrder(db),
-            ':id': upgradeId,
-          }
-        )
+        if (withSourceApp && sourceApp) {
+          db.run(
+            `UPDATE items SET type = 'html', content = :content, preview = :preview,
+             char_count = :charCount, storage_size = :storageSize, created_at = :createdAt,
+             sort_order = :sortOrder, source_app = :sourceApp
+             WHERE id = :id`,
+            {
+              ':content': item.content,
+              ':preview': item.preview,
+              ':charCount': item.charCount,
+              ':storageSize': item.storageSize,
+              ':createdAt': item.createdAt,
+              ':sortOrder': nextSortOrder(db),
+              ':sourceApp': sourceApp,
+              ':id': upgradeId,
+            }
+          )
+        } else {
+          db.run(
+            `UPDATE items SET type = 'html', content = :content, preview = :preview,
+             char_count = :charCount, storage_size = :storageSize, created_at = :createdAt,
+             sort_order = :sortOrder
+             WHERE id = :id`,
+            {
+              ':content': item.content,
+              ':preview': item.preview,
+              ':charCount': item.charCount,
+              ':storageSize': item.storageSize,
+              ':createdAt': item.createdAt,
+              ':sortOrder': nextSortOrder(db),
+              ':id': upgradeId,
+            }
+          )
+        }
         return { id: upgradeId, updated: true }
       }
     }
@@ -132,35 +162,68 @@ export function insertHistoryItem(db: NativeDatabase, layout: StorageLayout, ite
     dup.free()
 
     if (dupId !== null) {
-      db.run(
-        `UPDATE items SET preview = :preview, char_count = :charCount, storage_size = :storageSize, created_at = :createdAt, sort_order = :sortOrder WHERE id = :id`,
-        {
-          ':id': dupId,
-          ':preview': item.preview,
-          ':charCount': item.charCount,
-          ':storageSize': item.storageSize,
-          ':createdAt': item.createdAt,
-          ':sortOrder': nextSortOrder(db),
-        }
-      )
+      if (withSourceApp && sourceApp) {
+        db.run(
+          `UPDATE items SET preview = :preview, char_count = :charCount, storage_size = :storageSize, created_at = :createdAt, sort_order = :sortOrder, source_app = :sourceApp WHERE id = :id`,
+          {
+            ':id': dupId,
+            ':preview': item.preview,
+            ':charCount': item.charCount,
+            ':storageSize': item.storageSize,
+            ':createdAt': item.createdAt,
+            ':sortOrder': nextSortOrder(db),
+            ':sourceApp': sourceApp,
+          }
+        )
+      } else {
+        db.run(
+          `UPDATE items SET preview = :preview, char_count = :charCount, storage_size = :storageSize, created_at = :createdAt, sort_order = :sortOrder WHERE id = :id`,
+          {
+            ':id': dupId,
+            ':preview': item.preview,
+            ':charCount': item.charCount,
+            ':storageSize': item.storageSize,
+            ':createdAt': item.createdAt,
+            ':sortOrder': nextSortOrder(db),
+          }
+        )
+      }
       return { id: dupId, updated: true }
     }
   }
 
-  db.run(
-    `INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_sensitive, sort_order)
-     VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt, :isSensitive, :sortOrder)`,
-    {
-      ':type': item.type,
-      ':content': storedContent,
-      ':preview': item.preview,
-      ':charCount': item.charCount,
-      ':storageSize': item.storageSize,
-      ':createdAt': item.createdAt,
-      ':isSensitive': item.isSensitive ? 1 : 0,
-      ':sortOrder': nextSortOrder(db),
-    }
-  )
+  if (withSourceApp) {
+    db.run(
+      `INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_sensitive, sort_order, source_app)
+       VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt, :isSensitive, :sortOrder, :sourceApp)`,
+      {
+        ':type': item.type,
+        ':content': storedContent,
+        ':preview': item.preview,
+        ':charCount': item.charCount,
+        ':storageSize': item.storageSize,
+        ':createdAt': item.createdAt,
+        ':isSensitive': item.isSensitive ? 1 : 0,
+        ':sortOrder': nextSortOrder(db),
+        ':sourceApp': sourceApp,
+      }
+    )
+  } else {
+    db.run(
+      `INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_sensitive, sort_order)
+       VALUES (:type, :content, :preview, :charCount, :storageSize, :createdAt, :isSensitive, :sortOrder)`,
+      {
+        ':type': item.type,
+        ':content': storedContent,
+        ':preview': item.preview,
+        ':charCount': item.charCount,
+        ':storageSize': item.storageSize,
+        ':createdAt': item.createdAt,
+        ':isSensitive': item.isSensitive ? 1 : 0,
+        ':sortOrder': nextSortOrder(db),
+      }
+    )
+  }
   const res = db.exec('SELECT last_insert_rowid()')
   const id = Number(res[0]?.values[0]?.[0]) || null
   trimHistory(db, options.maxRecords)

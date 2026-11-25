@@ -1,22 +1,33 @@
-import { Copy, RefreshCw, Save, X } from 'lucide-react'
+import { BookPlus, CheckCircle2, Copy, RefreshCw, Save, SearchCheck, X } from 'lucide-react'
 
 interface OcrResultPanelProps {
   value: string
   busy: boolean
   error: string | null
   notice?: string | null
+  indexed?: boolean
   onChange: (value: string) => void
   onCopy: () => void
   onSave: () => Promise<void>
+  onSaveToIndex?: () => Promise<void>
+  onSaveToFloral?: () => Promise<void>
   onRetry: () => void
   onClose: () => void
 }
 
-export default function OcrResultPanel({ value, busy, error, notice, onChange, onCopy, onSave, onRetry, onClose }: OcrResultPanelProps) {
+export default function OcrResultPanel({ value, busy, error, notice, indexed, onChange, onCopy, onSave, onSaveToIndex, onSaveToFloral, onRetry, onClose }: OcrResultPanelProps) {
   return (
     <div className="mb-4 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 overflow-hidden">
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-200 dark:border-zinc-700">
-        <span className="text-xs font-medium text-zinc-700 dark:text-zinc-200">局部 OCR 结果</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-medium text-zinc-700 dark:text-zinc-200">局部 OCR 结果</span>
+          {indexed && (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-700/50">
+              <CheckCircle2 className="w-2.5 h-2.5" />
+              已索引可搜
+            </span>
+          )}
+        </div>
         <button onClick={onClose} className="p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200" title="关闭 OCR 结果">
           <X className="w-3.5 h-3.5" />
         </button>
@@ -37,12 +48,22 @@ export default function OcrResultPanel({ value, busy, error, notice, onChange, o
             placeholder="识别出的文字会显示在这里"
           />
           {notice && <p className="mt-2 text-xs text-red-500">{notice}</p>}
-          <div className="mt-2 flex items-center justify-between gap-2">
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
             <span className="text-[10px] text-zinc-400 dark:text-zinc-500">{[...value].length} 个字符</span>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-1.5">
               <button onClick={onCopy} disabled={!value.trim()} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 text-xs text-zinc-600 dark:text-zinc-300">
                 <Copy className="w-3.5 h-3.5" />复制
               </button>
+              {onSaveToIndex && (
+                <button onClick={() => void onSaveToIndex()} disabled={!value.trim()} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 text-xs text-zinc-700 dark:text-zinc-200">
+                  <SearchCheck className="w-3.5 h-3.5" />更新图片索引
+                </button>
+              )}
+              {onSaveToFloral && (
+                <button onClick={() => void onSaveToFloral()} disabled={!value.trim()} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 text-xs text-zinc-700 dark:text-zinc-200">
+                  <BookPlus className="w-3.5 h-3.5" />存到花笺
+                </button>
+              )}
               <button onClick={() => void onSave()} disabled={!value.trim()} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md bg-[var(--accent)] text-white disabled:opacity-50 text-xs">
                 <Save className="w-3.5 h-3.5" />保存到历史
               </button>

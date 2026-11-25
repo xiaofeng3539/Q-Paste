@@ -2,33 +2,33 @@
 @tailwind components;
 @tailwind utilities;
 
-/* zinc 色阶变量：浅色=精致灰阶（层级：底 F5F6F8 / 面板 FAFBFC / 卡片 FFFFFF），
+/* zinc 色阶变量：浅色=清晰冷灰阶（画布 E9ECF1 / 面板 FFFFFF，次要文字与分隔线加深以提升可读性），
    深色=Tailwind 原版 zinc（保持现有效果，逐字节不变） */
 :root {
-  --zc-50: 245 246 248;
-  --zc-100: 239 241 244;
-  --zc-200: 229 231 235;
-  --zc-300: 210 214 220;
-  --zc-400: 154 161 171;
-  --zc-500: 106 114 128;
-  --zc-600: 106 114 128;
-  --zc-700: 74 80 96;
-  --zc-800: 42 47 56;
-  --zc-900: 29 33 41;
-  --zc-950: 17 20 24;
+  --zc-50: 246 247 249;
+  --zc-100: 238 240 243;
+  --zc-200: 225 228 233;
+  --zc-300: 200 205 213;
+  --zc-400: 118 126 138;
+  --zc-500: 88 95 108;
+  --zc-600: 70 76 89;
+  --zc-700: 52 58 70;
+  --zc-800: 33 37 45;
+  --zc-900: 22 25 31;
+  --zc-950: 12 14 18;
 }
 .dark {
-  --zc-50: 250 250 250;
-  --zc-100: 244 244 245;
-  --zc-200: 228 228 231;
-  --zc-300: 212 212 216;
-  --zc-400: 161 161 170;
-  --zc-500: 113 113 122;
-  --zc-600: 82 82 91;
-  --zc-700: 63 63 70;
-  --zc-800: 39 39 42;
-  --zc-900: 24 24 27;
-  --zc-950: 9 9 11;
+  --zc-50: 248 250 252;
+  --zc-100: 241 244 249;
+  --zc-200: 226 232 240;
+  --zc-300: 203 211 224;
+  --zc-400: 162 172 188;
+  --zc-500: 132 142 160;
+  --zc-600: 94 103 120;
+  --zc-700: 66 74 88;
+  --zc-800: 44 50 62;
+  --zc-900: 30 34 43;
+  --zc-950: 20 23 30;
 }
 
 @layer base {
@@ -82,10 +82,10 @@
 /* Sortable measures the outer rows. Chromium can defer their offscreen contents. */
 .qp-item-content {
   content-visibility: auto;
-  contain-intrinsic-block-size: auto 18px;
+  contain-intrinsic-block-size: auto 42px;
 }
 .qp-item-content-two-lines {
-  contain-intrinsic-block-size: auto 34.75px;
+  contain-intrinsic-block-size: auto 58px;
 }
 /* 文本溢出：nowrap + ellipsis 截断，禁止文字撑开横向滚动 */
 .qp-list-scroll .truncate,
@@ -109,6 +109,30 @@
   .no-drag {
     -webkit-app-region: no-drag;
   }
+}
+
+/* 主界面画布与浮动面板：浅色用灰底 + 白色描边卡片拉开层级；深色沿用原 zinc-950 / zinc-900 */
+.qp-canvas {
+  background-color: #e9ecf1;
+}
+.dark .qp-canvas {
+  background-color: #14171e;
+}
+.qp-panel {
+  background-color: #ffffff;
+  border: 1px solid #d9dee5;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 8px 24px -12px rgba(15, 23, 42, 0.16);
+}
+.dark .qp-panel {
+  background-color: #1e222b;
+  border-color: #313846;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28), 0 10px 26px -12px rgba(0, 0, 0, 0.55);
+}
+.qp-divider {
+  border-color: #e3e7ec;
+}
+.dark .qp-divider {
+  border-color: #2d3442;
 }
 
 /* SortableJS 拖拽排序视觉反馈：被拖条目半透明悬浮态 + 阴影，其余条目平滑避让留出空隙 */
@@ -139,13 +163,15 @@
   color: #52525b;
 }
 .dark .qp-item-multi-selected {
-  background-color: color-mix(in srgb, var(--accent) 18%, #27272a);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
-  color: #f4f4f5;
+  background-color: color-mix(in srgb, var(--accent) 20%, #282e3a);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 52%, transparent);
+  color: #f1f4f9;
 }
+.dark .qp-item-multi-selected [class~="dark:text-zinc-500"],
+.dark .qp-vault-item-multi-selected [class~="dark:text-zinc-500"],
 .dark .qp-item-multi-selected [class~="dark:text-zinc-600"],
 .dark .qp-vault-item-multi-selected [class~="dark:text-zinc-600"] {
-  color: #a1a1aa;
+  color: #cbd3e0;
 }
 .qp-vault-item-multi-selected {
   background-color: color-mix(in srgb, #f59e0b 15%, white);
@@ -153,7 +179,7 @@
   color: #27272a;
 }
 .dark .qp-vault-item-multi-selected {
-  background-color: color-mix(in srgb, #fbbf24 18%, #27272a);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, #fbbf24 48%, transparent);
-  color: #f4f4f5;
+  background-color: color-mix(in srgb, #fbbf24 20%, #282e3a);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #fbbf24 52%, transparent);
+  color: #f1f4f9;
 }

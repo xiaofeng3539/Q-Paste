@@ -7,6 +7,7 @@ export interface ClipboardCapture {
   charCount: number
   storageSize: number
   createdAt: string
+  sourceApp?: string
 }
 
 export interface StoredClipboardCapture extends ClipboardCapture {

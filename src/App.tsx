@@ -7,13 +7,15 @@ import Settings from './components/Settings'
 import { ClipboardItem, ClipboardChangedData, ItemType } from './types'
 import { mockItems } from './mock'
 import { Lang, loadLang, setLang, tr } from './i18n'
-import { stripHtml, cn } from './lib/utils'
+import { cn } from './lib/utils'
 import { searchIncludes } from './lib/search'
 import { appendHistorySummaries, applyClipboardChanges, historySummary, loadHistorySummaries, mergeVisibleOrder, readHistoryContent } from './lib/history-memory'
 import { selectRangeIds } from './lib/selection-range'
 import { assignVaultSortOrders } from './lib/vault-order'
 import { useDialog } from './components/DialogProvider'
 import { loadShortcuts, saveShortcuts, matchShortcut, ShortcutAction } from './lib/shortcuts'
+import { getQuickPasteIndex, mergeClipboardTexts, toPlainText } from './lib/clipboard-actions'
+import { reconcileActiveFilter } from './lib/sidebar-filters'
 
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI
 
@@ -73,6 +75,8 @@ function normalizeItems(rows: any[]): ClipboardItem[] {
     alias: row.alias || '',
     tags: Array.isArray(row.tags) ? row.tags : safeParseJson(row.tags, []),
     is_sensitive: row.is_sensitive === 1 || row.is_sensitive === true,
+    ocr_text: row.ocr_text || '',
+    source_app: row.source_app || '',
   })) as ClipboardItem[]
 }
 
@@ -115,12 +119,17 @@ export default function App() {
   const [autoHideOnCopy, setAutoHideOnCopy] = useState(() => {
     try { return localStorage.getItem('q-paste-autohide') === 'true' } catch { return false }
   })
+  const [directPaste, setDirectPaste] = useState(() => {
+    try { return localStorage.getItem('q-paste-direct-paste') !== 'false' } catch { return true }
+  })
   /** 本地快捷键配置（自定义，持久化 localStorage） */
   const [shortcuts, setShortcuts] = useState(loadShortcuts)
   /** DB 层搜索结果（搜索时优先展示；清空搜索后置回 null 恢复本地列表） */
   const [searchResults, setSearchResults] = useState<ClipboardItem[] | null>(null)
   /** 标签过滤：非空时只显示带该标签的记录 */
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
+  /** 来源应用过滤：非空时只显示来自该应用的记录 */
+  const [selectedSource, setSelectedSource] = useState<string | null>(null)
   /** 类型过滤：非 all 时只显示该类型的记录 */
   const [typeFilter, setTypeFilter] = useState<ItemType | 'all'>('all')
   /** 批量多选：选中的记录 id 集合（空集合表示未进入多选态） */
@@ -167,6 +176,10 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem('q-paste-autohide', String(autoHideOnCopy)) } catch {}
   }, [autoHideOnCopy])
+
+  useEffect(() => {
+    try { localStorage.setItem('q-paste-direct-paste', String(directPaste)) } catch {}
+  }, [directPaste])
 
   // 快捷键变更时持久化
   useEffect(() => {
@@ -431,43 +444,6 @@ export default function App() {
     [selectedSummary, selectedContent]
   )
 
-  const filteredItems = useMemo(() => {
-    // 搜索模式下优先展示 DB 搜索结果（非 Electron 环境退回本地过滤）
-    let list: ClipboardItem[]
-    const q = searchQuery.trim()
-    if (searchResults && isElectron) {
-      list = searchResults
-    } else if (!q) {
-      list = items
-    } else {
-      list = items.filter((it) => searchIncludes(it.preview + '\n' + it.content, q))
-    }
-    // 类型过滤
-    if (typeFilter !== 'all') {
-      list = list.filter((it) => it.type === typeFilter)
-    }
-    // 标签过滤
-    if (selectedTag) {
-      list = list.filter((it) => it.tags.includes(selectedTag))
-    }
-    return list
-  }, [items, searchQuery, searchResults, selectedTag, typeFilter, isElectron])
-
-  const vaultItems = useMemo(() => {
-    let list = items
-      .filter((it) => it.is_pinned)
-      .sort(compareByVaultOrder)
-    // 类型过滤
-    if (typeFilter !== 'all') {
-      list = list.filter((it) => it.type === typeFilter)
-    }
-    // 标签过滤
-    if (selectedTag) {
-      list = list.filter((it) => it.tags.includes(selectedTag))
-    }
-    return list
-  }, [items, selectedTag, typeFilter])
-
   /** 全部标签（用于标签过滤 chips），按出现次数降序 */
   const allTags = useMemo(() => {
     const counts = new Map<string, number>()
@@ -481,20 +457,108 @@ export default function App() {
       .map(([tag]) => tag)
   }, [items])
 
-  // 金库搜索时优先展示 DB 搜索结果（pinnedOnly），且搜索结果同样应用标签/类型过滤；否则展示本地收藏列表
+  /** 全部来源应用（用于来源筛选 chips），按出现次数降序 */
+  const allSources = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const it of items) {
+      const src = it.source_app?.trim()
+      if (src) counts.set(src, (counts.get(src) ?? 0) + 1)
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([src]) => src)
+  }, [items])
+
+  const effectiveSelectedTag = useMemo(() => reconcileActiveFilter(selectedTag, allTags), [selectedTag, allTags])
+  const effectiveSelectedSource = useMemo(() => reconcileActiveFilter(selectedSource, allSources), [selectedSource, allSources])
+
+  // 当选中标签或来源下的全部条目被删除/移除后，自动清空失效筛选，避免筛选栏隐藏后永久停在「无匹配结果」
+  useEffect(() => {
+    if (selectedTag && !allTags.includes(selectedTag)) {
+      setSelectedTag(null)
+    }
+  }, [selectedTag, allTags])
+
+  useEffect(() => {
+    if (selectedSource && !allSources.includes(selectedSource)) {
+      setSelectedSource(null)
+    }
+  }, [selectedSource, allSources])
+
+  const handleResetFilters = useCallback(() => {
+    setSearchQuery('')
+    setTypeFilter('all')
+    setSelectedTag(null)
+    setSelectedSource(null)
+  }, [])
+
+  const filteredItems = useMemo(() => {
+    // 搜索模式下优先展示 DB 搜索结果（非 Electron 环境退回本地过滤）
+    let list: ClipboardItem[]
+    const q = searchQuery.trim()
+    if (searchResults && isElectron) {
+      list = searchResults
+    } else if (!q) {
+      list = items
+    } else {
+      list = items.filter((it) =>
+        searchIncludes(
+          [it.alias, it.preview, it.ocr_text, it.source_app, it.type === 'image' ? '' : it.content]
+            .filter(Boolean)
+            .join('\n'),
+          q,
+        ),
+      )
+    }
+    // 类型过滤
+    if (typeFilter !== 'all') {
+      list = list.filter((it) => it.type === typeFilter)
+    }
+    // 标签过滤
+    if (effectiveSelectedTag) {
+      list = list.filter((it) => it.tags.includes(effectiveSelectedTag))
+    }
+    // 来源应用过滤
+    if (effectiveSelectedSource) {
+      list = list.filter((it) => it.source_app === effectiveSelectedSource)
+    }
+    return list
+  }, [items, searchQuery, searchResults, effectiveSelectedTag, effectiveSelectedSource, typeFilter, isElectron])
+
+  const vaultItems = useMemo(() => {
+    let list = items
+      .filter((it) => it.is_pinned)
+      .sort(compareByVaultOrder)
+    // 类型过滤
+    if (typeFilter !== 'all') {
+      list = list.filter((it) => it.type === typeFilter)
+    }
+    // 标签过滤
+    if (effectiveSelectedTag) {
+      list = list.filter((it) => it.tags.includes(effectiveSelectedTag))
+    }
+    // 来源应用过滤
+    if (effectiveSelectedSource) {
+      list = list.filter((it) => it.source_app === effectiveSelectedSource)
+    }
+    return list
+  }, [items, effectiveSelectedTag, effectiveSelectedSource, typeFilter])
+
+  // 金库搜索时优先展示 DB 搜索结果（pinnedOnly），且搜索结果同样应用标签/类型/来源过滤；否则展示本地收藏列表
   const sidebarItems = useMemo(() => {
     if (activeTab === 'vault') {
       if (searchResults) {
         let list = searchResults
         if (typeFilter !== 'all') list = list.filter((it) => it.type === typeFilter)
-        if (selectedTag) list = list.filter((it) => it.tags.includes(selectedTag))
+        if (effectiveSelectedTag) list = list.filter((it) => it.tags.includes(effectiveSelectedTag))
+        if (effectiveSelectedSource) list = list.filter((it) => it.source_app === effectiveSelectedSource)
         // 与金库常规列表一致：按金库拖拽排序（vault_sort_order 越大越靠前）
         return [...list].sort(compareByVaultOrder)
       }
       return vaultItems
     }
     return filteredItems
-  }, [activeTab, searchResults, vaultItems, filteredItems, selectedTag, typeFilter])
+  }, [activeTab, searchResults, vaultItems, filteredItems, effectiveSelectedTag, effectiveSelectedSource, typeFilter])
 
   const handleSelect = useCallback((id: number) => {
     selectionAnchorRef.current = id
@@ -573,11 +637,15 @@ export default function App() {
   )
 
   const handleCopy = useCallback(
-    async (item: ClipboardItem) => {
+    async (item: ClipboardItem, options?: { plainText?: boolean; directPaste?: boolean }) => {
+      const plainTextOnly = Boolean(options?.plainText)
+      const shouldDirectPaste = Boolean(options?.directPaste)
       if (isElectron) {
         try {
           item = { ...item, content: await readHistoryContent(item, window.electronAPI.getItemContent), content_loaded: true }
-          if (item.type === 'image') {
+          if (plainTextOnly && item.type !== 'image') {
+            await window.electronAPI.writeText(toPlainText(item.type, item.content))
+          } else if (item.type === 'image') {
             // 列表查询已置空图片 content，复制前按 id 取完整内容（dataURL）
             let content = item.content
             if (!content) {
@@ -601,13 +669,61 @@ export default function App() {
           return
         }
       }
-      showToast(tr('toast.copied'))
+      if (shouldDirectPaste && isElectron && window.electronAPI.pasteToPrevious) {
+        try {
+          const result = await window.electronAPI.pasteToPrevious()
+          showToast(result?.pasted ? tr('toast.pasted') : (plainTextOnly ? tr('toast.copiedPlain') : tr('toast.copied')))
+          return
+        } catch {
+          // 降级为普通复制提示
+        }
+      }
+      showToast(plainTextOnly ? tr('toast.copiedPlain') : tr('toast.copied'))
       // 复制后自动隐藏窗口（弹窗式使用）
       if (autoHideOnCopy && isElectron) {
         window.electronAPI.closeWindow()
       }
     },
     [autoHideOnCopy]
+  )
+
+  const handleCopyPlainText = useCallback(
+    (item: ClipboardItem) => {
+      void handleCopy(item, { plainText: true })
+    },
+    [handleCopy],
+  )
+
+  const handleQuickPaste = useCallback(
+    (item: ClipboardItem) => {
+      void handleCopy(item, { directPaste })
+    },
+    [handleCopy, directPaste],
+  )
+
+  const handleSaveToFloral = useCallback(
+    async (item: ClipboardItem, mode: 'new' | 'append', overrideText?: string) => {
+      if (!isElectron || !window.electronAPI?.saveToFloral) return
+      try {
+        const res = await window.electronAPI.saveToFloral({
+          mode,
+          itemId: overrideText !== undefined ? undefined : item.id,
+          type: overrideText !== undefined ? 'text' : item.type,
+          alias: item.alias || undefined,
+          preview: item.preview || undefined,
+          text: overrideText !== undefined ? overrideText : (item.type === 'image' ? undefined : (item.content_loaded !== false ? item.content : undefined)),
+        })
+        if (!res.success) {
+          showToast(tr('toast.error', { error: res.error || 'unknown' }))
+          return
+        }
+        const title = res.title || '无标题笔记'
+        showToast(res.created ? tr('toast.savedToFloralNew', { title }) : tr('toast.savedToFloralAppend', { title }))
+      } catch (err: any) {
+        showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+      }
+    },
+    [],
   )
 
   const handleOpenUrl = useCallback(async (url: string) => {
@@ -777,33 +893,59 @@ export default function App() {
     [items]
   )
 
-  /** 批量复制：依次复制所有选中记录的文本/链接内容 */
-  const handleBatchCopy = useCallback(async () => {
+  const handleUpdateOcrText = useCallback(
+    async (id: number, ocrText: string) => {
+      try {
+        if (isElectron) {
+          await window.electronAPI.updateItemMeta({ id, ocrText })
+        }
+      } catch (err: any) {
+        showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+        return
+      }
+      setItems((prev) =>
+        prev.map((it) => (it.id === id ? { ...it, ocr_text: ocrText } : it))
+      )
+      setSearchResults((prev) =>
+        prev ? prev.map((it) => (it.id === id ? { ...it, ocr_text: ocrText } : it)) : prev
+      )
+    },
+    []
+  )
+
+  const handleFilterBySource = useCallback((source: string) => {
+    setSelectedSource((prev) => (prev === source ? null : source))
+  }, [])
+
+  /** 批量合并复制：按选定分隔符拼接所有选中记录的纯文本内容 */
+  const handleBatchCopy = useCallback(async (separator = '\n') => {
     if (selectedIds.size === 0) return
     const list = sidebarItems.filter((it) => selectedIds.has(it.id))
     if (!list.length) return
-    const texts: string[] = []
+    const entries: Array<{ type: ItemType; content: string }> = []
     try {
       for (const it of list) {
         if (it.type === 'image') continue
         const content = isElectron ? await readHistoryContent(it, window.electronAPI.getItemContent) : it.content
-        const text = it.type === 'html' ? stripHtml(content) : content
-        if (text.trim()) texts.push(text)
+        entries.push({ type: it.type, content })
       }
     } catch (err: any) {
       showToast(tr('toast.error', { error: err?.message ?? String(err) }))
       return
     }
-    if (texts.length) {
-      try {
-        if (isElectron) await window.electronAPI.writeText(texts.join('\n\n'))
-        else if (navigator.clipboard) await navigator.clipboard.writeText(texts.join('\n\n'))
-      } catch (err: any) {
-        showToast(tr('toast.error', { error: err?.message ?? String(err) }))
-        return
-      }
+    const { merged, count } = mergeClipboardTexts(entries, separator)
+    if (count === 0) {
+      showToast(tr('toast.batchNoText'))
+      return
     }
-    showToast(tr('toast.batchCopied', { n: texts.length }))
+    try {
+      if (isElectron) await window.electronAPI.writeText(merged)
+      else if (navigator.clipboard) await navigator.clipboard.writeText(merged)
+    } catch (err: any) {
+      showToast(tr('toast.error', { error: err?.message ?? String(err) }))
+      return
+    }
+    showToast(tr('toast.batchCopied', { n: count }))
     if (autoHideOnCopy && isElectron) window.electronAPI.closeWindow()
   }, [selectedIds, sidebarItems, isElectron, autoHideOnCopy])
 
@@ -905,7 +1047,7 @@ export default function App() {
         lastNavRepeatAt.current = now
       }
 
-      // Escape / 自定义清空搜索键：先清搜索 → 再清标签 → 再取消多选 → 再取消选中
+      // Escape / 自定义清空搜索键：先清搜索 → 再清标签 → 再清来源 → 再取消多选 → 再取消选中
       if (matchShortcut(e, sc.clearSearch)) {
         if (searchQuery) {
           setSearchQuery('')
@@ -913,6 +1055,10 @@ export default function App() {
         }
         if (selectedTag) {
           setSelectedTag(null)
+          return
+        }
+        if (selectedSource) {
+          setSelectedSource(null)
           return
         }
         if (selectedIds.size > 0) {
@@ -936,13 +1082,14 @@ export default function App() {
         return
       }
 
-      // Ctrl/Cmd + 1..9：按列表位置快捷复制（写入剪贴板，遵循复制后自动隐藏设置）
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && !inInput && /^[1-9]$/.test(e.key)) {
-        const target = filteredItems[Number(e.key) - 1]
+      // Alt / Ctrl / Cmd + 1..9：按当前视图列表位置秒贴（加 Shift 去格式纯文本；遵循直接粘贴设置）
+      const quickIdx = !inInput ? getQuickPasteIndex(e) : null
+      if (quickIdx !== null) {
+        const target = sidebarItems[quickIdx]
         if (target) {
           e.preventDefault()
-          handleCopy(target)
           setSelectedId(target.id)
+          void handleCopy(target, { plainText: e.shiftKey, directPaste })
         }
         return
       }
@@ -952,7 +1099,7 @@ export default function App() {
       // 复制
       if (matchShortcut(e, sc.copy) && !inInput) {
         e.preventDefault()
-        handleCopy(selectedItem)
+        void handleCopy(selectedItem)
       }
 
       // 删除
@@ -961,9 +1108,10 @@ export default function App() {
         handleDelete(selectedItem.id)
       }
 
-      // Enter — copy (convenience)
-      if (e.key === 'Enter' && !inInput) {
-        handleCopy(selectedItem)
+      // Enter / Shift+Enter — 直接粘贴（或复制），Shift+Enter 去格式纯文本
+      if (e.key === 'Enter' && !inInput && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault()
+        void handleCopy(selectedItem, { plainText: e.shiftKey, directPaste })
       }
 
       // Backspace — delete (convenience, not in input)
@@ -1004,7 +1152,7 @@ export default function App() {
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selectedItem, selectedId, sidebarItems, searchQuery, selectedTag, pendingDeleteId, shortcuts, handleCopy, handleDelete, handleTogglePin, filteredItems, selectedIds, selectAll])
+  }, [selectedItem, selectedId, sidebarItems, searchQuery, selectedTag, selectedSource, pendingDeleteId, shortcuts, handleCopy, handleDelete, handleTogglePin, directPaste, selectedIds, selectAll])
 
   // 窗口最大化时取消内容圆角（透明窗口四角不再透出桌面缺口）
   const [winMaximized, setWinMaximized] = useState(false)
@@ -1019,9 +1167,9 @@ export default function App() {
   // ── Settings view (fullscreen) ──
   if (showSettings) {
     return (
-      <div className={`relative h-screen overflow-hidden pt-9 bg-zinc-50 dark:bg-zinc-950 ${winRadius}`}>
+      <div className={`relative h-screen overflow-hidden pt-9 qp-canvas ${winRadius}`}>
         <TitleBar />
-        <Settings fileTransferRequest={fileTransferRequest} theme={theme} onThemeChange={setTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} autoHideOnCopy={autoHideOnCopy} onAutoHideChange={setAutoHideOnCopy} shortcuts={shortcuts} onShortcutChange={handleShortcutChange} onBack={() => {
+        <Settings fileTransferRequest={fileTransferRequest} theme={theme} onThemeChange={setTheme} language={language} onLanguageChange={setLanguage} accentColor={accentColor} onAccentChange={(c) => setAccentColor(c as AccentColor)} listDensity={listDensity} onDensityChange={setListDensity} useMonospace={useMonospace} onMonospaceChange={setUseMonospace} directPaste={directPaste} onDirectPasteChange={setDirectPaste} autoHideOnCopy={autoHideOnCopy} onAutoHideChange={setAutoHideOnCopy} shortcuts={shortcuts} onShortcutChange={handleShortcutChange} onBack={() => {
           setShowSettings(false)
           setFileTransferRequest(0)
         }} onToast={showToast} onDataImported={async () => {
@@ -1056,7 +1204,7 @@ export default function App() {
 
   // ── Main 3-column view ──
   return (
-    <div className={`relative h-screen flex bg-zinc-50 dark:bg-zinc-950 overflow-hidden pt-9 ${winRadius}`}>
+    <div className={`relative h-screen flex qp-canvas overflow-hidden pt-9 ${winRadius}`}>
       <TitleBar />
       {/* ── 超大文本确认弹窗（完整保留 / 截断保留） ── */}
       {oversizePending && (
@@ -1099,12 +1247,17 @@ export default function App() {
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           onSelect={handleSelect}
+          onDoubleClick={handleQuickPaste}
           density={listDensity}
           activeTab={activeTab}
           onTabChange={setActiveTab}
           allTags={allTags}
-          selectedTag={selectedTag}
+          selectedTag={effectiveSelectedTag}
           onTagChange={setSelectedTag}
+          allSources={allSources}
+          selectedSource={effectiveSelectedSource}
+          onSourceChange={setSelectedSource}
+          onResetFilters={handleResetFilters}
           onReorder={handleReorder}
           onVaultReorder={handleVaultReorder}
           typeFilter={typeFilter}
@@ -1138,16 +1291,20 @@ export default function App() {
 
       {/* Column 3 — detail view (~70%) as floating card */}
       <div style={{ minWidth: DETAIL_MIN_WIDTH }} className="flex-1 min-w-0 relative pl-1 pr-4 pt-5 pb-4">
-        <div className="h-full bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-zinc-200/60 dark:border-zinc-800/50 overflow-hidden flex flex-col">
+        <div className="h-full qp-panel rounded-2xl overflow-hidden flex flex-col">
           <DetailView
             item={selectedItem}
             density={listDensity}
             onCopy={handleCopy}
+            onCopyPlainText={handleCopyPlainText}
+            onSaveToFloral={handleSaveToFloral}
             onDelete={handleDelete}
             onUpdate={handleUpdate}
             onTogglePin={handleTogglePin}
             onUpdateAlias={handleUpdateAlias}
             onUpdateTags={handleUpdateTags}
+            onUpdateOcrText={handleUpdateOcrText}
+            onFilterBySource={handleFilterBySource}
             onToggleSensitive={handleToggleSensitive}
             onOpenUrl={handleOpenUrl}
             onOpenFile={handleOpenFile}

@@ -591,11 +591,14 @@ export class FileTransferServer {
       }).end(trustPageHtml.replace('__NONCE__', nonce))
       return
     }
+    const colorMode = this.cb.getColorMode()
+    const themeCss = buildThemeCss(colorMode)
+    const logo = this.cb.getLogoBase64()
     const html = mobilePageHtml
-      .replace('__THEME__', 'mica')
-      .replace('__MODE_CLASS__', modeClass(this.cb.getColorMode()))
-      .replace('__THEME_CSS__', buildThemeCss(this.cb.getColorMode()))
-      .replace('__LOGO__', this.cb.getLogoBase64())
+      .replace(/__THEME__/g, () => 'mica')
+      .replace(/__MODE_CLASS__/g, () => modeClass(colorMode))
+      .replace(/__THEME_CSS__/g, () => themeCss)
+      .replace(/__LOGO__/g, () => logo)
     res.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store, must-revalidate',

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildPreview,
+  CATEGORY_TONE_COUNT,
   countNoteChars,
   filterNotes,
+  getCategoryToneClass,
   getDisplayTitle,
   groupNotesByCategory,
   mergeNoteMetadata,
@@ -75,5 +77,12 @@ describe("note utilities", () => {
     expect(groupNotesByCategory([second, first])[0].notes.map((note) => note.id)).toEqual(["1", "2"]);
     expect(groupNotesByCategory([second, first, { ...notes[1], id: "3" }])[0].notes.map((note) => note.id))
       .toEqual(["3", "1", "2"]);
+  });
+
+  it("assigns distinct category tone classes to consecutive categories and cycles cleanly", () => {
+    const tones = Array.from({ length: CATEGORY_TONE_COUNT }, (_, i) => getCategoryToneClass(i));
+    expect(new Set(tones).size).toBe(CATEGORY_TONE_COUNT);
+    expect(getCategoryToneClass(CATEGORY_TONE_COUNT)).toBe(tones[0]);
+    expect(getCategoryToneClass(-1)).toBe(tones[CATEGORY_TONE_COUNT - 1]);
   });
 });

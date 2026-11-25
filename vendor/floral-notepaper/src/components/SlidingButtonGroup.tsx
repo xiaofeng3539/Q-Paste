@@ -40,10 +40,10 @@ export function SlidingButtonGroup<T extends string>({
 
   return (
     <div
-      className={`relative flex items-center gap-1 bg-paper-warm/60 rounded-lg p-[2px] border border-paper-deep/30 ${className}`}
+      className={`relative flex items-center gap-1 bg-segment-track rounded-lg p-[2px] border border-paper-deep/60 ${className}`}
     >
       <div
-        className="absolute rounded-md bg-cloud shadow-[0_1px_2px_rgba(0,0,0,0.04)] pointer-events-none sliding-highlight"
+        className="absolute rounded-md bg-segment-thumb shadow-[0_1px_3px_var(--color-shadow-deep)] ring-1 ring-paper-deep/55 pointer-events-none sliding-highlight"
         style={{ left: pos.left, top: pos.top, width: pos.width, height: pos.height, transition }}
       />
       {options.map((option) => (
@@ -57,8 +57,8 @@ export function SlidingButtonGroup<T extends string>({
           onClick={() => onChange(option.value)}
           className={`relative z-[1] flex-1 rounded-md text-[11px] transition-colors duration-200 cursor-pointer ${buttonClassName} ${
             value === option.value
-              ? "text-bamboo font-medium"
-              : "text-ink-ghost hover:text-ink-faint"
+              ? "text-bamboo font-semibold"
+              : "text-ink-faint hover:text-ink"
           }`}
         >
           {option.label}

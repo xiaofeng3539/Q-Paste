@@ -400,17 +400,20 @@ const staticComponents: Components = {
   a: ({ href, children }) => (
     <a
       href={href}
+      onMouseDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
       onClick={(e) => {
         e.preventDefault();
+        e.stopPropagation();
         if (!href) return;
-        if (/^https?:\/\//i.test(href)) {
-          openUrl(href);
+        if (/^(?:https?:\/\/|mailto:)/i.test(href)) {
+          void openUrl(href);
         } else if (href.startsWith("#")) {
           const id = decodeURIComponent(href.slice(1));
           document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
         }
       }}
-      className="text-bamboo hover:text-bamboo-light underline underline-offset-2 cursor-pointer"
+      className="electron-no-drag text-bamboo hover:text-bamboo-light underline underline-offset-2 cursor-pointer"
     >
       {children}
     </a>
@@ -452,7 +455,7 @@ export function MarkdownPreview({
             alt={alt ?? ""}
             imageBaseDir={imageBaseDir}
             loading="lazy"
-            className="w-[50%] rounded my-2 mx-auto block"
+            className="w-[50%] rounded-md my-2 mx-auto block border border-paper-deep/55 shadow-[0_1px_4px_var(--color-shadow)]"
             {...props}
           />
         );

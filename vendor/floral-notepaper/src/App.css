@@ -9,22 +9,25 @@
 }
 
 @theme {
-  --color-paper: #f6f3ec;
-  --color-paper-warm: #f0ebe0;
-  --color-paper-deep: #e8e1d3;
-  --color-ink: #1a1a18;
-  --color-ink-soft: #3d3d38;
-  --color-ink-faint: #8a8a80;
-  --color-ink-ghost: #b8b8ae;
-  --color-bamboo: #2d5a3d;
-  --color-bamboo-light: #3a7a52;
-  --color-bamboo-mist: #e8f0eb;
-  --color-bamboo-glow: #d4e8da;
-  --color-stone: #6b6b62;
-  --color-cloud: #ffffff;
-  --color-shadow: rgba(26, 26, 24, 0.06);
-  --color-shadow-deep: rgba(26, 26, 24, 0.12);
-  --color-danger-bg: #fef2f2;
+  --color-paper: #ebe4d5;
+  --color-paper-warm: #e2d9c6;
+  --color-paper-deep: #c5baa4;
+  --color-paper-card: #f8f5ee;
+  --color-ink: #1a1917;
+  --color-ink-soft: #2e2c27;
+  --color-ink-faint: #524f46;
+  --color-ink-ghost: #6c685c;
+  --color-bamboo: #215737;
+  --color-bamboo-light: #2c7048;
+  --color-bamboo-mist: #d7e7dc;
+  --color-bamboo-glow: #c1dbca;
+  --color-stone: #58554c;
+  --color-cloud: #f5f1e8;
+  --color-shadow: rgba(26, 24, 20, 0.08);
+  --color-shadow-deep: rgba(26, 24, 20, 0.16);
+  --color-danger-bg: #fae6e5;
+  --color-segment-track: #e2d9c6;
+  --color-segment-thumb: #f5f1e8;
 
   --font-display:
     -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC",
@@ -42,22 +45,25 @@
 }
 
 :root[data-theme="dark"] {
-  --color-paper: #222120;
-  --color-paper-warm: #2c2a27;
-  --color-paper-deep: #3c3935;
-  --color-ink: #e5e1da;
-  --color-ink-soft: #b5b1a8;
-  --color-ink-faint: #928f87;
-  --color-ink-ghost: #706d67;
-  --color-bamboo: #4faa70;
-  --color-bamboo-light: #5fc085;
-  --color-bamboo-mist: #1c2e22;
-  --color-bamboo-glow: #243a2c;
-  --color-stone: #8a8880;
-  --color-cloud: #1a1917;
-  --color-shadow: rgba(0, 0, 0, 0.3);
-  --color-shadow-deep: rgba(0, 0, 0, 0.5);
-  --color-danger-bg: rgba(220, 38, 38, 0.15);
+  --color-paper: #282b31;
+  --color-paper-warm: #32363e;
+  --color-paper-deep: #484e5a;
+  --color-paper-card: #2c3038;
+  --color-ink: #f0eee9;
+  --color-ink-soft: #d2cfc8;
+  --color-ink-faint: #a7a59f;
+  --color-ink-ghost: #8c8c88;
+  --color-bamboo: #5ec984;
+  --color-bamboo-light: #72d997;
+  --color-bamboo-mist: #243b2e;
+  --color-bamboo-glow: #2d4d3b;
+  --color-stone: #9e9d97;
+  --color-cloud: #202226;
+  --color-shadow: rgba(0, 0, 0, 0.28);
+  --color-shadow-deep: rgba(0, 0, 0, 0.45);
+  --color-danger-bg: rgba(239, 68, 68, 0.18);
+  --color-segment-track: #181a1f;
+  --color-segment-thumb: #333842;
 }
 
 /* Theme transition — applied briefly during theme switch for a uniform crossfade */
@@ -234,6 +240,20 @@ body {
 .scrollbar-hidden {
   -ms-overflow-style: none;
   scrollbar-width: none;
+}
+
+.tile-scroll-area::-webkit-scrollbar {
+  width: 5px;
+}
+.tile-scroll-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+.tile-scroll-area::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+}
+.tile-scroll-area:hover::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.32);
 }
 
 textarea,
@@ -488,8 +508,203 @@ input::placeholder {
   opacity: 1;
 }
 .category-body > .category-body-inner {
+  min-height: 0;
   overflow: hidden;
 }
+
+/* Distinct Floral category folder tones (Light mode) */
+.floral-cat-tone-0 {
+  --cat-accent: #1d643b;
+  --cat-header-bg: #d9e9df;
+  --cat-header-open-bg: #c9dfd1;
+  --cat-body-bg: #f3f8f4;
+  --cat-border: rgba(29, 100, 59, 0.36);
+  --cat-rail: rgba(29, 100, 59, 0.34);
+  --cat-badge-bg: rgba(29, 100, 59, 0.14);
+}
+.floral-cat-tone-1 {
+  --cat-accent: #275394;
+  --cat-header-bg: #dbe5f3;
+  --cat-header-open-bg: #cad9ee;
+  --cat-body-bg: #f3f6fb;
+  --cat-border: rgba(39, 83, 148, 0.36);
+  --cat-rail: rgba(39, 83, 148, 0.34);
+  --cat-badge-bg: rgba(39, 83, 148, 0.14);
+}
+.floral-cat-tone-2 {
+  --cat-accent: #9a5514;
+  --cat-header-bg: #f0e2cc;
+  --cat-header-open-bg: #e7d4b6;
+  --cat-body-bg: #fbf7f0;
+  --cat-border: rgba(154, 85, 20, 0.38);
+  --cat-rail: rgba(154, 85, 20, 0.35);
+  --cat-badge-bg: rgba(154, 85, 20, 0.15);
+}
+.floral-cat-tone-3 {
+  --cat-accent: #683e8f;
+  --cat-header-bg: #e7dff0;
+  --cat-header-open-bg: #dad0e8;
+  --cat-body-bg: #f8f5fb;
+  --cat-border: rgba(104, 62, 143, 0.36);
+  --cat-rail: rgba(104, 62, 143, 0.34);
+  --cat-badge-bg: rgba(104, 62, 143, 0.14);
+}
+.floral-cat-tone-4 {
+  --cat-accent: #a13a43;
+  --cat-header-bg: #f0dede;
+  --cat-header-open-bg: #e8cecf;
+  --cat-body-bg: #fbf5f5;
+  --cat-border: rgba(161, 58, 67, 0.36);
+  --cat-rail: rgba(161, 58, 67, 0.34);
+  --cat-badge-bg: rgba(161, 58, 67, 0.14);
+}
+.floral-cat-tone-5 {
+  --cat-accent: #18666d;
+  --cat-header-bg: #d7e9ea;
+  --cat-header-open-bg: #c5dfe1;
+  --cat-body-bg: #f2f8f8;
+  --cat-border: rgba(24, 102, 109, 0.36);
+  --cat-rail: rgba(24, 102, 109, 0.34);
+  --cat-badge-bg: rgba(24, 102, 109, 0.14);
+}
+
+/* Distinct Floral category folder tones (Dark mode) */
+:root[data-theme="dark"] .floral-cat-tone-0 {
+  --cat-accent: #63cf89;
+  --cat-header-bg: #23342c;
+  --cat-header-open-bg: #294035;
+  --cat-body-bg: #212a26;
+  --cat-border: rgba(99, 207, 137, 0.36);
+  --cat-rail: rgba(99, 207, 137, 0.34);
+  --cat-badge-bg: rgba(99, 207, 137, 0.2);
+}
+:root[data-theme="dark"] .floral-cat-tone-1 {
+  --cat-accent: #73aef8;
+  --cat-header-bg: #232e3f;
+  --cat-header-open-bg: #2a384e;
+  --cat-body-bg: #212731;
+  --cat-border: rgba(115, 174, 248, 0.36);
+  --cat-rail: rgba(115, 174, 248, 0.34);
+  --cat-badge-bg: rgba(115, 174, 248, 0.2);
+}
+:root[data-theme="dark"] .floral-cat-tone-2 {
+  --cat-accent: #e8a74e;
+  --cat-header-bg: #372f23;
+  --cat-header-open-bg: #433827;
+  --cat-body-bg: #2c2822;
+  --cat-border: rgba(232, 167, 78, 0.38);
+  --cat-rail: rgba(232, 167, 78, 0.34);
+  --cat-badge-bg: rgba(232, 167, 78, 0.2);
+}
+:root[data-theme="dark"] .floral-cat-tone-3 {
+  --cat-accent: #bc93f5;
+  --cat-header-bg: #30283f;
+  --cat-header-open-bg: #3a304e;
+  --cat-body-bg: #272431;
+  --cat-border: rgba(188, 147, 245, 0.36);
+  --cat-rail: rgba(188, 147, 245, 0.34);
+  --cat-badge-bg: rgba(188, 147, 245, 0.2);
+}
+:root[data-theme="dark"] .floral-cat-tone-4 {
+  --cat-accent: #ed828d;
+  --cat-header-bg: #3b272c;
+  --cat-header-open-bg: #482f35;
+  --cat-body-bg: #2e2326;
+  --cat-border: rgba(237, 130, 141, 0.36);
+  --cat-rail: rgba(237, 130, 141, 0.34);
+  --cat-badge-bg: rgba(237, 130, 141, 0.2);
+}
+:root[data-theme="dark"] .floral-cat-tone-5 {
+  --cat-accent: #59cbd4;
+  --cat-header-bg: #21353a;
+  --cat-header-open-bg: #284248;
+  --cat-body-bg: #202b2d;
+  --cat-border: rgba(89, 203, 212, 0.36);
+  --cat-rail: rgba(89, 203, 212, 0.34);
+  --cat-badge-bg: rgba(89, 203, 212, 0.2);
+}
+
+.floral-cat-card {
+  border: 1px solid var(--cat-border);
+  border-left: 3px solid var(--cat-accent);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 1px 2px var(--color-shadow);
+}
+
+.floral-cat-header {
+  background-color: var(--cat-header-bg);
+  color: var(--cat-accent);
+}
+.floral-cat-header.is-open {
+  background-color: var(--cat-header-open-bg);
+  border-bottom: 1px solid var(--cat-border);
+}
+.floral-cat-header:hover {
+  filter: brightness(0.97);
+}
+:root[data-theme="dark"] .floral-cat-header:hover {
+  filter: brightness(1.08);
+}
+
+.floral-cat-body-surface {
+  background-color: var(--cat-body-bg);
+}
+
+.floral-cat-badge {
+  background-color: var(--cat-badge-bg);
+  color: var(--cat-accent);
+}
+
+.floral-cat-note-item {
+  background-color: color-mix(in srgb, var(--color-paper-card) 82%, #ffffff);
+  border: 1px solid color-mix(in srgb, var(--cat-accent) 13%, transparent);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+.floral-cat-note-item:hover {
+  background-color: #ffffff;
+  border-color: color-mix(in srgb, var(--cat-accent) 32%, transparent);
+  box-shadow: 0 2px 6px -2px rgba(15, 23, 42, 0.08);
+}
+.floral-cat-note-item.is-selected,
+.floral-cat-note-item.is-multi-selected {
+  background-color: color-mix(in srgb, var(--cat-accent) 11%, #ffffff);
+  border-color: color-mix(in srgb, var(--cat-accent) 46%, transparent);
+  box-shadow: 0 2px 6px -2px color-mix(in srgb, var(--cat-accent) 22%, transparent);
+}
+:root[data-theme="dark"] .floral-cat-note-item {
+  background-color: color-mix(in srgb, var(--color-paper-card) 72%, transparent);
+  border-color: color-mix(in srgb, var(--cat-accent) 16%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+:root[data-theme="dark"] .floral-cat-note-item:hover {
+  background-color: color-mix(in srgb, var(--color-paper-card) 94%, #ffffff 3%);
+  border-color: color-mix(in srgb, var(--cat-accent) 34%, transparent);
+}
+:root[data-theme="dark"] .floral-cat-note-item.is-selected,
+:root[data-theme="dark"] .floral-cat-note-item.is-multi-selected {
+  background-color: color-mix(in srgb, var(--cat-accent) 17%, var(--color-paper-card));
+  border-color: color-mix(in srgb, var(--cat-accent) 52%, transparent);
+  box-shadow: 0 2px 8px -2px rgba(0, 0, 0, 0.35);
+}
+
+.floral-cat-note-indicator {
+  background-color: var(--cat-accent);
+}
+
+.floral-cat-note-title.is-selected {
+  color: var(--cat-accent);
+}
+
+.floral-uncat-note-card {
+  background-color: color-mix(in srgb, var(--color-paper-card) 74%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-paper-deep) 56%, transparent);
+}
+.floral-uncat-note-card:hover {
+  background-color: var(--color-paper-card);
+  border-color: var(--color-paper-deep);
+}
+
 
 /* Delete confirm inline pop */
 @keyframes delete-confirm-enter {

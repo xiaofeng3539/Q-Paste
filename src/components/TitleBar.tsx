@@ -26,11 +26,11 @@ export default function TitleBar() {
   }, [])
 
   const btnBase =
-    'no-drag w-11 h-9 flex items-center justify-center text-zinc-600 dark:text-zinc-300 transition-colors'
+    'no-drag w-11 h-9 flex items-center justify-center text-zinc-600 hover:bg-zinc-300/50 dark:text-zinc-300 dark:hover:bg-zinc-800/80 transition-colors'
 
   return (
     <div
-      className={`drag-region absolute top-0 left-0 right-0 h-9 z-50 flex items-center pl-3 select-none border-b border-zinc-200 dark:border-zinc-800 ${isWindows ? 'bg-zinc-50 dark:bg-zinc-950' : 'bg-transparent'}`}
+      className={`drag-region absolute top-0 left-0 right-0 h-9 z-50 flex items-center pl-3 select-none border-b border-[#d9dee5] dark:border-zinc-800 ${isWindows ? 'qp-canvas' : 'bg-transparent'}`}
       onContextMenu={(e) => {
         e.preventDefault()
         void window.electronAPI?.showWindowSystemMenu?.()
@@ -66,7 +66,7 @@ export default function TitleBar() {
             Q
           </div>
         )}
-        <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">Q-Paste</span>
+        <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-200">Q-Paste</span>
       </button>
 
       {/* 右上角自绘窗口按钮（无边框窗口下系统不再绘制） */}

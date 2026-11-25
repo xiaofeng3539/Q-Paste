@@ -23,6 +23,8 @@ import { copyExistingFloralData, FloralMigrationGate } from './floral/data-migra
 import { findFloralSurfaceWindow, registerFloralSurfaceMode, fitFloralTileBounds, installFloralNativeDrag } from './floral/surface-window'
 import { broadcastFloralEvent } from './floral/event-broadcast'
 import { toFloralUpdateState, type HostUpdateStatus } from './floral/host-update'
+import { captureExternalForegroundWindow, captureForegroundSourceApp, pasteToPreviousWindow } from './direct-paste'
+import { parseImageDataUrl, saveClipboardToFloralStore } from './floral/clipboard-bridge'
 
 interface StoredItem {
   id: number
@@ -39,10 +41,15 @@ interface StoredItem {
   is_sensitive: number
   sort_order?: number | null
   vault_sort_order?: number | null
+  ocr_text?: string
+  source_app?: string
 }
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
+let previousForegroundHwnd: bigint | null = null
+const thumbnailCache = new Map<number, string>()
+const THUMBNAIL_CACHE_LIMIT = 240
 const pendingInstallReports = new Map<string, Map<number, (ready: boolean) => void>>()
 
 // 文件传输聊天视图的本地文件流式预览（等价 Tiez convertFileSrc；须在 app ready 前注册）
@@ -267,6 +274,74 @@ function resolveImagePath(relPath: string): string | null {
   return fs.existsSync(abs) ? abs : null
 }
 
+function rememberPreviousForegroundWindow(): void {
+  const hwnd = captureExternalForegroundWindow(mainWindow)
+  if (hwnd) previousForegroundHwnd = hwnd
+}
+
+function readItemImageBytes(content: string): { bytes: Uint8Array; ext: string } | null {
+  if (!content) return null
+  if (content.startsWith('data:')) return parseImageDataUrl(content)
+  const file = resolveImagePath(content)
+  if (!file) return null
+  try {
+    const rawExt = path.extname(file).slice(1).toLowerCase()
+    const ext = rawExt === 'jpeg' ? 'jpg' : rawExt || 'png'
+    return { bytes: new Uint8Array(fs.readFileSync(file)), ext }
+  } catch {
+    return null
+  }
+}
+
+async function generateItemThumbnail(id: number): Promise<string> {
+  if (!db || !Number.isFinite(id)) return ''
+  const cached = thumbnailCache.get(id)
+  if (cached) {
+    thumbnailCache.delete(id)
+    thumbnailCache.set(id, cached)
+    return cached
+  }
+  try {
+    const rows = await runDatabaseTask({
+      kind: 'query',
+      file: dbPath,
+      sql: 'SELECT type, content FROM items WHERE id = :id LIMIT 1',
+      bindings: { ':id': id },
+    })
+    const row = rows[0]
+    if (!row || row.type !== 'image') return ''
+    const content = String(row.content ?? '')
+    if (!content) return ''
+    let image: Electron.NativeImage
+    if (content.startsWith('data:')) {
+      image = nativeImage.createFromDataURL(content)
+    } else {
+      const abs = resolveImagePath(content)
+      if (!abs) return ''
+      image = nativeImage.createFromPath(abs)
+    }
+    if (image.isEmpty()) return ''
+    const { width, height } = image.getSize()
+    const maxW = 112
+    const maxH = 84
+    const resized = width > maxW || height > maxH
+      ? (width / Math.max(height, 1) >= maxW / maxH
+          ? image.resize({ width: maxW, quality: 'good' })
+          : image.resize({ height: maxH, quality: 'good' }))
+      : image
+    const dataUrl = resized.toDataURL()
+    if (!dataUrl) return ''
+    thumbnailCache.set(id, dataUrl)
+    if (thumbnailCache.size > THUMBNAIL_CACHE_LIMIT) {
+      const oldestKey = thumbnailCache.keys().next().value
+      if (oldestKey !== undefined) thumbnailCache.delete(oldestKey)
+    }
+    return dataUrl
+  } catch {
+    return ''
+  }
+}
+
 const pendingHistoryImages = new Map<string, number>()
 const pendingHistoryWrites = new Set<Promise<HistoryInsertResult>>()
 let activeDatabaseExports = 0
@@ -363,6 +438,8 @@ async function initDatabase(): Promise<void> {
       "ALTER TABLE items ADD COLUMN pinned_at TEXT",
       "ALTER TABLE items ADD COLUMN sort_order REAL",
       "ALTER TABLE items ADD COLUMN vault_sort_order REAL",
+      "ALTER TABLE items ADD COLUMN ocr_text TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE items ADD COLUMN source_app TEXT NOT NULL DEFAULT ''",
     ]
     for (const sql of migrations) {
       try { db!.run(sql) } catch { /* 列已存在，忽略 */ }
@@ -563,6 +640,8 @@ async function checkClipboard(generation: number, seed: boolean): Promise<void> 
     return
   }
 
+  const sourceApp = captureForegroundSourceApp()
+
   if (buf?.length) {
     const hash = hashBuffer(buf)
 
@@ -587,7 +666,7 @@ async function checkClipboard(generation: number, seed: boolean): Promise<void> 
       lastImageHash = hash
       const { width, height } = nativeImage.createFromBuffer(buf).getSize()
       recordClipboardCapture({ type: 'image', content, preview: `图片 ${width}×${height}`,
-        charCount: 0, storageSize: buf.length, createdAt: nowLocal() })
+        charCount: 0, storageSize: buf.length, createdAt: nowLocal(), sourceApp })
     } catch (error) {
       log.warn('无法保存剪贴板图片:', error)
     } finally {
@@ -611,6 +690,7 @@ async function checkClipboard(generation: number, seed: boolean): Promise<void> 
       charCount: 0,
       storageSize: Buffer.byteLength(raw, 'utf16le'),
       createdAt,
+      sourceApp,
     })
     return
   }
@@ -635,6 +715,7 @@ async function checkClipboard(generation: number, seed: boolean): Promise<void> 
         charCount: plain.length,
         storageSize: size,
         createdAt: nowLocal(),
+        sourceApp,
       })
       return
     }
@@ -673,6 +754,7 @@ async function checkClipboard(generation: number, seed: boolean): Promise<void> 
     charCount: text.length,
     storageSize: Buffer.byteLength(text, 'utf8'),
     createdAt,
+    sourceApp,
   })
 }
 
@@ -809,6 +891,7 @@ function createTray(): void {
 }
 
 function showWindow(): void {
+  rememberPreviousForegroundWindow()
   if (!mainWindow) {
     createWindow()
   } else {
@@ -949,6 +1032,9 @@ function createWindow(): void {
 
   mainWindow.on('show', () => setClipboardPollRate(500))
   mainWindow.on('hide', () => setClipboardPollRate(1500))
+  mainWindow.on('blur', () => {
+    setTimeout(() => rememberPreviousForegroundWindow(), 60)
+  })
 
   // Hide to tray instead of closing (Windows/Linux)；macOS 关窗即退出，由 activate 重建
   mainWindow.on('close', (e) => {
@@ -1047,12 +1133,20 @@ function openFloralSurface(kind: 'notepad' | 'tile', noteId?: string, bounds?: {
   })
   floralSurfaceWindows.set(key, child)
   if (process.platform === 'win32') {
-    installFloralNativeDrag(child, (point) => {
-      if ([...floralSurfaceWindows].some(([key, window]) => key.startsWith('tile:') && window === child)) {
-        const scale = screen.getDisplayMatching(child.getBounds()).scaleFactor
-        child.webContents.send('floral:event:surface-native-double-click', point ? { x: point.x / scale, y: point.y / scale } : null)
-      }
-    })
+    installFloralNativeDrag(
+      child,
+      (point) => {
+        if ([...floralSurfaceWindows].some(([key, window]) => key.startsWith('tile:') && window === child)) {
+          const scale = screen.getDisplayMatching(child.getBounds()).scaleFactor
+          child.webContents.send('floral:event:surface-native-double-click', point ? { x: point.x / scale, y: point.y / scale } : null)
+        }
+      },
+      (deltaY) => {
+        if ([...floralSurfaceWindows].some(([key, window]) => key.startsWith('tile:') && window === child)) {
+          child.webContents.send('floral:event:surface-native-wheel', { deltaY })
+        }
+      },
+    )
   }
   child.once('ready-to-show', () => child.show())
   child.on('closed', () => {
@@ -1084,7 +1178,7 @@ ipcMain.handle('floral:invoke', (event, command: string, input?: any, options?: 
   assertFloralSender(event)
   const execute = () => handleFloralInvoke(event, command, input, options)
   if (command === 'config_migrate_data_dir') return floralMigrationGate.migrate(execute)
-  if (/^(notes_|categories_|images_|config_)/.test(command)) return floralMigrationGate.run(execute)
+  if (/^(notes_|categories_|images_|config_|qpaste_clipboard_)/.test(command)) return floralMigrationGate.run(execute)
   return execute()
 })
 
@@ -1254,6 +1348,70 @@ async function handleFloralInvoke(event: Electron.IpcMainInvokeEvent, command: s
       const window = findFloralSurfaceWindow(floralSurfaceWindows.values(), event.sender)
       window?.hide(); result = undefined; break
     }
+    case 'qpaste_clipboard_list': {
+      if (!db) { result = []; break }
+      const limit = Math.min(50, Math.max(1, Number(input?.limit) || 20))
+      const q = String(input?.search ?? '').trim()
+      const binds: Record<string, string | number | null> = { ':limit': limit }
+      let sql = 'SELECT id, type, preview, alias, created_at, storage_size, is_sensitive FROM items'
+      if (q) {
+        const escaped = q.replace(/[\\%_]/g, (m) => '\\' + m)
+        sql += " WHERE (content LIKE :q ESCAPE '\\' OR preview LIKE :q ESCAPE '\\' OR alias LIKE :q ESCAPE '\\' OR tags LIKE :q ESCAPE '\\' OR ocr_text LIKE :q ESCAPE '\\' OR source_app LIKE :q ESCAPE '\\')"
+        binds[':q'] = `%${escaped}%`
+      }
+      sql += ' ORDER BY created_at DESC, id DESC LIMIT :limit'
+      const rows = await runDatabaseTask({ kind: 'query', file: dbPath, sql, bindings: binds })
+      result = await Promise.all(rows.map(async (row) => {
+        const id = Number(row.id)
+        const type = String(row.type ?? 'text')
+        const thumbnail = type === 'image' ? await generateItemThumbnail(id) : ''
+        return {
+          id,
+          type,
+          preview: String(row.preview ?? ''),
+          alias: String(row.alias ?? ''),
+          createdAt: String(row.created_at ?? ''),
+          storageSize: Number(row.storage_size ?? 0),
+          isSensitive: row.is_sensitive === 1,
+          thumbnail,
+        }
+      }))
+      break
+    }
+    case 'qpaste_clipboard_import': {
+      if (!db) throw new Error('剪贴板数据库未就绪')
+      const itemId = Number(input?.itemId)
+      if (!Number.isFinite(itemId)) throw new Error('无效的剪贴板记录 ID')
+      const rows = await runDatabaseTask({
+        kind: 'query',
+        file: dbPath,
+        sql: 'SELECT id, type, content FROM items WHERE id = :id LIMIT 1',
+        bindings: { ':id': itemId },
+      })
+      const row = rows[0]
+      if (!row) throw new Error('剪贴板记录不存在')
+      const type = String(row.type ?? 'text')
+      if (type === 'image') {
+        const noteId = String(input?.noteId ?? '').trim()
+        if (!noteId) throw new Error('外部文件暂不支持直接插入剪贴板图片')
+        const imageData = readItemImageBytes(String(row.content ?? ''))
+        if (!imageData) throw new Error('无法读取剪贴板图片文件')
+        const relPath = await store.saveImage(noteId, imageData.bytes, imageData.ext)
+        result = { kind: 'image', text: `![](${relPath})`, relPath }
+      } else {
+        const fullContent = await runDatabaseTask({ kind: 'content', layout: getStorageLayoutOrThrow(), id: itemId })
+        if (type === 'html') {
+          result = { kind: 'text', text: htmlToText(fullContent) }
+        } else if (type === 'files') {
+          let paths: string[] = []
+          try { paths = JSON.parse(fullContent) } catch { paths = [] }
+          result = { kind: 'text', text: Array.isArray(paths) ? paths.join('\n') : fullContent }
+        } else {
+          result = { kind: 'text', text: fullContent }
+        }
+      }
+      break
+    }
     default: throw new Error(`Unsupported Floral command: ${command}`)
   }
   if (savedNote && store === floralStore) {
@@ -1381,7 +1539,7 @@ ipcMain.handle('db:get-items', (_event, { limit, offset, search, pinnedOnly, sum
   const q = (search || '').trim()
   // 列表查询：图片 content 置空（大文件落盘后按需读取，避免全量 base64 过 IPC）
   let sql =
-    `SELECT id, type, ${summaryOnly ? "''" : "CASE WHEN type = 'image' THEN '' ELSE content END"} AS content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive, sort_order, vault_sort_order FROM items`
+    `SELECT id, type, ${summaryOnly ? "''" : "CASE WHEN type = 'image' THEN '' ELSE content END"} AS content, preview, char_count, storage_size, created_at, is_pinned, pinned_at, alias, tags, is_sensitive, sort_order, vault_sort_order, ocr_text, source_app FROM items`
   const binds: Record<string, any> = { ':limit': limit, ':offset': offset }
   const conditions: string[] = []
   if (ids) {
@@ -1392,7 +1550,7 @@ ipcMain.handle('db:get-items', (_event, { limit, offset, search, pinnedOnly, sum
     // 转义 LIKE 通配符，避免 % _ 被当作通配符
     const escaped = q.replace(/[\\%_]/g, (m) => '\\' + m)
     conditions.push(
-      " (content LIKE :q ESCAPE '\\' OR preview LIKE :q ESCAPE '\\' OR alias LIKE :q ESCAPE '\\' OR tags LIKE :q ESCAPE '\\')"
+      " (content LIKE :q ESCAPE '\\' OR preview LIKE :q ESCAPE '\\' OR alias LIKE :q ESCAPE '\\' OR tags LIKE :q ESCAPE '\\' OR ocr_text LIKE :q ESCAPE '\\' OR source_app LIKE :q ESCAPE '\\')"
     )
     binds[':q'] = `%${escaped}%`
   }
@@ -1429,6 +1587,8 @@ ipcMain.handle('ocr:get-config', () => getOcrConfig())
 ipcMain.handle('db:get-item-content', (_event, id: number) => db
   ? runDatabaseTask({ kind: 'content', layout: getStorageLayoutOrThrow(), id })
   : '')
+
+ipcMain.handle('db:get-item-thumbnail', (_event, id: number) => generateItemThumbnail(id))
 
 /** 大文本落盘阈值：超过则存为 texts/ 磁盘文件，库内只存引用（防库膨胀） */
 async function insertItemDb(item: HistoryItemInput): Promise<HistoryInsertResult | null> {
@@ -1484,7 +1644,7 @@ function nextVaultSortOrder(): number {
 }
 
 /** 入库一条记录（去重置顶 + 裁剪），db:insert-item 与手机推送共用；失败重试请用 insertItemDbWithRetry */
-ipcMain.handle('db:insert-item', async (_event, item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean; source?: 'capture' | 'sync' }) => {
+ipcMain.handle('db:insert-item', async (_event, item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean; sourceApp?: string; source?: 'capture' | 'sync' }) => {
   const inserted = await insertItemDbWithRetry(item)
   // 本地捕获推送到云端；云端拉取的记录（source='sync'）不回推，避免设备间回声
   if (inserted?.id && item.source !== 'sync') {
@@ -1496,6 +1656,7 @@ ipcMain.handle('db:insert-item', async (_event, item: { type: string; content: s
 ipcMain.handle('db:delete-item', (_event, id: number) => {
   if (!db) return false
   db.run('DELETE FROM items WHERE id = :id', { ':id': id })
+  thumbnailCache.delete(id)
   cleanupOrphanImages()
   return true
 })
@@ -1508,6 +1669,7 @@ ipcMain.handle('db:delete-items', (_event, ids: number[]) => {
   try {
     for (const id of clean) {
       db.run('DELETE FROM items WHERE id = :id', { ':id': id })
+      thumbnailCache.delete(id)
     }
     db.run('COMMIT')
   } catch (err) {
@@ -1527,7 +1689,7 @@ ipcMain.handle('db:update-item', (_event, { id, content, preview, charCount, sto
   return true
 })
 
-ipcMain.handle('db:update-item-meta', (_event, params: { id: number; isPinned?: boolean; alias?: string; tags?: string; isSensitive?: boolean }) => {
+ipcMain.handle('db:update-item-meta', (_event, params: { id: number; isPinned?: boolean; alias?: string; tags?: string; isSensitive?: boolean; ocrText?: string }) => {
   if (!db) return false
   const sets: string[] = []
   const binds: Record<string, any> = { ':id': params.id }
@@ -1553,6 +1715,10 @@ ipcMain.handle('db:update-item-meta', (_event, params: { id: number; isPinned?: 
   if (typeof params.isSensitive === 'boolean') {
     sets.push('is_sensitive = :isSensitive')
     binds[':isSensitive'] = params.isSensitive ? 1 : 0
+  }
+  if (typeof params.ocrText === 'string') {
+    sets.push('ocr_text = :ocrText')
+    binds[':ocrText'] = params.ocrText
   }
 
   if (sets.length === 0) return false
@@ -1641,10 +1807,12 @@ ipcMain.handle('force-clear-data', async (_event, type: string) => {
 
     if (type === 'images') {
       db.run("DELETE FROM items WHERE type = 'image' AND is_pinned = 0")
+      thumbnailCache.clear()
       // 清理不再被引用的图片文件
       cleanupOrphanImages()
     } else if (type === 'all') {
       db.run('DELETE FROM items WHERE is_pinned = 0')
+      thumbnailCache.clear()
       cleanupOrphanImages()
       // 注意：不清理系统剪贴板，避免清空用户正在使用的剪贴板内容
     } else {
@@ -1951,6 +2119,74 @@ ipcMain.handle('clipboard:write-files', async (_event, files: string[]) => {
   if (!Array.isArray(files) || !files.length || files.some((file) => typeof file !== 'string' || !path.isAbsolute(file))) return false
   await writeOwnClipboardFiles(files)
   return true
+})
+
+ipcMain.handle('clipboard:paste-to-previous', async () => {
+  return pasteToPreviousWindow(previousForegroundHwnd, mainWindow)
+})
+
+ipcMain.handle('clipboard:save-to-floral', async (_event, payload: {
+  mode: 'new' | 'append'
+  itemId?: number
+  type: string
+  title?: string
+  alias?: string
+  preview?: string
+  text?: string
+  files?: string[]
+}) => {
+  try {
+    return await floralMigrationGate.run(async () => {
+      const store = getFloralStore()
+      const mode = payload?.mode === 'append' ? 'append' : 'new'
+      const type = String(payload?.type ?? 'text')
+      let text = typeof payload?.text === 'string' ? payload.text : undefined
+      let files = Array.isArray(payload?.files) ? payload.files : undefined
+      let image: { bytes: Uint8Array; ext: string } | null = null
+
+      if (type === 'image') {
+        if (text && text.startsWith('data:')) {
+          image = parseImageDataUrl(text)
+        } else if (db && Number.isFinite(payload?.itemId)) {
+          const rows = await runDatabaseTask({
+            kind: 'query',
+            file: dbPath,
+            sql: 'SELECT content FROM items WHERE id = :id LIMIT 1',
+            bindings: { ':id': Number(payload.itemId) },
+          })
+          const raw = String(rows[0]?.content ?? '')
+          image = readItemImageBytes(raw)
+        }
+      } else if (text === undefined && db && Number.isFinite(payload?.itemId)) {
+        text = await runDatabaseTask({ kind: 'content', layout: getStorageLayoutOrThrow(), id: Number(payload.itemId) })
+      }
+
+      if (type === 'files' && !files && text) {
+        try {
+          const parsed = JSON.parse(text)
+          if (Array.isArray(parsed)) files = parsed.map(String)
+        } catch {
+          files = text.split(/\r?\n/).filter(Boolean)
+        }
+      }
+
+      const { note, created } = await saveClipboardToFloralStore(store, {
+        mode,
+        type,
+        title: payload?.title,
+        alias: payload?.alias,
+        preview: payload?.preview,
+        text,
+        files,
+        image,
+      })
+      const { content: _content, ...metadata } = note
+      broadcastFloralEvent(floralSurfaceWindows.values(), mainWindow, 'notes-changed', metadata)
+      return { success: true, noteId: note.id, title: note.title, created }
+    })
+  } catch (err: any) {
+    return { success: false, error: err?.message ?? String(err) }
+  }
 })
 
 // ── 云端同步（WebDAV，多设备）：引擎在 src/main/sync，这里负责桥接本地存储 ──

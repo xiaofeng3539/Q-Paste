@@ -5,8 +5,9 @@ import { ClipboardItem, ItemType } from '../types'
 import { cn, formatGroupLabel, formatRelativeTime } from '../lib/utils'
 import { highlightSegments } from '../lib/search'
 import { getAutoScrollDelta } from '../lib/drag-auto-scroll'
-import { FileText, Link, Image, Search, X, Clock, Star, Pin, FileCode2, FolderOpen } from 'lucide-react'
+import { FileText, Link, Image, Search, X, Clock, Star, Pin, FileCode2, FolderOpen, Monitor, Copy, Trash2, Tag, CheckSquare } from 'lucide-react'
 import { tr } from '../i18n'
+import { MERGE_SEPARATOR_PRESETS, resolveMergeSeparator, type MergeSeparatorPreset } from '../lib/clipboard-actions'
 
 type ActiveTab = 'history' | 'vault'
 
@@ -25,12 +26,17 @@ interface SidebarProps {
   searchQuery: string
   onSearchChange: (query: string) => void
   onSelect: (id: number) => void
+  onDoubleClick?: (item: ClipboardItem) => void
   density: 'comfortable' | 'compact'
   activeTab: ActiveTab
   onTabChange: (tab: ActiveTab) => void
   allTags: string[]
   selectedTag: string | null
   onTagChange: (tag: string | null) => void
+  allSources?: string[]
+  selectedSource?: string | null
+  onSourceChange?: (source: string | null) => void
+  onResetFilters?: () => void
   onReorder: (ordered: ClipboardItem[]) => void
   onVaultReorder: (ordered: ClipboardItem[]) => void
   typeFilter: ItemType | 'all'
@@ -40,10 +46,38 @@ interface SidebarProps {
   onRangeSelect?: (id: number, additive: boolean) => void
   onSelectAll?: () => void
   onClearSelection?: () => void
-  onBatchCopy?: () => void
+  onBatchCopy?: (separator: string) => void
   onBatchPin?: () => void
   onBatchDelete?: () => void
   onBatchAddTag?: (tag: string) => void
+}
+
+const THUMB_CACHE_LIMIT = 240
+const itemThumbCache = new Map<number, string>()
+const itemThumbInflight = new Map<number, Promise<string>>()
+
+function requestItemThumbnail(id: number): Promise<string> {
+  const cached = itemThumbCache.get(id)
+  if (cached) return Promise.resolve(cached)
+  const inflight = itemThumbInflight.get(id)
+  if (inflight) return inflight
+  const getter = typeof window !== 'undefined' ? window.electronAPI?.getItemThumbnail : undefined
+  if (!getter) return Promise.resolve('')
+  const pending = getter(id)
+    .then((url) => {
+      if (url) {
+        itemThumbCache.set(id, url)
+        if (itemThumbCache.size > THUMB_CACHE_LIMIT) {
+          const oldest = itemThumbCache.keys().next().value
+          if (oldest !== undefined) itemThumbCache.delete(oldest)
+        }
+      }
+      return url || ''
+    })
+    .catch(() => '')
+    .finally(() => { itemThumbInflight.delete(id) })
+  itemThumbInflight.set(id, pending)
+  return pending
 }
 
 function typeIcon(type: string) {
@@ -69,18 +103,42 @@ interface SidebarItemProps {
   isCurrent: boolean
   isSelected: boolean
   hasMultiSelection: boolean
+  quickIndex?: number
   searchQuery: string
   fallback: string
   relativeTime: string
   onPointerDown: (id: number, event: ReactPointerEvent<HTMLButtonElement>) => void
   onClick: (id: number, event: ReactMouseEvent<HTMLButtonElement>) => void
+  onDoubleClick: (item: ClipboardItem) => void
   onKeyDown: () => void
 }
 
 const SidebarItem = memo(function SidebarItem({
-  item, itemPy, isVault, isCurrent, isSelected, hasMultiSelection, searchQuery, fallback,
-  relativeTime, onPointerDown, onClick, onKeyDown,
+  item, itemPy, isVault, isCurrent, isSelected, hasMultiSelection, quickIndex, searchQuery, fallback,
+  relativeTime, onPointerDown, onClick, onDoubleClick, onKeyDown,
 }: SidebarItemProps) {
+  const [thumbUrl, setThumbUrl] = useState<string>(() => {
+    if (item.type !== 'image') return ''
+    return itemThumbCache.get(item.id) || (item.content?.startsWith('data:') ? item.content : '')
+  })
+
+  useEffect(() => {
+    if (item.type !== 'image') {
+      setThumbUrl('')
+      return
+    }
+    const existing = itemThumbCache.get(item.id) || (item.content?.startsWith('data:') ? item.content : '')
+    if (existing) {
+      setThumbUrl(existing)
+      return
+    }
+    let cancelled = false
+    void requestItemThumbnail(item.id).then((url) => {
+      if (!cancelled && url) setThumbUrl(url)
+    })
+    return () => { cancelled = true }
+  }, [item.id, item.type, item.content])
+
   const renderHighlighted = (value: string) => {
     if (!searchQuery) return value
     return highlightSegments(value, searchQuery).map((segment, index) => segment.hit
@@ -88,45 +146,83 @@ const SidebarItem = memo(function SidebarItem({
       : <span key={index}>{segment.text}</span>)
   }
 
+  const secondaryText = item.alias && item.preview
+    ? item.preview
+    : item.type === 'image' && item.ocr_text
+      ? item.ocr_text.replace(/\s+/g, ' ').trim()
+      : ''
+
   return (
     <div
       data-id={item.id}
       className={cn(
-        'js-item mb-1 w-full flex items-center gap-2 rounded-lg border border-transparent',
-        itemPy,
+        'js-item mb-1 w-full flex items-center rounded-lg border border-transparent',
         isVault && 'border-l-2 border-l-transparent',
         isVault && !isCurrent && !isSelected && 'rounded-l-none hover:rounded-l-lg',
         !isVault && item.is_pinned && !isCurrent && 'border-l-2 border-l-amber-400 rounded-l-none',
         isCurrent && !hasMultiSelection
           ? isVault
-            ? 'bg-amber-500/10 dark:bg-amber-400/15 text-zinc-900 dark:text-zinc-100'
-            : 'bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] dark:bg-[color-mix(in_srgb,var(--accent)_20%,transparent)] text-zinc-900 dark:text-zinc-100'
+            ? 'bg-amber-500/10 dark:bg-amber-400/15 text-zinc-900 dark:text-zinc-50 font-medium shadow-[inset_0_0_0_1px_rgba(245,158,11,0.35)] dark:shadow-[inset_0_0_0_1px_rgba(251,191,36,0.45)]'
+            : 'bg-[color-mix(in_srgb,var(--accent)_11%,white)] dark:bg-[color-mix(in_srgb,var(--accent)_22%,#1e222b)] text-zinc-900 dark:text-zinc-50 font-medium shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--accent)_32%,transparent)] dark:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--accent)_52%,transparent)]'
           : isSelected
             ? isVault ? 'qp-vault-item-multi-selected' : 'qp-item-multi-selected'
-            : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50',
+            : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800/75',
       )}
     >
       <button
+        type="button"
         onPointerDown={(event) => onPointerDown(item.id, event)}
         onKeyDown={onKeyDown}
         onClick={(event) => onClick(item.id, event)}
-        className={`qp-item-content flex-1 min-w-0 flex items-center gap-2.5 text-left outline-none ${item.alias && item.preview ? 'qp-item-content-two-lines' : ''}`}
+        onDoubleClick={() => onDoubleClick(item)}
+        className={cn(
+          'qp-item-content w-full flex-1 min-w-0 flex items-center gap-2.5 px-2.5 text-left outline-none cursor-pointer rounded-lg',
+          itemPy,
+          secondaryText && 'qp-item-content-two-lines',
+        )}
       >
-        <span className="flex-shrink-0 mt-0.5">
-          {isVault || item.is_pinned ? <Pin className="w-4 h-4 text-amber-500" /> : typeIcon(item.type)}
-        </span>
+        {item.type === 'image' && thumbUrl ? (
+          <span className="relative flex-shrink-0">
+            <img
+              src={thumbUrl}
+              alt=""
+              loading="lazy"
+              className="w-9 h-7 rounded-[5px] object-cover border border-zinc-200 dark:border-zinc-700/80 bg-zinc-100 dark:bg-zinc-900"
+            />
+            {(isVault || item.is_pinned) && (
+              <span className="absolute -top-1 -left-1 w-3.5 h-3.5 rounded-full bg-white dark:bg-zinc-900 flex items-center justify-center shadow-sm ring-1 ring-amber-400/50">
+                <Pin className="w-2.5 h-2.5 text-amber-500" />
+              </span>
+            )}
+          </span>
+        ) : (
+          <span className="flex-shrink-0">
+            {isVault || item.is_pinned ? <Pin className="w-4 h-4 text-amber-500" /> : typeIcon(item.type)}
+          </span>
+        )}
         <span className="flex-1 min-w-0 overflow-hidden text-left">
           <span className="block truncate text-[13px] leading-tight">
             {renderHighlighted(item.alias || item.preview || fallback)}
           </span>
-          {item.alias && item.preview && (
-            <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-600 mt-0.5">
-              {renderHighlighted(item.preview)}
+          {secondaryText && (
+            <span className="block truncate text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">
+              {renderHighlighted(secondaryText)}
             </span>
           )}
         </span>
-        <span aria-hidden={isVault || undefined} className={cn('flex-shrink-0 text-[11px] text-zinc-400 dark:text-zinc-600', isVault && 'invisible')}>
-          {relativeTime}
+        <span className="flex-shrink-0 flex items-center gap-1.5">
+          {quickIndex !== undefined && (
+            <span
+              data-quick-index={quickIndex}
+              title={`Alt+${quickIndex} / Ctrl+${quickIndex}`}
+              className="w-4 h-4 rounded text-[10px] font-mono tabular-nums flex items-center justify-center bg-zinc-100 dark:bg-zinc-800/90 text-zinc-500 dark:text-zinc-400 border border-zinc-200/80 dark:border-zinc-700/70"
+            >
+              {quickIndex}
+            </span>
+          )}
+          <span aria-hidden={isVault || undefined} className={cn('text-[11px] text-zinc-400 dark:text-zinc-500', isVault && 'invisible')}>
+            {relativeTime}
+          </span>
         </span>
       </button>
     </div>
@@ -172,12 +268,17 @@ export default function Sidebar({
   searchQuery,
   onSearchChange,
   onSelect,
+  onDoubleClick,
   density,
   activeTab,
   onTabChange,
   allTags,
   selectedTag,
   onTagChange,
+  allSources,
+  selectedSource,
+  onSourceChange,
+  onResetFilters,
   onReorder,
   onVaultReorder,
   typeFilter,
@@ -195,24 +296,53 @@ export default function Sidebar({
   const groupLanguage = tr('sidebar.earlier')
   const currentMinute = Math.floor(Date.now() / 60_000)
   // 分组拍平为 [表头, 条目...] 交错序列（普通 DOM 渲染，替代虚拟滚动以支持整表拖拽）
-  const flatRows = useMemo(
-    () =>
-      (activeTab === 'vault' ? groupedByTag(items) : groupedItems(items)).flatMap((group) => [
-        { kind: 'header' as const, id: `h_${group.label}`, label: group.label },
-        ...group.items.map((item) => ({
+  const flatRows = useMemo(() => {
+    let itemIndex = 0
+    return (activeTab === 'vault' ? groupedByTag(items) : groupedItems(items)).flatMap((group) => [
+      { kind: 'header' as const, id: `h_${group.label}`, label: group.label },
+      ...group.items.map((item) => {
+        const quickIndex = itemIndex < 9 ? itemIndex + 1 : undefined
+        itemIndex += 1
+        return {
           kind: 'item' as const,
           id: `i_${item.id}`,
           item,
+          quickIndex,
           relativeTime: formatRelativeTime(item.created_at),
-        })),
-      ]),
-    [items, activeTab, groupLanguage, currentMinute],
-  )
-  const itemPy = `py-1.5 ${density === 'compact' ? 'py-0.5' : 'py-3'}`
+        }
+      }),
+    ])
+  }, [items, activeTab, groupLanguage, currentMinute])
+  const itemPy = density === 'compact' ? 'py-1.5' : 'py-3'
   const isVault = activeTab === 'vault'
   const [batchTagDraft, setBatchTagDraft] = useState('')
-  // 历史和金库支持按类型筛选后拖拽。搜索与标签筛选时停用拖拽。
-  const draggable = !searchQuery.trim() && selectedTag === null
+  const [showBatchTagInput, setShowBatchTagInput] = useState(false)
+  const [sepPreset, setSepPreset] = useState<MergeSeparatorPreset>(() => {
+    try {
+      const saved = localStorage.getItem('q-paste-batch-sep-preset')
+      if (saved === 'newline' || saved === 'blankLine' || saved === 'comma' || saved === 'dunhao' || saved === 'space' || saved === 'custom') {
+        return saved
+      }
+    } catch {}
+    return 'newline'
+  })
+  const [customSep, setCustomSep] = useState(() => {
+    try { return localStorage.getItem('q-paste-batch-sep-custom') ?? '' } catch { return '' }
+  })
+  useEffect(() => {
+    try { localStorage.setItem('q-paste-batch-sep-preset', sepPreset) } catch {}
+  }, [sepPreset])
+  useEffect(() => {
+    try { localStorage.setItem('q-paste-batch-sep-custom', customSep) } catch {}
+  }, [customSep])
+  useEffect(() => {
+    if (!selectedIds || selectedIds.size === 0) {
+      setShowBatchTagInput(false)
+      setBatchTagDraft('')
+    }
+  }, [selectedIds])
+  // 历史和金库支持按类型筛选后拖拽。搜索、标签或来源筛选时停用拖拽。
+  const draggable = !searchQuery.trim() && selectedTag === null && !selectedSource
   const hasRows = flatRows.length > 0
 
   // ── SortableJS：历史列表整表拖拽排序 ──
@@ -220,18 +350,25 @@ export default function Sidebar({
   const handledSelectionPointerRef = useRef<number | null>(null)
   const itemsRef = useRef(items)
   itemsRef.current = items
-  const selectionActions = useRef({ onRangeSelect, onToggleSelect, onClearSelection, onSelect, selectedIds })
-  selectionActions.current = { onRangeSelect, onToggleSelect, onClearSelection, onSelect, selectedIds }
+  const selectionActions = useRef({ onRangeSelect, onToggleSelect, onClearSelection, onSelect, onDoubleClick, selectedIds })
+  selectionActions.current = { onRangeSelect, onToggleSelect, onClearSelection, onSelect, onDoubleClick, selectedIds }
 
   const handleItemPointerDown = useCallback((id: number, event: ReactPointerEvent<HTMLButtonElement>) => {
-    const { onRangeSelect, onToggleSelect } = selectionActions.current
+    const { onRangeSelect, onToggleSelect, onClearSelection, onSelect, selectedIds } = selectionActions.current
     handledSelectionPointerRef.current = null
-    if (event.button !== 0 || !(event.shiftKey || event.ctrlKey || event.metaKey)) return
-    event.preventDefault()
-    event.stopPropagation()
+    if (event.button !== 0) return
+    if (event.shiftKey || event.ctrlKey || event.metaKey) {
+      event.preventDefault()
+      event.stopPropagation()
+      handledSelectionPointerRef.current = id
+      if (event.shiftKey) onRangeSelect?.(id, event.ctrlKey || event.metaKey)
+      else onToggleSelect?.(id)
+      return
+    }
+    // 普通左键按下即切换选中，不阻断冒泡以保留 Sortable 拖拽排序。
     handledSelectionPointerRef.current = id
-    if (event.shiftKey) onRangeSelect?.(id, event.ctrlKey || event.metaKey)
-    else onToggleSelect?.(id)
+    if (selectedIds && selectedIds.size > 0) onClearSelection?.()
+    onSelect(id)
   }, [])
 
   const handleItemClick = useCallback((id: number, event: ReactMouseEvent<HTMLButtonElement>) => {
@@ -247,6 +384,10 @@ export default function Sidebar({
       if (selectedIds && selectedIds.size > 0) onClearSelection?.()
       onSelect(id)
     }
+  }, [])
+
+  const handleItemDoubleClick = useCallback((item: ClipboardItem) => {
+    selectionActions.current.onDoubleClick?.(item)
   }, [])
 
   const clearPointerSelection = useCallback(() => { handledSelectionPointerRef.current = null }, [])
@@ -320,6 +461,7 @@ export default function Sidebar({
       draggable: '.js-item',
       forceFallback: true,
       fallbackOnBody: true,
+      fallbackTolerance: 8,
       supportPointer: false,
       scroll: false,
       filter: (event) => {
@@ -396,7 +538,7 @@ export default function Sidebar({
   const emptyFallback = tr('detail.emptyContent')
   const query = searchQuery.trim()
   const listRows = useMemo(() => flatRows.map((row, index) => row.kind === 'header'
-    ? <div key={`${row.id}_${index}`} className="px-3 py-2 text-[11px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
+    ? <div key={`${row.id}_${index}`} className="px-3 pt-3 pb-1.5 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">
         {isVault ? `\u{1F3F7}\uFE0F ${row.label}` : row.label}
       </div>
     : <SidebarItem
@@ -407,31 +549,34 @@ export default function Sidebar({
         isCurrent={selectedId === row.item.id}
         isSelected={selectedIds?.has(row.item.id) ?? false}
         hasMultiSelection={selectedId === row.item.id && Boolean(selectedIds)}
+        quickIndex={row.quickIndex}
         searchQuery={query}
         fallback={row.item.type === 'image' ? imageFallback : emptyFallback}
         relativeTime={row.relativeTime}
         onPointerDown={handleItemPointerDown}
         onClick={handleItemClick}
+        onDoubleClick={handleItemDoubleClick}
         onKeyDown={clearPointerSelection}
       />
-  ), [flatRows, isVault, itemPy, selectedId, selectedIds, query, imageFallback, emptyFallback, handleItemPointerDown, handleItemClick, clearPointerSelection])
+  ), [flatRows, isVault, itemPy, selectedId, selectedIds, query, imageFallback, emptyFallback, handleItemPointerDown, handleItemClick, handleItemDoubleClick, clearPointerSelection])
 
+  const hasFilter = Boolean(query || selectedTag || selectedSource || typeFilter !== 'all')
   const emptyKey = isVault
-    ? (query || selectedTag ? 'sidebar.noResults' : 'sidebar.noVaultRecords')
-    : (query || selectedTag ? 'sidebar.noResults' : 'sidebar.noRecords')
+    ? (hasFilter ? 'sidebar.noResults' : 'sidebar.noVaultRecords')
+    : (hasFilter ? 'sidebar.noResults' : 'sidebar.noRecords')
 
   return (
-    <div className="h-full flex flex-col bg-[#FAFBFC] dark:bg-zinc-900 rounded-2xl border border-zinc-200/60 dark:border-zinc-800/50 shadow-sm overflow-hidden select-none">
+    <div className="h-full flex flex-col qp-panel rounded-2xl overflow-hidden select-none">
       {/* Tab bar */}
       <div className="flex-shrink-0 px-3 pt-5 pb-1">
-        <div className="flex rounded-md bg-zinc-100 dark:bg-zinc-900 p-0.5">
+        <div className="flex rounded-lg bg-zinc-100 ring-1 ring-inset ring-zinc-200 dark:bg-zinc-950/75 dark:ring-zinc-700/60 p-0.5">
           <button
             onClick={() => onTabChange('history')}
             className={cn(
-              'flex-1 flex items-center justify-center gap-1.5 h-7 rounded text-xs transition-colors',
+              'flex-1 flex items-center justify-center gap-1.5 h-7 rounded-md text-xs transition-colors',
               activeTab === 'history'
-                ? 'bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 shadow-sm'
-                : 'text-zinc-500 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300',
+                ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 font-medium shadow-[0_1px_2px_rgba(15,23,42,0.10)] ring-1 ring-zinc-200 dark:ring-zinc-700/80 dark:shadow-sm'
+                : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200',
             )}
           >
             <Clock className="w-3.5 h-3.5" />
@@ -440,10 +585,10 @@ export default function Sidebar({
           <button
             onClick={() => onTabChange('vault')}
             className={cn(
-              'flex-1 flex items-center justify-center gap-1.5 h-7 rounded text-xs transition-colors',
+              'flex-1 flex items-center justify-center gap-1.5 h-7 rounded-md text-xs transition-colors',
               activeTab === 'vault'
-                ? 'bg-white dark:bg-zinc-800 text-amber-600 dark:text-amber-400 shadow-sm'
-                : 'text-zinc-500 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300',
+                ? 'bg-white dark:bg-zinc-800 text-amber-600 dark:text-amber-400 font-medium shadow-[0_1px_2px_rgba(15,23,42,0.10)] ring-1 ring-zinc-200 dark:ring-zinc-700/80 dark:shadow-sm'
+                : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200',
             )}
           >
             <Star className="w-3.5 h-3.5" />
@@ -455,18 +600,18 @@ export default function Sidebar({
       {/* Search bar — 历史与金库视图均显示 */}
       <div className="flex-shrink-0 px-3 pb-2">
         <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400 dark:text-zinc-400" />
           <input
             type="text"
             placeholder={tr('sidebar.search')}
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            className="w-full h-7 pl-7 pr-6 bg-zinc-100 dark:bg-zinc-900 border border-transparent rounded-md text-xs text-zinc-700 dark:text-zinc-300 placeholder-zinc-400 dark:placeholder-zinc-600 outline-none focus:border-zinc-300 dark:focus:border-zinc-700 transition-colors"
+            className="w-full h-7 pl-7 pr-6 bg-zinc-50 dark:bg-zinc-950/60 border border-zinc-200 dark:border-zinc-700/70 rounded-md text-xs text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 dark:placeholder-zinc-500 outline-none focus:bg-white focus:border-[var(--accent)] dark:focus:bg-zinc-950/90 dark:focus:border-[var(--accent)] transition-colors"
           />
           {searchQuery && (
             <button
               onClick={() => onSearchChange('')}
-              className="absolute right-1.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:text-zinc-600 dark:hover:text-zinc-400"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 dark:text-zinc-400 dark:hover:text-zinc-200"
             >
               <X className="w-3 h-3" />
             </button>
@@ -483,8 +628,8 @@ export default function Sidebar({
             className={cn(
               'flex-shrink-0 px-2 py-0.5 rounded-full text-[11px] border transition-colors',
               typeFilter === f.value
-                ? 'bg-[var(--accent)]/15 text-[var(--accent)] border-[var(--accent)]/40'
-                : 'bg-zinc-100 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500 border-transparent hover:text-zinc-600 dark:hover:text-zinc-300'
+                ? 'bg-[var(--accent)]/15 text-[var(--accent)] border-[var(--accent)]/50 font-medium dark:bg-[var(--accent)]/20 dark:border-[var(--accent)]/60'
+                : 'bg-zinc-100 dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700/70 hover:text-zinc-900 hover:border-zinc-300 dark:hover:text-zinc-100 dark:hover:border-zinc-600'
             )}
           >
             {tr(f.label)}
@@ -492,36 +637,82 @@ export default function Sidebar({
         ))}
       </div>
 
-      {/* Tag filter chips */}
-      {allTags.length > 0 && (
-        <div className="flex-shrink-0 px-3 pb-2 flex items-center gap-1 overflow-x-auto">
+      {/* Source app filter chips */}
+      {(() => {
+        const visibleSources = allSources ? [...allSources] : []
+        if (selectedSource && !visibleSources.includes(selectedSource)) visibleSources.unshift(selectedSource)
+        if (!visibleSources.length || !onSourceChange) return null
+        return (
+        <div data-testid="source-filter-bar" className="qp-type-filter-scroll flex-shrink-0 px-3 pb-2 flex items-center gap-1 overflow-x-auto">
           <button
+            type="button"
+            onClick={() => onSourceChange(null)}
+            className={cn(
+              'flex-shrink-0 px-2 py-0.5 rounded-full text-[11px] border transition-colors',
+              !selectedSource
+                ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-700 dark:text-zinc-100 border-zinc-300 dark:border-zinc-600 font-medium'
+                : 'bg-zinc-100 dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700/70 hover:text-zinc-900 hover:border-zinc-300 dark:hover:text-zinc-100 dark:hover:border-zinc-600'
+            )}
+          >
+            {tr('sidebar.sourceAll')}
+          </button>
+          {visibleSources.map((source) => (
+            <button
+              key={source}
+              type="button"
+              onClick={() => onSourceChange(selectedSource === source ? null : source)}
+              className={cn(
+                'flex-shrink-0 px-2 py-0.5 rounded-full text-[11px] border transition-colors inline-flex items-center gap-1',
+                selectedSource === source
+                  ? 'bg-[var(--accent)]/15 text-[var(--accent)] border-[var(--accent)]/50 font-medium dark:bg-[var(--accent)]/20 dark:border-[var(--accent)]/60'
+                  : 'bg-zinc-100 dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700/70 hover:text-zinc-900 hover:border-zinc-300 dark:hover:text-zinc-100 dark:hover:border-zinc-600'
+              )}
+            >
+              <Monitor className="w-2.5 h-2.5 opacity-75" />
+              <span>{source}</span>
+            </button>
+          ))}
+        </div>
+        )
+      })()}
+
+      {/* Tag filter chips */}
+      {(() => {
+        const visibleTags = [...allTags]
+        if (selectedTag && !visibleTags.includes(selectedTag)) visibleTags.unshift(selectedTag)
+        if (!visibleTags.length) return null
+        return (
+        <div data-testid="tag-filter-bar" className="qp-type-filter-scroll flex-shrink-0 px-3 pb-2 flex items-center gap-1 overflow-x-auto">
+          <button
+            type="button"
             onClick={() => onTagChange(null)}
             className={cn(
               'flex-shrink-0 px-2 py-0.5 rounded-full text-[11px] border transition-colors',
               selectedTag === null
-                ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-700 dark:text-zinc-200 border-zinc-300 dark:border-zinc-600'
-                : 'bg-zinc-100 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500 border-transparent hover:text-zinc-600 dark:hover:text-zinc-300'
+                ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-700 dark:text-zinc-100 border-zinc-300 dark:border-zinc-600 font-medium'
+                : 'bg-zinc-100 dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700/70 hover:text-zinc-900 hover:border-zinc-300 dark:hover:text-zinc-100 dark:hover:border-zinc-600'
             )}
           >
             {tr('sidebar.filterAll')}
           </button>
-          {allTags.map((tag) => (
+          {visibleTags.map((tag) => (
             <button
               key={tag}
+              type="button"
               onClick={() => onTagChange(selectedTag === tag ? null : tag)}
               className={cn(
                 'flex-shrink-0 px-2 py-0.5 rounded-full text-[11px] border transition-colors',
                 selectedTag === tag
-                  ? 'bg-[var(--accent)]/15 text-[var(--accent)] border-[var(--accent)]/40'
-                  : 'bg-zinc-100 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500 border-transparent hover:text-zinc-600 dark:hover:text-zinc-300'
+                  ? 'bg-[var(--accent)]/15 text-[var(--accent)] border-[var(--accent)]/50 font-medium dark:bg-[var(--accent)]/20 dark:border-[var(--accent)]/60'
+                  : 'bg-zinc-100 dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700/70 hover:text-zinc-900 hover:border-zinc-300 dark:hover:text-zinc-100 dark:hover:border-zinc-600'
               )}
             >
               {tag}
             </button>
           ))}
         </div>
-      )}
+        )
+      })()}
 
       {hasRows ? (
         <div
@@ -532,8 +723,184 @@ export default function Sidebar({
           {listRows}
         </div>
       ) : (
-        <div className="px-3 py-8 text-center text-xs text-zinc-400 dark:text-zinc-600">
-          {tr(emptyKey)}
+        <div className="flex-1 px-3 py-8 text-center text-xs text-zinc-400 dark:text-zinc-500 flex flex-col items-center gap-2.5">
+          <span>{tr(emptyKey)}</span>
+          {hasFilter && (
+            <button
+              type="button"
+              data-testid="sidebar-reset-filters"
+              onClick={() => {
+                if (onResetFilters) {
+                  onResetFilters()
+                } else {
+                  onSearchChange('')
+                  onTypeFilterChange('all')
+                  onTagChange(null)
+                  onSourceChange?.(null)
+                }
+              }}
+              className="px-2.5 py-1 rounded-full text-[11px] font-medium border border-zinc-300 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-200 hover:border-[var(--accent)] hover:text-[var(--accent)] transition-colors"
+            >
+              {tr('sidebar.resetFilters')}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Multi-select batch action bar (merge copy + pin + tag + delete) */}
+      {selectedIds && selectedIds.size > 0 && (
+        <div
+          data-testid="sidebar-batch-bar"
+          className="flex-shrink-0 border-t border-zinc-200 dark:border-zinc-700/70 bg-zinc-50/95 dark:bg-zinc-900/95 px-2.5 py-2 space-y-1.5"
+        >
+          <div className="flex items-center justify-between gap-1 text-[11px]">
+            <span className="font-medium text-zinc-700 dark:text-zinc-200 tabular-nums">
+              {tr('sidebar.selectedCount', { n: selectedIds.size })}
+            </span>
+            <div className="flex items-center gap-1">
+              {onSelectAll && (
+                <button
+                  type="button"
+                  onClick={onSelectAll}
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 transition-colors"
+                >
+                  <CheckSquare className="w-3 h-3" />
+                  <span>{tr('sidebar.selectAll')}</span>
+                </button>
+              )}
+              {onClearSelection && (
+                <button
+                  type="button"
+                  onClick={onClearSelection}
+                  title={tr('sidebar.clearSelection')}
+                  className="p-0.5 rounded text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200/70 dark:hover:bg-zinc-800 transition-colors"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1 flex-wrap">
+            {MERGE_SEPARATOR_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                data-sep-preset={preset.id}
+                onClick={() => setSepPreset(preset.id)}
+                className={cn(
+                  'px-1.5 py-0.5 rounded text-[10px] border transition-colors',
+                  sepPreset === preset.id
+                    ? 'bg-[var(--accent)]/15 text-[var(--accent)] border-[var(--accent)]/50 font-medium'
+                    : 'bg-white dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700/70 hover:text-zinc-900 dark:hover:text-zinc-100',
+                )}
+              >
+                {tr(preset.labelKey)}
+              </button>
+            ))}
+            <button
+              type="button"
+              data-sep-preset="custom"
+              onClick={() => setSepPreset('custom')}
+              className={cn(
+                'px-1.5 py-0.5 rounded text-[10px] border transition-colors',
+                sepPreset === 'custom'
+                  ? 'bg-[var(--accent)]/15 text-[var(--accent)] border-[var(--accent)]/50 font-medium'
+                  : 'bg-white dark:bg-zinc-800/80 text-zinc-600 dark:text-zinc-300 border-zinc-200 dark:border-zinc-700/70 hover:text-zinc-900 dark:hover:text-zinc-100',
+              )}
+            >
+              {tr('batch.sepCustom')}
+            </button>
+          </div>
+
+          {sepPreset === 'custom' && (
+            <input
+              type="text"
+              value={customSep}
+              onChange={(e) => setCustomSep(e.target.value)}
+              placeholder={tr('batch.sepCustomPlaceholder')}
+              className="w-full h-6 px-2 rounded text-[11px] bg-white dark:bg-zinc-950/70 border border-zinc-200 dark:border-zinc-700 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 outline-none focus:border-[var(--accent)]"
+            />
+          )}
+
+          {showBatchTagInput && onBatchAddTag && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                const tag = batchTagDraft.trim()
+                if (tag) {
+                  onBatchAddTag(tag)
+                  setBatchTagDraft('')
+                  setShowBatchTagInput(false)
+                }
+              }}
+              className="flex items-center gap-1"
+            >
+              <input
+                type="text"
+                value={batchTagDraft}
+                onChange={(e) => setBatchTagDraft(e.target.value)}
+                placeholder={tr('detail.tagPlaceholder')}
+                autoFocus
+                className="flex-1 min-w-0 h-6 px-2 rounded text-[11px] bg-white dark:bg-zinc-950/70 border border-zinc-200 dark:border-zinc-700 text-zinc-800 dark:text-zinc-200 placeholder-zinc-400 outline-none focus:border-[var(--accent)]"
+              />
+              <button
+                type="submit"
+                className="h-6 px-2 rounded text-[11px] font-medium text-white"
+                style={{ background: 'var(--accent)' }}
+              >
+                {tr('dialog.ok')}
+              </button>
+            </form>
+          )}
+
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              data-testid="batch-merge-copy"
+              onClick={() => onBatchCopy?.(resolveMergeSeparator(sepPreset, customSep))}
+              className="flex-1 h-7 px-2 rounded-md text-[11px] font-medium text-white inline-flex items-center justify-center gap-1 shadow-sm hover:opacity-95 transition-opacity"
+              style={{ background: 'var(--accent)' }}
+            >
+              <Copy className="w-3 h-3" />
+              <span>{tr('sidebar.batchCopy')}</span>
+            </button>
+            {onBatchPin && (
+              <button
+                type="button"
+                onClick={onBatchPin}
+                title={tr('sidebar.batchPin')}
+                className="h-7 px-2 rounded-md text-[11px] bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 hover:text-amber-600 dark:hover:text-amber-400 transition-colors"
+              >
+                <Pin className="w-3.5 h-3.5" />
+              </button>
+            )}
+            {onBatchAddTag && (
+              <button
+                type="button"
+                onClick={() => setShowBatchTagInput((v) => !v)}
+                title={tr('sidebar.batchAddTag')}
+                className={cn(
+                  'h-7 px-2 rounded-md text-[11px] border transition-colors',
+                  showBatchTagInput
+                    ? 'bg-[var(--accent)]/15 text-[var(--accent)] border-[var(--accent)]/50'
+                    : 'bg-white dark:bg-zinc-800 border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100',
+                )}
+              >
+                <Tag className="w-3.5 h-3.5" />
+              </button>
+            )}
+            {onBatchDelete && (
+              <button
+                type="button"
+                onClick={onBatchDelete}
+                title={tr('sidebar.batchDelete')}
+                className="h-7 px-2 rounded-md text-[11px] bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 hover:text-rose-600 dark:hover:text-rose-400 transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>

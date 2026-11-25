@@ -11,6 +11,7 @@ export function installFloralNativeDrag(
     on?(event: 'move', callback: () => void): unknown
   },
   onDoubleClick: (point?: { x: number; y: number }) => void,
+  onWheel?: (deltaY: number) => void,
 ): void {
   // CSS app-region delegates moving to Windows. Forward non-client double
   // clicks separately because Chromium does not dispatch DOM events there.
@@ -29,6 +30,16 @@ export function installFloralNativeDrag(
       onDoubleClick({ x: point.x, y: point.y })
     } else previous = point
   })
+  // Chromium swallows WM_MOUSEWHEEL over HTCAPTION (-webkit-app-region: drag).
+  // Forward the wheel delta so pinned tiles can scroll smoothly without losing native drag.
+  if (onWheel) {
+    window.hookWindowMessage(0x020a, (wParam) => {
+      if (wParam.length < 4) return
+      const wheelDelta = wParam.readInt16LE(2)
+      if (!wheelDelta) return
+      onWheel(-(wheelDelta / 120) * 96)
+    })
+  }
 }
 
 /** All values are Electron DIP coordinates, including work areas on scaled displays. */

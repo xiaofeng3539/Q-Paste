@@ -533,7 +533,7 @@
     <div id="chat-box">
         <div class="timestamp">SYS: <span id="time-now"></span></div>
         <div class="message received">
-            <div class="avatar"><img src="__LOGO__" onerror="this.innerText='T'"></div>
+            <div class="avatar"><img src="__LOGO__" alt="Q-Paste" onerror="this.parentElement.textContent='Q'"></div>
             <div class="bubble">
                 <div style="font-weight:900; margin-bottom:4px">SYSTEM READY</div>
                 发送文字、图片或文件到电脑。
@@ -830,7 +830,7 @@
                     const lower = name.toLowerCase();
                     const isPc = name === '电脑' || name === 'PC' || lower === 'pc' || lower === 'tiez';
                     if (isPc) {
-                        return `<div class="avatar"><img src="${TIEZ_LOGO}" alt="Q-Paste"></div>`;
+                        return TIEZ_LOGO ? `<div class="avatar"><img src="${TIEZ_LOGO}" alt="Q-Paste" onerror="this.parentElement.textContent='Q'"></div>` : `<div class="avatar">Q</div>`;
                     }
                     return `<div class="avatar">${name ? escapeHTML(name[0]) : '?'}</div>`;
                 })() : ''}

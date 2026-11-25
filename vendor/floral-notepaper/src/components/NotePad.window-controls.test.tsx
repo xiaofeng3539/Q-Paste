@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
 import { NotePad } from "./NotePad";
+import { Tile } from "./Tile";
 
 describe("快捷便签窗口控件", () => {
   test("标题栏可拖动且标题栏按钮区域不参与拖动", () => {
@@ -18,5 +19,16 @@ describe("快捷便签窗口控件", () => {
 
     expect(markup).toContain('h-full cursor-default electron-drag-region"');
     expect(markup).toContain('electron-no-drag"');
+  });
+
+  test("固定磁贴纯文本链接渲染为可点击的 no-drag 锚点", () => {
+    const markup = renderToStaticMarkup(
+      <Tile content="教程：https://example.com/doc?id=1（请在浏览器打开）" />,
+    );
+
+    expect(markup).toContain('href="https://example.com/doc?id=1"');
+    expect(markup).toContain('data-tile-link="true"');
+    expect(markup).toContain("electron-no-drag");
+    expect(markup).toContain("（请在浏览器打开）");
   });
 });

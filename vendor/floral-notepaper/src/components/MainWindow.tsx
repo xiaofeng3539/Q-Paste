@@ -49,8 +49,13 @@ import type {
   UpdateState,
 } from "../features/update/types";
 import { BackgroundLayer } from "./BackgroundLayer";
+import { ClipboardInsertPopover } from "./ClipboardInsertPopover";
 import { POPUP_VIEWPORT_MARGIN, useViewportPopupPosition } from "./popupPosition";
 import { SlidingButtonGroup } from "./SlidingButtonGroup";
+import {
+  importClipboardItem,
+  type ClipboardHistoryEntry,
+} from "../features/clipboardHistory/api";
 import {
   createNote,
   createCategory,
@@ -85,6 +90,7 @@ import {
   filterNotes,
   formatShortDate,
   formatTime,
+  getCategoryToneClass,
   getDisplayTitle,
   groupNotesByCategory,
   metadataFromNote,
@@ -423,6 +429,7 @@ export function MainWindow({
   );
   const { popupRef: categoryMenuRef, popupPosition: categoryMenuPosition } =
     useViewportPopupPosition(categoryMenu, categoryMenuConfirmDelete);
+  const [clipboardPickerOpen, setClipboardPickerOpen] = useState(false);
   const contentRef = useRef<HTMLTextAreaElement>(null);
   const noteListRef = useRef<HTMLDivElement>(null);
   const draggingNoteRef = useRef<{ id: string; category: string } | null>(null);
@@ -1421,15 +1428,24 @@ export function MainWindow({
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if ((event.ctrlKey || event.metaKey) && event.key === "s") {
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "s") {
         event.preventDefault();
         void saveCurrentNote(true);
+      } else if (
+        (event.ctrlKey || event.metaKey) &&
+        event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === "v" &&
+        selectedId
+      ) {
+        event.preventDefault();
+        setClipboardPickerOpen((prev) => !prev);
       }
     }
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [saveCurrentNote]);
+  }, [saveCurrentNote, selectedId]);
 
   useEffect(() => {
     if (!selectedId || saveState !== "dirty") return undefined;
@@ -1959,6 +1975,62 @@ export function MainWindow({
     setSaveState("dirty");
   };
 
+  const handleInsertFromClipboard = async (entry: ClipboardHistoryEntry) => {
+    if (!selectedId) return;
+    try {
+      const imported = await importClipboardItem(
+        entry.id,
+        isExternal ? undefined : selectedId,
+      );
+      const snippet = imported?.text ?? "";
+      if (!snippet) {
+        showToast("该剪贴板记录为空", "info");
+        setClipboardPickerOpen(false);
+        return;
+      }
+      const textarea = contentRef.current;
+      if (textarea && !textarea.disabled) {
+        const start = textarea.selectionStart ?? textarea.value.length;
+        const end = textarea.selectionEnd ?? start;
+        const previousScrollTop = textarea.scrollTop;
+        const nextValue =
+          textarea.value.slice(0, start) + snippet + textarea.value.slice(end);
+        textarea.focus();
+        textarea.setSelectionRange(start, end);
+        const insertedViaCommand = document.execCommand("insertText", false, snippet);
+        if (!insertedViaCommand || textarea.value !== nextValue) {
+          setContent(nextValue);
+        } else {
+          setContent(textarea.value);
+        }
+        markDirty();
+        const nextCursor = start + snippet.length;
+        requestAnimationFrame(() => {
+          textarea.setSelectionRange(nextCursor, nextCursor);
+          textarea.scrollTop = previousScrollTop;
+        });
+      } else {
+        const current = contentValueRef.current;
+        const separator = current.trim() ? "\n\n" : "";
+        setContent(current.replace(/\s+$/, "") + separator + snippet);
+        markDirty();
+        if (viewMode === "preview") {
+          setViewMode("split");
+        }
+      }
+      setClipboardPickerOpen(false);
+      showToast(
+        imported.kind === "image" ? "已插入剪贴板图片" : "已插入剪贴板内容",
+        "info",
+      );
+    } catch (error) {
+      showToast(
+        error instanceof Error ? error.message : "插入剪贴板内容失败",
+        "error",
+      );
+    }
+  };
+
   const ensureNoteSaved = useCallback(async (): Promise<string | null> => {
     if (selectedId) return selectedId;
     try {
@@ -2384,7 +2456,7 @@ export function MainWindow({
       <div className="relative noise-bg bg-cloud overflow-hidden flex flex-col flex-1">
         <BackgroundLayer config={settingsConfig} />
         <div
-          className={`relative z-10 flex items-center justify-between h-11 bg-paper/55 backdrop-blur-[1px] border-b border-paper-deep/30 shrink-0 select-none cursor-default electron-drag-region ${
+          className={`relative z-10 flex items-center justify-between h-11 bg-paper/85 backdrop-blur-[1px] border-b border-paper-deep/60 shrink-0 select-none cursor-default electron-drag-region ${
             isMacOS ? "pl-20 pr-5" : "pl-5 pr-0"
           }`}
           onMouseDown={handleTitleBarMouseDown}
@@ -2397,7 +2469,7 @@ export function MainWindow({
           <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
-              className="electron-no-drag rounded-sm text-[15px] font-serif font-medium text-ink-soft tracking-wide leading-none cursor-pointer hover:text-bamboo focus-visible:outline focus-visible:outline-1 focus-visible:outline-bamboo"
+              className="electron-no-drag rounded-sm text-[15px] font-serif font-medium text-ink tracking-wide leading-none cursor-pointer hover:text-bamboo focus-visible:outline focus-visible:outline-1 focus-visible:outline-bamboo"
               title="切换到 Q-Paste"
               aria-label="切换到 Q-Paste"
               onMouseDown={(event) => event.stopPropagation()}
@@ -2417,7 +2489,7 @@ export function MainWindow({
           <div className="flex items-center electron-no-drag">
             <button
               onClick={() => void handleOpenNotepad()}
-              className="w-10 h-11 flex items-center justify-center text-ink-ghost hover:text-bamboo hover:bg-bamboo-mist/50 transition-all cursor-pointer"
+              className="w-10 h-11 flex items-center justify-center text-ink-faint hover:text-bamboo hover:bg-bamboo-mist/70 transition-all cursor-pointer"
               title={t("main.window.quickNotepad", { defaultValue: "快捷便签" })}
             >
               <svg
@@ -2436,7 +2508,7 @@ export function MainWindow({
             </button>
             <button
               onClick={() => void handleOpenSettings()}
-              className="w-10 h-11 flex items-center justify-center text-ink-ghost hover:text-ink-faint hover:bg-paper-warm transition-all cursor-pointer"
+              className="w-10 h-11 flex items-center justify-center text-ink-faint hover:text-ink hover:bg-paper-warm transition-all cursor-pointer"
               title={t("main.window.settings", { defaultValue: "设置" })}
             >
               <svg
@@ -2455,7 +2527,7 @@ export function MainWindow({
             </button>
             <button
               onClick={handleOpenAbout}
-              className={`h-11 flex items-center justify-center overflow-hidden text-ink-ghost hover:text-ink-faint hover:bg-paper-warm transition-[width,padding,gap,background-color,color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] cursor-pointer ${
+              className={`h-11 flex items-center justify-center overflow-hidden text-ink-faint hover:text-ink hover:bg-paper-warm transition-[width,padding,gap,background-color,color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] cursor-pointer ${
                 aboutButtonExpanded ? "w-[72px] gap-1.5 px-3" : "w-10 gap-0 px-0"
               }`}
               title={aboutButtonTitle}
@@ -2510,11 +2582,11 @@ export function MainWindow({
 
             {!isMacOS && (
               <>
-                <div className="w-px h-4 bg-paper-deep/30 mx-0.5" />
+                <div className="w-px h-4 bg-paper-deep/65 mx-0.5" />
 
                 <button
                   onClick={handleMinimize}
-                  className="w-11 h-11 flex items-center justify-center text-ink-ghost hover:text-ink-soft hover:bg-paper-warm transition-all cursor-pointer"
+                  className="w-11 h-11 flex items-center justify-center text-ink-faint hover:text-ink hover:bg-paper-warm transition-all cursor-pointer"
                   title={t("main.window.minimize", { defaultValue: "最小化" })}
                 >
                   <svg width="12" height="12" viewBox="0 0 12 12">
@@ -2523,7 +2595,7 @@ export function MainWindow({
                 </button>
                 <button
                   onClick={handleMaximize}
-                  className="w-11 h-11 flex items-center justify-center text-ink-ghost hover:text-ink-soft hover:bg-paper-warm transition-all cursor-pointer"
+                  className="w-11 h-11 flex items-center justify-center text-ink-faint hover:text-ink hover:bg-paper-warm transition-all cursor-pointer"
                   title={
                     isMaximized
                       ? t("main.window.restore", { defaultValue: "还原" })
@@ -2557,7 +2629,7 @@ export function MainWindow({
                 </button>
                 <button
                   onClick={handleClose}
-                  className="w-11 h-11 flex items-center justify-center text-ink-ghost hover:text-red-500 hover:bg-danger-bg transition-all cursor-pointer"
+                  className="w-11 h-11 flex items-center justify-center text-ink-faint hover:text-red-600 hover:bg-danger-bg transition-all cursor-pointer"
                   title={t("main.window.close", { defaultValue: "关闭" })}
                 >
                   <svg
@@ -2579,12 +2651,12 @@ export function MainWindow({
 
         <div className="relative z-10 flex flex-1 min-h-0">
           <div
-            className="border-r border-paper-deep/30 bg-paper/40 shrink-0 overflow-hidden transition-[width] duration-[600ms]"
+            className="border-r border-paper-deep/60 bg-paper/80 shrink-0 overflow-hidden transition-[width] duration-[600ms]"
             style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}
           >
             <div className="flex flex-col h-full" style={{ width: `${sidebarWidth}px` }}>
               <div className="px-3 pt-3 pb-2 shrink-0">
-                <div className="flex items-center gap-2 px-2.5 h-8 rounded-lg bg-paper-warm/80 border border-paper-deep/40 focus-within:border-bamboo/30 focus-within:bg-cloud transition-all">
+                <div className="flex items-center gap-2 px-2.5 h-8 rounded-lg bg-paper-warm/90 border border-paper-deep/65 focus-within:border-bamboo/55 focus-within:bg-cloud transition-all">
                   <svg
                     width="13"
                     height="13"
@@ -2593,7 +2665,7 @@ export function MainWindow({
                     stroke="currentColor"
                     strokeWidth="2.5"
                     strokeLinecap="round"
-                    className="text-ink-ghost shrink-0"
+                    className="text-ink-faint shrink-0"
                   >
                     <circle cx="11" cy="11" r="8" />
                     <path d="m21 21-4.35-4.35" />
@@ -2603,12 +2675,12 @@ export function MainWindow({
                     value={searchQuery}
                     onChange={(event) => setSearchQuery(event.target.value)}
                     placeholder={t("main.sidebar.searchPlaceholder", { defaultValue: "搜索笔记…" })}
-                    className="flex-1 text-[12px] font-body text-ink placeholder:text-ink-ghost/60 bg-transparent"
+                    className="flex-1 text-[12px] font-body text-ink placeholder:text-ink-ghost/85 bg-transparent"
                   />
                   {searchQuery && (
                     <button
                       onClick={() => setSearchQuery("")}
-                      className="text-ink-ghost hover:text-ink-faint transition-colors cursor-pointer"
+                      className="text-ink-faint hover:text-ink transition-colors cursor-pointer"
                       title={t("main.sidebar.clearSearch", { defaultValue: "清空搜索" })}
                     >
                       <svg
@@ -2630,7 +2702,7 @@ export function MainWindow({
               <div className="px-3 pb-2 shrink-0 space-y-1">
                 <button
                   onClick={handleNewNote}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[12px] font-body text-bamboo hover:bg-bamboo-mist/60 transition-all cursor-pointer group"
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[12px] font-body font-medium text-bamboo hover:bg-bamboo-mist/80 transition-all cursor-pointer group"
                 >
                   <svg
                     width="13"
@@ -2648,7 +2720,7 @@ export function MainWindow({
                 </button>
                 <button
                   onClick={() => void handleImportNote()}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[12px] font-body text-ink-faint hover:text-bamboo hover:bg-bamboo-mist/50 transition-all cursor-pointer group"
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[12px] font-body text-ink-soft hover:text-bamboo hover:bg-bamboo-mist/70 transition-all cursor-pointer group"
                 >
                   <svg
                     width="13"
@@ -2669,7 +2741,7 @@ export function MainWindow({
               </div>
 
               <div className="flex items-center justify-between px-5 pb-1.5 shrink-0">
-                <span className="text-[10px] text-ink-ghost font-mono tracking-wider uppercase">
+                <span className="text-[10px] text-ink-faint font-mono tracking-wider uppercase">
                   {multiSelectedNoteIds.size > 0
                     ? t("main.sidebar.selectedNoteCount", {
                         count: multiSelectedNoteIds.size,
@@ -2694,7 +2766,7 @@ export function MainWindow({
                         setMultiSelectedNoteIds(new Set());
                         selectionAnchorRef.current = null;
                       }}
-                      className="text-[10px] text-ink-ghost hover:text-ink-faint transition-colors cursor-pointer"
+                      className="text-[10px] text-ink-faint hover:text-ink transition-colors cursor-pointer"
                       title={t("main.sidebar.clearNoteSelection", { defaultValue: "清除多选" })}
                     >
                       ×
@@ -2709,7 +2781,7 @@ export function MainWindow({
                       }
                       setShowCategoryInput(true);
                     }}
-                    className="text-[10px] text-ink-ghost hover:text-bamboo transition-colors cursor-pointer"
+                    className="text-[10px] text-ink-faint hover:text-bamboo transition-colors cursor-pointer"
                     title={t("main.category.new", { defaultValue: "新建分类" })}
                   >
                     <svg
@@ -2743,7 +2815,7 @@ export function MainWindow({
                     }}
                     onBlur={() => void handleCreateCategory()}
                     placeholder={t("main.category.placeholder", { defaultValue: "输入分类名…" })}
-                    className="w-full px-2.5 h-7 rounded-lg text-[12px] font-body text-ink bg-paper-warm/80 border border-paper-deep/40 focus:border-bamboo/30 placeholder:text-ink-ghost/60"
+                    className="w-full px-2.5 h-7 rounded-lg text-[12px] font-body text-ink bg-paper-warm/90 border border-paper-deep/65 focus:border-bamboo/55 placeholder:text-ink-ghost/85"
                   />
                 </div>
               )}
@@ -2753,10 +2825,10 @@ export function MainWindow({
                 tabIndex={0}
                 className="flex-1 overflow-y-auto px-2 pb-2 outline-none"
               >
-                <div className="space-y-0.5">
+                <div className="space-y-1">
                   {externalFiles.length > 0 && (
                     <>
-                      <div className="px-3 py-1.5 text-[10px] text-ink-ghost/50 font-mono tracking-wider uppercase">
+                      <div className="px-3 py-1.5 text-[10px] text-ink-faint font-mono tracking-wider uppercase">
                         {t("main.externalFiles.title", { defaultValue: "外部文件" })}
                       </div>
                       {externalFiles.map((file) => {
@@ -2771,22 +2843,22 @@ export function MainWindow({
                             onMouseLeave={() => setHoveredId(null)}
                             className={`w-full text-left rounded-xl px-3 py-2.5 transition-all duration-[600ms] cursor-pointer group relative ${
                               isSelected
-                                ? "bg-bamboo-mist/70"
+                                ? "bg-bamboo-mist/90 ring-1 ring-bamboo/20"
                                 : isHovered
-                                  ? "bg-paper-warm/70"
+                                  ? "bg-paper-warm/80"
                                   : "bg-transparent"
                             }`}
                           >
                             <div
-                              className={`absolute left-0 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full bg-bamboo/60 transition-all duration-[600ms] ${
+                              className={`absolute left-0 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full bg-bamboo transition-all duration-[600ms] ${
                                 isSelected ? "h-5 opacity-100" : "h-0 opacity-0"
                               }`}
                             />
 
                             <div className="flex items-baseline justify-between mb-0.5">
                               <span
-                                className={`text-[13px] font-display font-medium truncate pr-2 transition-colors flex items-center gap-1.5 ${
-                                  isSelected ? "text-bamboo" : "text-ink-soft"
+                                className={`text-[13px] font-display truncate pr-2 transition-colors flex items-center gap-1.5 ${
+                                  isSelected ? "text-bamboo font-semibold" : "text-ink font-medium"
                                 }`}
                               >
                                 <svg
@@ -2798,7 +2870,7 @@ export function MainWindow({
                                   strokeWidth="2"
                                   strokeLinecap="round"
                                   strokeLinejoin="round"
-                                  className="shrink-0 opacity-60"
+                                  className="shrink-0 opacity-75"
                                 >
                                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                                   <polyline points="14 2 14 8 20 8" />
@@ -2810,7 +2882,7 @@ export function MainWindow({
                                   e.stopPropagation();
                                   handleRemoveExternalFile(file.id);
                                 }}
-                                className="opacity-0 group-hover:opacity-100 text-ink-ghost hover:text-red-400 transition-all p-0.5"
+                                className="opacity-0 group-hover:opacity-100 text-ink-faint hover:text-red-500 transition-all p-0.5"
                                 title={t("main.externalFiles.remove", {
                                   defaultValue: "从列表移除",
                                 })}
@@ -2830,7 +2902,7 @@ export function MainWindow({
                               </button>
                             </div>
 
-                            <p className="text-[11px] text-ink-ghost leading-relaxed line-clamp-2 group-hover:text-ink-faint transition-colors pl-[18px]">
+                            <p className="text-[11px] text-ink-faint leading-relaxed line-clamp-2 group-hover:text-ink-soft transition-colors pl-[18px]">
                               {file.filePath}
                             </p>
                           </button>
@@ -2839,235 +2911,25 @@ export function MainWindow({
                     </>
                   )}
 
-                  {categoryGroups.map((group: CategoryGroup) => {
-                    if (!group.category) {
-                      return (
-                        <div
-                          key="__uncategorized__"
-                          className={`rounded-lg transition-all duration-200 ${
-                            dragOverCategory === "" ? "bg-bamboo/10 ring-1 ring-bamboo/20" : ""
-                          }`}
-                          onDragOver={(e) => {
-                            e.preventDefault();
-                            e.dataTransfer.dropEffect = "move";
-                            setDragOverCategory("");
-                          }}
-                          onDragLeave={(e) => {
-                            if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-                              setDragOverCategory(null);
-                            }
-                          }}
-                          onDrop={(e) => {
-                            e.preventDefault();
-                            setDragOverCategory(null);
-                            const noteId = e.dataTransfer.getData("text/plain");
-                            if (noteId) void handleDropNote(noteId, "", e.currentTarget);
-                          }}
-                        >
-                          {group.notes.map((note) => {
-                            const isSelected = isNoteSelectedInList(
-                              note.id,
-                              selectedId,
-                              multiSelectedNoteIds,
-                              pendingNoteSelectionId,
-                            );
-                            const isMultiSelected = multiSelectedNoteIds.has(note.id);
-                            const isHovered = note.id === hoveredId;
-                            return (
-                              <div
-                                key={note.id}
-                                data-note-selection-item="true"
-                                data-note-id={note.id}
-                                data-multi-selected={isMultiSelected || undefined}
-                                draggable
-                                onMouseDown={(e) => {
-                                  handledNoteMouseDownRef.current = null;
-                                  if (!canStartNoteDrag(e) && e.button === 0) {
-                                    e.preventDefault();
-                                    handledNoteMouseDownRef.current = note.id;
-                                    handleNoteListItemClick(note.id, e);
-                                  }
-                                }}
-                                onDragStart={(e) => {
-                                  if (handledNoteMouseDownRef.current === note.id || !canStartNoteDrag(e)) {
-                                    e.preventDefault();
-                                    return;
-                                  }
-                                  e.dataTransfer.setData("text/plain", note.id);
-                                  e.dataTransfer.effectAllowed = "move";
-                                  draggingNoteRef.current = { id: note.id, category: note.category };
-                                  lastDragHoverIdRef.current = null;
-                                  noteDropHandledRef.current = false;
-                                }}
-                                onDragEnter={(e) => handleNoteDragEnter(e.currentTarget, note.id, note.category)}
-                                onDragLeave={(e) => {
-                                  if (!e.currentTarget.contains(e.relatedTarget as Node) && lastDragHoverIdRef.current === note.id) {
-                                    lastDragHoverIdRef.current = null;
-                                  }
-                                }}
-                                onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                                onDrop={(e) => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  const noteId = e.dataTransfer.getData("text/plain");
-                                  if (noteId) void handleDropNote(noteId, note.category, e.currentTarget.parentElement);
-                                }}
-                                onDragEnd={handleNoteDragEnd}
-                                onClick={(event) => {
-                                  if (handledNoteMouseDownRef.current === note.id) {
-                                    handledNoteMouseDownRef.current = null;
-                                    return;
-                                  }
-                                  handleNoteListItemClick(note.id, event);
-                                }}
-                                onContextMenu={(event) => handleOpenNoteMenu(event, note.id)}
-                                onMouseEnter={() => setHoveredId(note.id)}
-                                onMouseLeave={() => setHoveredId(null)}
-                                className={`w-full text-left rounded-xl px-3 py-2.5 select-none transition-[background-color,box-shadow] duration-150 ease-out cursor-pointer group relative ${
-                                  isMultiSelected
-                                    ? "bg-bamboo-mist/70 ring-1 ring-bamboo/35"
-                                    : isSelected
-                                      ? "bg-bamboo-mist/70"
-                                    : isHovered
-                                      ? "bg-paper-warm/70"
-                                      : "bg-transparent"
-                                }`}
-                              >
-                                <div
-                                  className={`absolute left-0 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full bg-bamboo/60 transition-[height,opacity] duration-150 ease-out ${
-                                    isSelected ? "h-5 opacity-100" : "h-0 opacity-0"
-                                  }`}
-                                />
-                                <div className="flex items-baseline justify-between mb-0.5">
-                                  <span
-                                    className={`text-[13px] font-display font-medium truncate pr-2 transition-colors ${
-                                      isSelected ? "text-bamboo" : "text-ink-soft"
-                                    }`}
-                                  >
-                                    {getDisplayTitle(note, t)}
-                                  </span>
-                                  <span className="text-[10px] text-ink-ghost font-mono tabular-nums shrink-0">
-                                    {formatShortDate(note.updatedAt)}
-                                  </span>
-                                </div>
-                                <p className="text-[11px] text-ink-ghost leading-relaxed line-clamp-2 group-hover:text-ink-faint transition-colors">
-                                  {note.preview ||
-                                    t("common.blankNote", { defaultValue: "空白笔记" })}
-                                </p>
-                                <div className="flex items-center gap-2 mt-1">
-                                  <span className="text-[10px] text-ink-ghost/60 font-mono tabular-nums">
-                                    {formatTime(note.updatedAt)}
-                                  </span>
-                                  <span className="text-[10px] text-ink-ghost/40">·</span>
-                                  <span className="text-[10px] text-ink-ghost/60 font-mono tabular-nums">
-                                    {t("common.wordCount", {
-                                      count: note.wordCount,
-                                      defaultValue: "{{count}} 字",
-                                    })}
-                                  </span>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      );
-                    }
+                  {(() => {
+                    const hasNamedCategories = categoryGroups.some((g) => Boolean(g.category));
+                    let namedCategoryIdx = 0;
 
-                    const isCollapsed = collapsedCategories.has(group.category);
-
-                    return (
-                      <div key={group.category} className="px-2 mb-0.5">
-                        <div
-                          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg group/cat cursor-pointer select-none transition-all duration-200 ${
-                            dragOverCategory === group.category
-                              ? "bg-bamboo/15 border border-bamboo/40 ring-1 ring-bamboo/20"
-                              : isCollapsed
-                                ? "bg-transparent border border-bamboo/15"
-                                : "bg-bamboo/8 border border-bamboo/15 rounded-b-none"
-                          }`}
-                          onClick={() => toggleCategoryCollapse(group.category)}
-                          onContextMenu={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setCategoryMenu({
-                              x: e.clientX,
-                              y: e.clientY,
-                              category: group.category,
-                            });
-                            setCategoryMenuClosing(false);
-                            setCategoryMenuConfirmDelete(false);
-                          }}
-                          onDragOver={(e) => {
-                            e.preventDefault();
-                            e.dataTransfer.dropEffect = "move";
-                            setDragOverCategory(group.category);
-                          }}
-                          onDragLeave={() => setDragOverCategory(null)}
-                          onDrop={(e) => {
-                            e.preventDefault();
-                            setDragOverCategory(null);
-                            const noteId = e.dataTransfer.getData("text/plain");
-                            if (noteId) void handleDropNote(noteId, group.category, null);
-                          }}
-                        >
-                          <svg
-                            width="10"
-                            height="10"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2.5"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            className={`text-bamboo/50 shrink-0 transition-transform duration-200 ${isCollapsed ? "" : "rotate-90"}`}
-                          >
-                            <polyline points="9 18 15 12 9 6" />
-                          </svg>
-                          <svg
-                            width="12"
-                            height="12"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            className="text-bamboo/50 shrink-0"
-                          >
-                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                          </svg>
-                          {renamingCategory === group.category ? (
-                            <input
-                              type="text"
-                              autoFocus
-                              value={renameCategoryValue}
-                              onChange={(e) => setRenameCategoryValue(e.target.value)}
-                              onKeyDown={(e) => {
-                                e.stopPropagation();
-                                if (e.key === "Enter") void handleRenameCategory(group.category);
-                                if (e.key === "Escape") setRenamingCategory(null);
-                              }}
-                              onBlur={() => void handleRenameCategory(group.category)}
-                              onClick={(e) => e.stopPropagation()}
-                              className="flex-1 min-w-0 px-1 text-[10px] font-mono text-ink bg-paper-warm/80 border border-bamboo/30 rounded"
-                            />
-                          ) : (
-                            <span className="text-[11px] text-bamboo/70 font-medium truncate">
-                              {group.category}
-                            </span>
-                          )}
-                          <span className="text-[9px] text-bamboo/40 font-mono ml-auto shrink-0">
-                            {group.notes.length}
-                          </span>
-                        </div>
-
-                        <div className={`category-body ${isCollapsed ? "" : "expanded"}`}>
+                    return categoryGroups.map((group: CategoryGroup) => {
+                      if (!group.category) {
+                        return (
                           <div
-                            className="category-body-inner bg-bamboo/[0.03] border border-t-0 border-bamboo/10 rounded-b-lg pb-1 pt-1"
+                            key="__uncategorized__"
+                            data-testid="uncategorized-note-group"
+                            className={`rounded-xl transition-all duration-200 ${
+                              hasNamedCategories ? "mt-2.5 pt-1" : ""
+                            } ${
+                              dragOverCategory === "" ? "bg-bamboo/10 ring-1 ring-bamboo/30" : ""
+                            }`}
                             onDragOver={(e) => {
                               e.preventDefault();
                               e.dataTransfer.dropEffect = "move";
-                              setDragOverCategory(group.category);
+                              setDragOverCategory("");
                             }}
                             onDragLeave={(e) => {
                               if (!e.currentTarget.contains(e.relatedTarget as Node)) {
@@ -3078,15 +2940,46 @@ export function MainWindow({
                               e.preventDefault();
                               setDragOverCategory(null);
                               const noteId = e.dataTransfer.getData("text/plain");
-                              if (noteId) void handleDropNote(noteId, group.category, e.currentTarget);
+                              const listEl =
+                                e.currentTarget.querySelector<HTMLElement>("[data-note-list]") ??
+                                e.currentTarget;
+                              if (noteId) void handleDropNote(noteId, "", listEl);
                             }}
                           >
-                            {group.notes.length === 0 ? (
-                              <div className="px-3 py-3 text-center text-[11px] text-ink-ghost/50">
-                                {t("main.category.emptyFolder", { defaultValue: "空文件夹" })}
+                            {hasNamedCategories && (
+                              <div
+                                data-testid="uncategorized-section-header"
+                                className="flex items-center gap-2 px-2 pb-2 select-none"
+                              >
+                                <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold tracking-wider text-ink-faint uppercase shrink-0">
+                                  <svg
+                                    width="11"
+                                    height="11"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2.1"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    className="opacity-80"
+                                  >
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                    <polyline points="14 2 14 8 20 8" />
+                                    <line x1="8" y1="13" x2="16" y2="13" />
+                                    <line x1="8" y1="17" x2="13" y2="17" />
+                                  </svg>
+                                  <span>
+                                    {t("main.category.uncategorized", { defaultValue: "未分类" })}
+                                  </span>
+                                  <span className="px-1.5 py-0.5 rounded-full bg-paper-warm text-ink-faint font-mono text-[9px] tabular-nums leading-none">
+                                    {group.notes.length}
+                                  </span>
+                                </span>
+                                <div className="flex-1 h-px bg-paper-deep/60" />
                               </div>
-                            ) : (
-                              group.notes.map((note) => {
+                            )}
+                            <div data-note-list="uncategorized" className="space-y-1.5 px-1">
+                              {group.notes.map((note) => {
                                 const isSelected = isNoteSelectedInList(
                                   note.id,
                                   selectedId,
@@ -3095,7 +2988,6 @@ export function MainWindow({
                                 );
                                 const isMultiSelected = multiSelectedNoteIds.has(note.id);
                                 const isHovered = note.id === hoveredId;
-
                                 return (
                                   <div
                                     key={note.id}
@@ -3146,47 +3038,59 @@ export function MainWindow({
                                     onContextMenu={(event) => handleOpenNoteMenu(event, note.id)}
                                     onMouseEnter={() => setHoveredId(note.id)}
                                     onMouseLeave={() => setHoveredId(null)}
-                                    className={`w-full text-left rounded-lg mx-1 px-2.5 py-2 select-none transition-[background-color,box-shadow] duration-150 ease-out cursor-pointer group relative ${
+                                    className={`w-full text-left rounded-xl px-3 py-2.5 select-none transition-[background-color,border-color,box-shadow] duration-150 ease-out cursor-pointer group relative ${
                                       isMultiSelected
-                                        ? "bg-bamboo-mist/70 ring-1 ring-bamboo/35"
+                                        ? "bg-bamboo-mist/95 border border-bamboo/50 ring-1 ring-bamboo/40"
                                         : isSelected
-                                          ? "bg-bamboo-mist/70"
-                                        : isHovered
-                                          ? "bg-paper-warm/70"
-                                          : "bg-transparent"
+                                          ? "bg-bamboo-mist/95 border border-bamboo/45 ring-1 ring-bamboo/20 shadow-[0_1px_3px_var(--color-shadow)]"
+                                          : isHovered
+                                            ? "floral-uncat-note-card shadow-[0_1px_2px_var(--color-shadow)]"
+                                            : "floral-uncat-note-card"
                                     }`}
-                                    style={{ width: "calc(100% - 8px)" }}
                                   >
                                     <div
-                                      className={`absolute left-0 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full bg-bamboo/60 transition-[height,opacity] duration-150 ease-out ${
+                                      className={`absolute left-0 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full bg-bamboo transition-[height,opacity] duration-150 ease-out ${
                                         isSelected ? "h-5 opacity-100" : "h-0 opacity-0"
                                       }`}
                                     />
-
-                                    <div className="flex items-baseline justify-between mb-0.5">
+                                    <div className="flex items-center justify-between gap-2 mb-0.5">
                                       <span
-                                        className={`text-[13px] font-display font-medium truncate pr-2 transition-colors ${
-                                          isSelected ? "text-bamboo" : "text-ink-soft"
+                                        className={`text-[13px] font-display truncate transition-colors flex items-center gap-1.5 min-w-0 ${
+                                          isSelected ? "text-bamboo font-semibold" : "text-ink font-medium"
                                         }`}
                                       >
-                                        {getDisplayTitle(note, t)}
+                                        <svg
+                                          width="11"
+                                          height="11"
+                                          viewBox="0 0 24 24"
+                                          fill="none"
+                                          stroke="currentColor"
+                                          strokeWidth="2"
+                                          strokeLinecap="round"
+                                          strokeLinejoin="round"
+                                          className={`shrink-0 ${
+                                            isSelected ? "text-bamboo/90" : "text-ink-ghost/85"
+                                          }`}
+                                        >
+                                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                          <polyline points="14 2 14 8 20 8" />
+                                        </svg>
+                                        <span className="truncate">{getDisplayTitle(note, t)}</span>
                                       </span>
-                                      <span className="text-[10px] text-ink-ghost font-mono tabular-nums shrink-0">
+                                      <span className="text-[10px] text-ink-faint font-mono tabular-nums shrink-0">
                                         {formatShortDate(note.updatedAt)}
                                       </span>
                                     </div>
-
-                                    <p className="text-[11px] text-ink-ghost leading-relaxed line-clamp-2 group-hover:text-ink-faint transition-colors">
+                                    <p className="text-[11px] text-ink-faint leading-relaxed line-clamp-2 group-hover:text-ink-soft transition-colors">
                                       {note.preview ||
                                         t("common.blankNote", { defaultValue: "空白笔记" })}
                                     </p>
-
                                     <div className="flex items-center gap-2 mt-1">
-                                      <span className="text-[10px] text-ink-ghost/60 font-mono tabular-nums">
+                                      <span className="text-[10px] text-ink-ghost font-mono tabular-nums">
                                         {formatTime(note.updatedAt)}
                                       </span>
-                                      <span className="text-[10px] text-ink-ghost/40">·</span>
-                                      <span className="text-[10px] text-ink-ghost/60 font-mono tabular-nums">
+                                      <span className="text-[10px] text-ink-ghost/70">·</span>
+                                      <span className="text-[10px] text-ink-ghost font-mono tabular-nums">
                                         {t("common.wordCount", {
                                           count: note.wordCount,
                                           defaultValue: "{{count}} 字",
@@ -3195,13 +3099,246 @@ export function MainWindow({
                                     </div>
                                   </div>
                                 );
-                              })
+                              })}
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      const isCollapsed = collapsedCategories.has(group.category);
+                      const toneClass = getCategoryToneClass(namedCategoryIdx++);
+
+                      return (
+                        <div
+                          key={group.category}
+                          data-category-card={group.category}
+                          className={`mx-1 mb-2.5 floral-cat-card ${toneClass} transition-shadow duration-200 ${
+                            dragOverCategory === group.category ? "ring-2 ring-bamboo/45" : ""
+                          }`}
+                        >
+                          <div
+                            data-category-header={group.category}
+                            className={`floral-cat-header ${isCollapsed ? "" : "is-open"} flex items-center gap-2 px-2.5 py-2 group/cat cursor-pointer select-none transition-all duration-200`}
+                            onClick={() => toggleCategoryCollapse(group.category)}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setCategoryMenu({
+                                x: e.clientX,
+                                y: e.clientY,
+                                category: group.category,
+                              });
+                              setCategoryMenuClosing(false);
+                              setCategoryMenuConfirmDelete(false);
+                            }}
+                            onDragOver={(e) => {
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = "move";
+                              setDragOverCategory(group.category);
+                            }}
+                            onDragLeave={() => setDragOverCategory(null)}
+                            onDrop={(e) => {
+                              e.preventDefault();
+                              setDragOverCategory(null);
+                              const noteId = e.dataTransfer.getData("text/plain");
+                              if (noteId) void handleDropNote(noteId, group.category, null);
+                            }}
+                          >
+                            <svg
+                              width="11"
+                              height="11"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.6"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              className={`shrink-0 transition-transform duration-200 ${isCollapsed ? "" : "rotate-90"}`}
+                            >
+                              <polyline points="9 18 15 12 9 6" />
+                            </svg>
+                            <svg
+                              width="14"
+                              height="14"
+                              viewBox="0 0 24 24"
+                              fill="currentColor"
+                              fillOpacity="0.22"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              className="shrink-0"
+                            >
+                              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                            </svg>
+                            {renamingCategory === group.category ? (
+                              <input
+                                type="text"
+                                autoFocus
+                                value={renameCategoryValue}
+                                onChange={(e) => setRenameCategoryValue(e.target.value)}
+                                onKeyDown={(e) => {
+                                  e.stopPropagation();
+                                  if (e.key === "Enter") void handleRenameCategory(group.category);
+                                  if (e.key === "Escape") setRenamingCategory(null);
+                                }}
+                                onBlur={() => void handleRenameCategory(group.category)}
+                                onClick={(e) => e.stopPropagation()}
+                                className="flex-1 min-w-0 px-1.5 py-0.5 text-[11px] font-body text-ink bg-paper-card border border-bamboo/45 rounded"
+                              />
+                            ) : (
+                              <span className="text-[12px] font-semibold tracking-tight truncate">
+                                {group.category}
+                              </span>
                             )}
+                            <span className="floral-cat-badge text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded-full ml-auto shrink-0 tabular-nums leading-none">
+                              {group.notes.length}
+                            </span>
+                          </div>
+
+                          <div className={`category-body ${isCollapsed ? "" : "expanded"}`}>
+                            <div
+                              className="category-body-inner floral-cat-body-surface"
+                              onDragOver={(e) => {
+                                e.preventDefault();
+                                e.dataTransfer.dropEffect = "move";
+                                setDragOverCategory(group.category);
+                              }}
+                              onDragLeave={(e) => {
+                                if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                                  setDragOverCategory(null);
+                                }
+                              }}
+                              onDrop={(e) => {
+                                e.preventDefault();
+                                setDragOverCategory(null);
+                                const noteId = e.dataTransfer.getData("text/plain");
+                                const listEl =
+                                  e.currentTarget.querySelector<HTMLElement>("[data-note-list]") ??
+                                  e.currentTarget;
+                                if (noteId) void handleDropNote(noteId, group.category, listEl);
+                              }}
+                            >
+                              {group.notes.length === 0 ? (
+                                <div className="p-3 text-center text-[11px] text-ink-ghost/70">
+                                  {t("main.category.emptyFolder", { defaultValue: "空文件夹" })}
+                                </div>
+                              ) : (
+                                <div
+                                  data-note-list={group.category}
+                                  className="p-2 space-y-1.5"
+                                >
+                                  {group.notes.map((note) => {
+                                    const isSelected = isNoteSelectedInList(
+                                      note.id,
+                                      selectedId,
+                                      multiSelectedNoteIds,
+                                      pendingNoteSelectionId,
+                                    );
+                                    const isMultiSelected = multiSelectedNoteIds.has(note.id);
+
+                                    return (
+                                      <div
+                                        key={note.id}
+                                        data-note-selection-item="true"
+                                        data-note-id={note.id}
+                                        data-multi-selected={isMultiSelected || undefined}
+                                        draggable
+                                        onMouseDown={(e) => {
+                                          handledNoteMouseDownRef.current = null;
+                                          if (!canStartNoteDrag(e) && e.button === 0) {
+                                            e.preventDefault();
+                                            handledNoteMouseDownRef.current = note.id;
+                                            handleNoteListItemClick(note.id, e);
+                                          }
+                                        }}
+                                        onDragStart={(e) => {
+                                          if (handledNoteMouseDownRef.current === note.id || !canStartNoteDrag(e)) {
+                                            e.preventDefault();
+                                            return;
+                                          }
+                                          e.dataTransfer.setData("text/plain", note.id);
+                                          e.dataTransfer.effectAllowed = "move";
+                                          draggingNoteRef.current = { id: note.id, category: note.category };
+                                          lastDragHoverIdRef.current = null;
+                                          noteDropHandledRef.current = false;
+                                        }}
+                                        onDragEnter={(e) => handleNoteDragEnter(e.currentTarget, note.id, note.category)}
+                                        onDragLeave={(e) => {
+                                          if (!e.currentTarget.contains(e.relatedTarget as Node) && lastDragHoverIdRef.current === note.id) {
+                                            lastDragHoverIdRef.current = null;
+                                          }
+                                        }}
+                                        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                                        onDrop={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          const noteId = e.dataTransfer.getData("text/plain");
+                                          if (noteId) void handleDropNote(noteId, note.category, e.currentTarget.parentElement);
+                                        }}
+                                        onDragEnd={handleNoteDragEnd}
+                                        onClick={(event) => {
+                                          if (handledNoteMouseDownRef.current === note.id) {
+                                            handledNoteMouseDownRef.current = null;
+                                            return;
+                                          }
+                                          handleNoteListItemClick(note.id, event);
+                                        }}
+                                        onContextMenu={(event) => handleOpenNoteMenu(event, note.id)}
+                                        onMouseEnter={() => setHoveredId(note.id)}
+                                        onMouseLeave={() => setHoveredId(null)}
+                                        className={`floral-cat-note-item w-full text-left rounded-[8px] px-2.5 py-2 select-none transition-[background-color,border-color,box-shadow] duration-150 ease-out cursor-pointer group relative ${
+                                          isMultiSelected
+                                            ? "is-multi-selected"
+                                            : isSelected
+                                              ? "is-selected"
+                                              : ""
+                                        }`}
+                                      >
+                                        <div
+                                          className={`floral-cat-note-indicator absolute left-0 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full transition-[height,opacity] duration-150 ease-out ${
+                                            isSelected ? "h-5 opacity-100" : "h-0 opacity-0"
+                                          }`}
+                                        />
+
+                                        <div className="flex items-center justify-between gap-2">
+                                          <span
+                                            className={`floral-cat-note-title text-[12.5px] font-display truncate transition-colors ${
+                                              isSelected ? "is-selected font-semibold" : "text-ink font-semibold"
+                                            }`}
+                                          >
+                                            {getDisplayTitle(note, t)}
+                                          </span>
+                                          <span className="text-[10px] text-ink-ghost font-mono tabular-nums shrink-0">
+                                            {formatShortDate(note.updatedAt)}
+                                          </span>
+                                        </div>
+
+                                        <p className="mt-0.5 text-[11px] text-ink-faint leading-snug line-clamp-1 break-all group-hover:text-ink-soft transition-colors">
+                                          {note.preview ||
+                                            t("common.blankNote", { defaultValue: "空白笔记" })}
+                                        </p>
+
+                                        <div className="mt-1.5 flex items-center justify-between gap-2 text-[10px] font-mono tabular-nums text-ink-ghost">
+                                          <span>{formatTime(note.updatedAt)}</span>
+                                          <span className="px-1.5 py-0.5 rounded bg-paper-warm/70 text-[9.5px] leading-none text-ink-faint">
+                                            {t("common.wordCount", {
+                                              count: note.wordCount,
+                                              defaultValue: "{{count}} 字",
+                                            })}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    });
+                  })()}
 
                   {!isLoading && filteredNotes.length === 0 && externalFiles.length === 0 && (
                     <div className="px-3 py-8 text-center text-[12px] text-ink-ghost leading-relaxed">
@@ -3230,11 +3367,11 @@ export function MainWindow({
           )}
 
           <div className="flex-1 flex flex-col min-w-0">
-            <div className="flex items-center justify-between px-4 h-10 border-b border-paper-deep/20 shrink-0 bg-paper/20">
+            <div className="relative z-20 flex items-center justify-between px-4 h-10 border-b border-paper-deep/55 shrink-0 bg-paper/60">
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-                  className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-ghost hover:text-ink-faint hover:bg-paper-warm transition-all cursor-pointer"
+                  className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-faint hover:text-ink hover:bg-paper-warm transition-all cursor-pointer"
                   title={
                     sidebarCollapsed
                       ? t("main.window.expandSidebar", { defaultValue: "展开侧栏" })
@@ -3256,16 +3393,16 @@ export function MainWindow({
                   </svg>
                 </button>
 
-                <div className="h-4 w-px bg-paper-deep/30 mx-1" />
+                <div className="h-4 w-px bg-paper-deep/60 mx-1" />
 
                 <button
                   onClick={() => void handlePinEntry()}
                   disabled={!selectedId}
                   aria-label={pinTileButtonTitle(selectedTilePinned)}
-                  className={`w-7 h-7 flex items-center justify-center rounded-lg transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed ${
+                  className={`w-7 h-7 flex items-center justify-center rounded-lg transition-all cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
                     selectedTilePinned
-                      ? "text-bamboo bg-bamboo-mist/40 hover:text-red-400 hover:bg-danger-bg"
-                      : "text-ink-ghost hover:text-bamboo hover:bg-bamboo-mist/50"
+                      ? "text-bamboo bg-bamboo-mist/70 hover:text-red-500 hover:bg-danger-bg"
+                      : "text-ink-faint hover:text-bamboo hover:bg-bamboo-mist/70"
                   }`}
                   title={pinTileButtonTitle(selectedTilePinned)}
                 >
@@ -3288,7 +3425,7 @@ export function MainWindow({
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={handleUndo}
                   disabled={!selectedId}
-                  className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-ghost hover:text-ink-faint hover:bg-paper-warm transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                  className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-faint hover:text-ink hover:bg-paper-warm transition-all cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
                   title={t("main.editor.undo", { defaultValue: "撤销（Ctrl+Z）" })}
                   aria-label={t("main.editor.undoLabel", { defaultValue: "撤销" })}
                 >
@@ -3313,7 +3450,7 @@ export function MainWindow({
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={handleRedo}
                   disabled={!selectedId}
-                  className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-ghost hover:text-ink-faint hover:bg-paper-warm transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                  className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-faint hover:text-ink hover:bg-paper-warm transition-all cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
                   title={t("main.editor.redo", { defaultValue: "重做（Ctrl+Y）" })}
                   aria-label={t("main.editor.redoLabel", { defaultValue: "重做" })}
                 >
@@ -3335,10 +3472,53 @@ export function MainWindow({
                   </svg>
                 </button>
 
+                <div className="relative">
+                  <button
+                    type="button"
+                    data-testid="main-editor-clipboard-insert-btn"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => setClipboardPickerOpen((prev) => !prev)}
+                    disabled={!selectedId}
+                    className={`w-7 h-7 flex items-center justify-center rounded-lg transition-all cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
+                      clipboardPickerOpen
+                        ? "text-bamboo bg-bamboo-mist/70"
+                        : "text-ink-faint hover:text-bamboo hover:bg-bamboo-mist/70"
+                    }`}
+                    title={t("main.editor.insertClipboard", {
+                      defaultValue: "从 Q-Paste 剪贴板插入（Ctrl+Shift+V）",
+                    })}
+                    aria-label={t("main.editor.insertClipboardLabel", {
+                      defaultValue: "从剪贴板插入",
+                    })}
+                  >
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+                      <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+                      <path d="M9 12h6" />
+                      <path d="M9 16h4" />
+                    </svg>
+                  </button>
+                  <ClipboardInsertPopover
+                    open={clipboardPickerOpen}
+                    onClose={() => setClipboardPickerOpen(false)}
+                    onPick={handleInsertFromClipboard}
+                  />
+                </div>
+
                 <button
                   onClick={() => void saveCurrentNote(true)}
                   disabled={!selectedId || saveState === "saving"}
-                  className="px-2.5 h-7 flex items-center justify-center rounded-lg text-[11px] text-ink-ghost hover:text-ink-faint hover:bg-paper-warm transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                  className="px-2.5 h-7 flex items-center justify-center rounded-lg text-[11px] font-medium text-ink-faint hover:text-ink hover:bg-paper-warm transition-all cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
                   title={t("common.save", { defaultValue: "保存" })}
                 >
                   {t("common.save", { defaultValue: "保存" })}
@@ -3351,7 +3531,7 @@ export function MainWindow({
                     setDeleteConfirm(true);
                   }}
                   disabled={!selectedId}
-                  className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-ghost hover:text-red-400 hover:bg-danger-bg transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                  className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-faint hover:text-red-600 hover:bg-danger-bg transition-all cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
                   title={t("noteMenu.delete", { defaultValue: "删除笔记" })}
                 >
                   <svg
@@ -3380,7 +3560,7 @@ export function MainWindow({
 
             <div
               key={noteTransitionKey}
-              className="animate-note-enter px-6 pt-4 pb-2 shrink-0 border-b border-paper-deep/15"
+              className="animate-note-enter px-6 pt-4 pb-2.5 shrink-0 border-b border-paper-deep/45"
             >
               <input
                 type="text"
@@ -3397,10 +3577,10 @@ export function MainWindow({
                 }}
                 placeholder={t("common.untitledNote", { defaultValue: "无标题笔记" })}
                 disabled={!selectedId}
-                className="w-full text-[20px] font-display font-bold text-ink placeholder:text-ink-ghost/50 tracking-wide disabled:opacity-60"
+                className="w-full text-[20px] font-display font-bold text-ink placeholder:text-ink-ghost/75 tracking-wide disabled:opacity-60"
               />
               <div className="flex items-center gap-3 mt-1.5">
-                <span className="text-[10px] text-ink-ghost font-mono tabular-nums truncate max-w-[200px]">
+                <span className="text-[11px] text-ink-faint font-mono tabular-nums truncate max-w-[200px]">
                   {selectedExternalFile
                     ? t("main.externalFile.label", {
                         path: selectedExternalFile.filePath,
@@ -3410,19 +3590,19 @@ export function MainWindow({
                       ? `${formatShortDate(selectedNote.updatedAt)} ${formatTime(selectedNote.updatedAt)}`
                       : "--"}
                 </span>
-                <span className="text-[10px] text-ink-ghost/40">·</span>
-                <span className="text-[10px] text-ink-ghost font-mono tabular-nums">
+                <span className="text-[10px] text-ink-ghost/70">·</span>
+                <span className="text-[11px] text-ink-faint font-mono tabular-nums">
                   {t("common.wordCount", { count: charCount, defaultValue: "{{count}} 字" })}
                 </span>
-                <span className="text-[10px] text-ink-ghost/40">·</span>
+                <span className="text-[10px] text-ink-ghost/70">·</span>
                 <span
                   key={saveState}
-                  className={`text-[10px] font-mono tabular-nums animate-status-fade ${
+                  className={`text-[11px] font-mono tabular-nums animate-status-fade ${
                     saveState === "error"
-                      ? "text-red-400"
+                      ? "text-red-500 font-medium"
                       : saveState === "dirty"
-                        ? "text-amber-500/70"
-                        : "text-bamboo/60"
+                        ? "text-amber-600 font-medium"
+                        : "text-bamboo font-medium"
                   }`}
                 >
                   {saveStateLabel[saveState]}
@@ -3436,7 +3616,7 @@ export function MainWindow({
               className="flex-1 flex min-h-0 animate-view-fade"
             >
               {!selectedId && !isLoading ? (
-                <div className="flex-1 flex items-center justify-center text-[13px] text-ink-ghost">
+                <div className="flex-1 flex items-center justify-center text-[13px] text-ink-faint">
                   {t("main.editor.emptyHint", { defaultValue: "选择或新建一篇笔记" })}
                 </div>
               ) : (
@@ -3463,7 +3643,7 @@ export function MainWindow({
                                 );
                               }
                             }}
-                            className={`w-6 h-6 flex items-center justify-center rounded text-[11px] text-ink-ghost hover:text-ink-faint hover:bg-paper-warm transition-all cursor-pointer ${button.style}`}
+                            className={`w-6 h-6 flex items-center justify-center rounded text-[11px] text-ink-faint hover:text-ink hover:bg-paper-warm transition-all cursor-pointer ${button.style}`}
                           >
                             {button.label}
                           </button>
@@ -3483,7 +3663,7 @@ export function MainWindow({
                           onDrop={imageDropHandler}
                           onDragOver={imageDragOverHandler}
                           onScroll={handleEditorScroll}
-                          className="w-full h-full leading-[1.9] text-ink-soft font-body placeholder:text-ink-ghost/40"
+                          className="w-full h-full leading-[1.9] text-ink-soft font-body placeholder:text-ink-ghost/75"
                           style={{
                             fontSize: `${settingsConfig?.fontSize ?? 14}px`,
                             tabSize: `var(--tab-indent-size, 2)`,
@@ -3511,9 +3691,9 @@ export function MainWindow({
                       />
                       {/* 拖拽手柄指示器 */}
                       <div className="relative z-10 flex flex-col gap-[3px] opacity-0 group-hover:opacity-100 transition-opacity">
-                        <div className="w-[3px] h-[3px] rounded-full bg-ink-ghost/60" />
-                        <div className="w-[3px] h-[3px] rounded-full bg-ink-ghost/60" />
-                        <div className="w-[3px] h-[3px] rounded-full bg-ink-ghost/60" />
+                        <div className="w-[3px] h-[3px] rounded-full bg-ink-ghost/80" />
+                        <div className="w-[3px] h-[3px] rounded-full bg-ink-ghost/80" />
+                        <div className="w-[3px] h-[3px] rounded-full bg-ink-ghost/80" />
                       </div>
                     </div>
                   )}
@@ -3522,7 +3702,7 @@ export function MainWindow({
                     <div className="flex flex-col min-h-0 min-w-0 flex-1">
                       {viewMode === "split" && (
                         <div className="px-4 pt-2.5 pb-1 shrink-0">
-                          <span className="text-[10px] text-ink-ghost/60 font-mono tracking-widest uppercase">
+                          <span className="text-[10px] text-ink-faint font-mono tracking-widest uppercase">
                             {t("main.editor.previewLabel", { defaultValue: "Preview" })}
                           </span>
                         </div>
@@ -3547,16 +3727,16 @@ export function MainWindow({
               )}
             </div>
 
-            <div className="flex items-center justify-between px-4 h-7 border-t border-paper-deep/20 bg-paper/30 shrink-0">
+            <div className="flex items-center justify-between px-4 h-7 border-t border-paper-deep/55 bg-paper/70 shrink-0">
               <div className="flex items-center gap-3">
-                <span className="text-[10px] text-ink-ghost font-mono tabular-nums">
+                <span className="text-[10px] text-ink-faint font-mono tabular-nums">
                   {t("main.statusBar.lineNumber", {
                     count: lineCount,
                     defaultValue: "Ln {{count}}",
                   })}
                 </span>
-                <span className="text-[10px] text-ink-ghost/40">|</span>
-                <span className="text-[10px] text-ink-ghost font-mono">
+                <span className="text-[10px] text-ink-ghost/65">|</span>
+                <span className="text-[10px] text-ink-faint font-mono">
                   {t("main.statusBar.format", { defaultValue: "Markdown + LaTeX" })}
                 </span>
               </div>
@@ -3566,18 +3746,18 @@ export function MainWindow({
                     <button
                       type="button"
                       onClick={() => void handleCleanUnusedImages()}
-                      className="text-[10px] text-ink-ghost hover:text-bamboo font-mono cursor-pointer transition-colors"
+                      className="text-[10px] text-ink-faint hover:text-bamboo font-mono cursor-pointer transition-colors"
                     >
                       {t("main.images.cleanUnused", { defaultValue: "清理未使用图片" })}
                     </button>
-                    <span className="text-[10px] text-ink-ghost/40">|</span>
+                    <span className="text-[10px] text-ink-ghost/65">|</span>
                   </>
                 )}
-                <span className="text-[10px] text-ink-ghost font-mono">
+                <span className="text-[10px] text-ink-faint font-mono">
                   {t("main.statusBar.encoding", { defaultValue: "UTF-8" })}
                 </span>
-                <span className="text-[10px] text-ink-ghost/40">|</span>
-                <span className="text-[10px] text-ink-ghost font-mono tabular-nums">
+                <span className="text-[10px] text-ink-ghost/65">|</span>
+                <span className="text-[10px] text-ink-faint font-mono tabular-nums">
                   {t("main.statusBar.byteSize", { size: byteSize, defaultValue: "{{size}} KB" })}
                 </span>
               </div>
@@ -3588,7 +3768,7 @@ export function MainWindow({
           )}
           <div
             className={`relative shrink-0 overflow-hidden h-full transition-[width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
-              sidePanelExpanded || mountedSidePanel ? "border-l border-paper-deep/20" : "border-l-0"
+              sidePanelExpanded || mountedSidePanel ? "border-l border-paper-deep/55" : "border-l-0"
             } ${
               settingsOverlay
                 ? `absolute right-0 top-0 bottom-0 z-30 ${visibleSidePanel ? "w-[360px] shadow-xl" : "w-0"}`

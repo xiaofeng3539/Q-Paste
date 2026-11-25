@@ -59,9 +59,24 @@ function readStoredContent(type: string, content: string, layout: StorageLayout)
   return content
 }
 
+function getItemColumns(db: NativeDatabase): Set<string> {
+  try {
+    const rows = db.exec('PRAGMA table_info(items)')[0]?.values ?? []
+    return new Set(rows.map((row) => String(row[1])))
+  } catch {
+    return new Set()
+  }
+}
+
 function backupJson(db: NativeDatabase, task: Extract<DatabaseTask, { kind: 'backup-json' }>) {
+  const cols = getItemColumns(db)
+  const extraCols = [
+    cols.has('ocr_text') ? 'ocr_text' : null,
+    cols.has('source_app') ? 'source_app' : null,
+  ].filter(Boolean)
+  const extraSelect = extraCols.length ? `, ${extraCols.join(', ')}` : ''
   const statement = db.prepare(`SELECT id, type, content, preview, char_count, storage_size, created_at,
-    is_pinned, pinned_at, alias, tags, is_sensitive, sort_order, vault_sort_order FROM items
+    is_pinned, pinned_at, alias, tags, is_sensitive, sort_order, vault_sort_order${extraSelect} FROM items
     ${task.target ? '' : 'WHERE is_sensitive = 0'} ORDER BY id`)
   const items: ReturnType<typeof statement.getAsObject>[] = []
   while (statement.step()) {
@@ -204,6 +219,9 @@ function importBackupJson(db: NativeDatabase, task: Extract<DatabaseTask, { kind
   const items = Array.isArray(data) ? data : data?.items
   if (!Array.isArray(items)) throw new Error('无效的 Q-Paste JSON 备份')
   return db.transaction(() => {
+    const cols = getItemColumns(db)
+    const hasOcr = cols.has('ocr_text')
+    const hasSource = cols.has('source_app')
     const result = { count: 0, duplicates: 0, skipped: 0 }
     const same = db.prepare('SELECT id FROM items WHERE type = :type AND content = :content LIMIT 1')
     for (const row of items) {
@@ -221,10 +239,9 @@ function importBackupJson(db: NativeDatabase, task: Extract<DatabaseTask, { kind
         try { tags = JSON.parse(tags) } catch { tags = [] }
       }
       const createdAt = typeof row.created_at === 'string' ? row.created_at : new Date().toISOString().slice(0, 19).replace('T', ' ')
-      db.run(`INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_pinned,
-        pinned_at, alias, tags, is_sensitive, sort_order, vault_sort_order)
-        VALUES (:type, :content, :preview, :chars, :bytes, :created, :pinned, :pinnedAt,
-        :alias, :tags, :sensitive, :sort, :vaultSort)`, {
+      const extraColNames = `${hasOcr ? ', ocr_text' : ''}${hasSource ? ', source_app' : ''}`
+      const extraColVals = `${hasOcr ? ', :ocrText' : ''}${hasSource ? ', :sourceApp' : ''}`
+      const bindings: Record<string, string | number | null> = {
         ':type': type, ':content': content, ':preview': typeof row.preview === 'string' ? row.preview : content.slice(0, 100),
         ':chars': Number(row.char_count) || 0, ':bytes': Number(row.storage_size) || Buffer.byteLength(content),
         ':created': createdAt, ':pinned': row.is_pinned ? 1 : 0,
@@ -234,7 +251,13 @@ function importBackupJson(db: NativeDatabase, task: Extract<DatabaseTask, { kind
         ':sensitive': row.is_sensitive ? 1 : 0,
         ':sort': typeof row.sort_order === 'number' ? row.sort_order : Date.parse(createdAt) || 0,
         ':vaultSort': typeof row.vault_sort_order === 'number' ? row.vault_sort_order : null,
-      })
+      }
+      if (hasOcr) bindings[':ocrText'] = typeof row.ocr_text === 'string' ? row.ocr_text : ''
+      if (hasSource) bindings[':sourceApp'] = typeof row.source_app === 'string' ? row.source_app : ''
+      db.run(`INSERT INTO items (type, content, preview, char_count, storage_size, created_at, is_pinned,
+        pinned_at, alias, tags, is_sensitive, sort_order, vault_sort_order${extraColNames})
+        VALUES (:type, :content, :preview, :chars, :bytes, :created, :pinned, :pinnedAt,
+        :alias, :tags, :sensitive, :sort, :vaultSort${extraColVals})`, bindings)
       result.count++
     }
     return result
@@ -269,23 +292,31 @@ export function runDatabaseTask(task: DatabaseTask): unknown {
       const row = statement.step() ? statement.getAsObject() : undefined
       return row ? readStoredContent(String(row.type), String(row.content ?? ''), task.layout) : ''
     }
+    const cols = getItemColumns(db)
+    const selectAlias = cols.has('alias') ? ', alias' : ''
+    const selectOcr = cols.has('ocr_text') ? ', ocr_text' : ''
+    const selectSource = cols.has('source_app') ? ', source_app' : ''
     const found = new Set<number>()
     for (let offset = 0; offset < task.ids.length; offset += 500) {
       const ids = task.ids.slice(offset, offset + 500)
       const keys = ids.map((_, index) => `:id${index}`)
-      const statement = db.prepare(`SELECT id, type, preview, content FROM items WHERE id IN (${keys.join(',')})`)
+      const statement = db.prepare(`SELECT id, type, preview, content${selectAlias}${selectOcr}${selectSource} FROM items WHERE id IN (${keys.join(',')})`)
       statement.bind(Object.fromEntries(keys.map((key, index) => [key, ids[index]])))
       while (statement.step()) {
         const row = statement.getAsObject()
         const preview = String(row.preview ?? '')
+        const alias = String(row.alias ?? '')
+        const ocrText = String(row.ocr_text ?? '')
+        const sourceApp = String(row.source_app ?? '')
         const type = String(row.type)
-        if (searchIncludes(preview, task.query)) {
+        const searchableMeta = [preview, alias, ocrText, sourceApp].filter(Boolean).join('\n')
+        if (searchIncludes(searchableMeta, task.query)) {
           found.add(Number(row.id))
           continue
         }
         if (type === 'image') continue
         const content = readStoredContent(type, String(row.content ?? ''), task.layout)
-        if (searchIncludes(preview + '\n' + content, task.query)) found.add(Number(row.id))
+        if (searchIncludes(searchableMeta + '\n' + content, task.query)) found.add(Number(row.id))
       }
     }
     return task.ids.filter((id) => found.has(id))

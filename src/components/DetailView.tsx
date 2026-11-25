@@ -1,20 +1,27 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { ClipboardItem } from '../types'
 import { readHistoryContent } from '../lib/history-memory'
 import { formatStorageSize, getTypeLabel, maskSensitive, parseFilePaths, basename } from '../lib/utils'
 import { ShortcutAction } from '../lib/shortcuts'
-import { FileText, Link, Image, Copy, Trash2, Monitor, X, ZoomIn, RotateCcw, Pin, Eye, EyeOff, Shield, Plus, ExternalLink, FolderOpen, FileCode2, QrCode, ScanText, FileDown, Loader2, Check } from 'lucide-react'
+import { FileText, Link, Image, Copy, Trash2, Monitor, X, ZoomIn, RotateCcw, Pin, Eye, EyeOff, Shield, Plus, ExternalLink, FolderOpen, FileCode2, QrCode, ScanText, FileDown, Loader2, RemoveFormatting, BookPlus, Clock, Braces, Palette, ChevronsUpDown } from 'lucide-react'
 import { QRCodeCanvas } from 'qrcode.react'
 import { tr } from '../i18n'
 import OcrRegionSelector from './OcrRegionSelector'
 import OcrResultPanel from './OcrResultPanel'
+import JsonTreeView from './JsonTreeView'
+import { inspectClipboardText } from '../lib/smart-inspect'
 import { canSaveOcrResult, createOcrWorkerSession, cropImageForOcr, invalidateOcrTask, isValidOcrRegion, mapViewportOcrRegionToImage, normalizeOcrText, ocrActionErrorMessage, ocrErrorMessage, openOcrSelection, shouldApplyOcrResult, type OcrRegion } from '../lib/ocr'
 import { appendRichTextPasteValue, appendTextContextPasteValue, getTextContextCopyValue, insertTextAtSelection, supportsTextContextMenu } from '../lib/text-context-menu'
+import { buildHtmlPreviewDoc, getHtmlPreviewFrameKey, isHtmlPreviewReady } from '../lib/html-preview'
 
 interface DetailViewProps {
   item: ClipboardItem | null
   density?: 'comfortable' | 'compact'
   onCopy: (item: ClipboardItem) => void
+  onCopyPlainText?: (item: ClipboardItem) => void
+  onSaveToFloral?: (item: ClipboardItem, mode: 'new' | 'append', overrideText?: string) => Promise<void>
+  onUpdateOcrText?: (id: number, ocrText: string) => Promise<void>
+  onFilterBySource?: (source: string) => void
   onDelete: (id: number) => void
   onUpdate: (id: number, content: string) => void
   onTogglePin: (id: number) => void
@@ -56,6 +63,10 @@ export const isElectron = typeof window !== 'undefined' && !!window.electronAPI
 export default function DetailView({
   item,
   onCopy,
+  onCopyPlainText,
+  onSaveToFloral,
+  onUpdateOcrText,
+  onFilterBySource,
   onDelete,
   onUpdate,
   onTogglePin,
@@ -71,6 +82,11 @@ export default function DetailView({
   onToast,
 }: DetailViewProps) {
   const [lightboxOpen, setLightboxOpen] = useState(false)
+  const [floralMenuOpen, setFloralMenuOpen] = useState(false)
+  const [savingToFloral, setSavingToFloral] = useState(false)
+  const floralMenuRef = useRef<HTMLDivElement>(null)
+  const [jsonViewMode, setJsonViewMode] = useState<'tree' | 'raw'>('tree')
+  const [jsonExpandSignal, setJsonExpandSignal] = useState<{ expanded: boolean; version: number } | undefined>(undefined)
   const monoClass = monospace ? 'font-mono' : 'font-sans'
   const [scale, setScale] = useState(1)
   const [pos, setPos] = useState({ x: 0, y: 0 })
@@ -162,7 +178,21 @@ export default function DetailView({
     setOcrActionError(null)
     setOcrBusy(false)
     setOcrStage('')
+    setFloralMenuOpen(false)
+    setJsonViewMode('tree')
+    setJsonExpandSignal(undefined)
   }, [item?.id, ocrSession])
+
+  useEffect(() => {
+    if (!floralMenuOpen) return
+    const handleOutside = (event: MouseEvent) => {
+      if (floralMenuRef.current && !floralMenuRef.current.contains(event.target as Node)) {
+        setFloralMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleOutside)
+    return () => document.removeEventListener('mousedown', handleOutside)
+  }, [floralMenuOpen])
 
   useEffect(() => {
     if (!isEditing) setEditContent('')
@@ -419,6 +449,12 @@ export default function DetailView({
     setPos({ x: 0, y: 0 })
   }
 
+  const smartInspection = useMemo(() => {
+    if (!item || item.type === 'image' || item.type === 'html' || item.type === 'files') return null
+    if (item.is_sensitive && !showSensitive) return null
+    return inspectClipboardText(item.content)
+  }, [item?.id, item?.type, item?.content, item?.is_sensitive, showSensitive])
+
   // ── 空状态 ──
   if (!item) {
     return (
@@ -445,30 +481,25 @@ export default function DetailView({
   const isSensitive = item.is_sensitive
   const displayContent = isSensitive && !showSensitive ? maskSensitive(item.content) : item.content
   const presetTags = tr('detail.presetTags').split(',').map((t) => t.trim())
-  /** 富文本预览文档：注入主题化基础样式，覆盖源内容自带的颜色/背景（不改原始数据） */
-  function buildHtmlPreviewDoc(content: string): string {
-    const dark = document.documentElement.classList.contains('dark')
-    let accent = '#4f7dff'
+  const htmlPreviewReady = isHtml && isHtmlPreviewReady(item)
+  const htmlPreviewDark = typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
+  let htmlPreviewAccent = '#4f7dff'
+  if (typeof document !== 'undefined') {
     try {
       const v = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()
-      if (v) accent = v
+      if (v) htmlPreviewAccent = v
     } catch {}
-    const t = dark
-      ? { text: '#e4e4e7', page: '#18181b', sub: '#27272a', border: '#3f3f46', sel: 'rgba(79,125,255,0.35)' }
-      : { text: '#1f2937', page: '#ffffff', sub: '#f3f4f6', border: '#e5e7eb', sel: 'rgba(79,125,255,0.25)' }
-    const css = [
-      'html,body{background:' + t.page + ' !important;color:' + t.text + ' !important;}',
-      '*,*::before,*::after{background-color:transparent !important;background-image:none !important;color:' + t.text + ' !important;border-color:' + t.border + ' !important;}',
-      'a,a *{color:' + accent + ' !important;text-decoration-color:' + accent + ' !important;}',
-      'pre,code,kbd,samp,blockquote{background:' + t.sub + ' !important;color:' + t.text + ' !important;border-color:' + t.border + ' !important;}',
-      'table,th,td{border-color:' + t.border + ' !important;}',
-      'hr{border:none;border-top:1px solid ' + t.border + ' !important;background:none !important;height:1px;}',
-      'img,svg,video,canvas{background:none !important;}',
-      '::selection{background:' + t.sel + ' !important;color:' + t.text + ' !important;}',
-    ].join('\n')
-    const contextMenuScript = '<script nonce="qpaste-context">document.addEventListener("contextmenu",function(e){e.preventDefault();parent.postMessage({type:"qpaste-html-context-menu",x:e.clientX,y:e.clientY,selection:getSelection()?.toString()||""},"*")})</script>'
-    return '<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data: file:; script-src \'nonce-qpaste-context\'"><style>' + css + '</style></head><body>' + content + contextMenuScript + '</body></html>'
   }
+  const htmlPreviewDoc = htmlPreviewReady
+    ? buildHtmlPreviewDoc(displayContent, {
+        dark: htmlPreviewDark,
+        accent: htmlPreviewAccent,
+        fallbackText: item.preview,
+      })
+    : ''
+  const htmlPreviewKey = htmlPreviewReady
+    ? getHtmlPreviewFrameKey(item.id, htmlPreviewDark, htmlPreviewDoc)
+    : ''
 
   const plainText = isImage
     ? ''
@@ -503,6 +534,11 @@ export default function DetailView({
         return
       }
       setOcrResult(text)
+      if (onUpdateOcrText) {
+        void onUpdateOcrText(itemId, text).then(() => {
+          if (isCurrent()) onToast?.(tr('toast.ocrIndexed'))
+        }).catch(() => {})
+      }
     } catch (error) {
       if (isCurrent()) setOcrError(ocrErrorMessage(error))
     } finally {
@@ -510,6 +546,29 @@ export default function DetailView({
         setOcrBusy(false)
         setOcrStage('')
       }
+    }
+  }
+
+  const updateOcrIndex = async () => {
+    if (!item || !canSaveOcrResult(ocrResult) || !onUpdateOcrText) return
+    const content = normalizeOcrText(ocrResult)
+    try {
+      await onUpdateOcrText(item.id, content)
+      setOcrActionError(null)
+      onToast?.(tr('toast.ocrIndexed'))
+    } catch {
+      setOcrActionError(ocrActionErrorMessage('save'))
+    }
+  }
+
+  const copySmartText = async (value: string, label?: string) => {
+    if (!value) return
+    try {
+      if (isElectron) await window.electronAPI.writeText(value)
+      else if (navigator.clipboard) await navigator.clipboard.writeText(value)
+      onToast?.(tr('smart.copiedValue', { value: label || (value.length > 36 ? value.slice(0, 36) + '…' : value) }))
+    } catch {
+      onToast?.('复制失败，请重试')
     }
   }
 
@@ -538,6 +597,7 @@ export default function DetailView({
         charCount: content.length,
         storageSize: new TextEncoder().encode(content).length,
         createdAt: new Date().toLocaleString('sv-SE').replace('T', ' ').slice(0, 19),
+        sourceApp: item.source_app || 'OCR',
       })
       setOcrActionError(null)
       setOcrResult('')
@@ -564,7 +624,7 @@ export default function DetailView({
       <div className="flex-shrink-0 h-10 flex items-center px-4 gap-3">
         <div className="flex items-center gap-1.5">
           {typeIcon(item.type)}
-          <span className="text-xs text-zinc-600 dark:text-zinc-400">{getTypeLabel(item.type)}</span>
+          <span className="text-xs font-medium text-zinc-800 dark:text-zinc-200">{getTypeLabel(item.type)}</span>
         </div>
 
         {item.is_pinned && (
@@ -573,19 +633,32 @@ export default function DetailView({
 
         {!isImage && item.char_count > 0 && (
           <>
-            <span className="text-zinc-300 dark:text-zinc-700 text-xs">·</span>
-            <span className="text-xs text-zinc-500 dark:text-zinc-500">{item.char_count} {tr('detail.chars')}</span>
+            <span className="text-zinc-300 dark:text-zinc-600 text-xs">·</span>
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">{item.char_count} {tr('detail.chars')}</span>
           </>
         )}
 
-        <span className="text-zinc-300 dark:text-zinc-700 text-xs">·</span>
-        <span className="text-xs text-zinc-500 dark:text-zinc-500">{formatStorageSize(item.storage_size)}</span>
+        <span className="text-zinc-300 dark:text-zinc-600 text-xs">·</span>
+        <span className="text-xs text-zinc-500 dark:text-zinc-400">{formatStorageSize(item.storage_size)}</span>
 
-        <span className="text-zinc-300 dark:text-zinc-700 text-xs">·</span>
-        <div className="flex items-center gap-1">
-          <Monitor className="w-3 h-3 text-zinc-400 dark:text-zinc-600" />
-          <span className="text-xs text-zinc-500 dark:text-zinc-500">{tr('detail.source')}</span>
-        </div>
+        <span className="text-zinc-300 dark:text-zinc-600 text-xs">·</span>
+        {item.source_app && onFilterBySource ? (
+          <button
+            type="button"
+            data-testid="detail-source-app"
+            onClick={() => onFilterBySource(item.source_app!)}
+            title={tr('detail.filterBySource', { source: item.source_app })}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 -mx-1 rounded-md text-xs text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-[var(--accent)] transition-colors max-w-[180px]"
+          >
+            <Monitor className="w-3 h-3 text-zinc-400 dark:text-zinc-400 flex-shrink-0" />
+            <span className="truncate">{item.source_app}</span>
+          </button>
+        ) : (
+          <div data-testid="detail-source-app" className="flex items-center gap-1 max-w-[180px]">
+            <Monitor className="w-3 h-3 text-zinc-400 dark:text-zinc-400 flex-shrink-0" />
+            <span className="text-xs text-zinc-500 dark:text-zinc-400 truncate">{item.source_app || tr('detail.source')}</span>
+          </div>
+        )}
       </div>
 
       {/* ── Alias row ── */}
@@ -602,12 +675,12 @@ export default function DetailView({
                 if (e.key === 'Escape') { e.preventDefault(); cancelAlias() }
               }}
               placeholder={tr('detail.aliasPlaceholder')}
-              className="text-xs bg-transparent border-b border-blue-500 text-zinc-700 dark:text-zinc-300 outline-none w-48 py-0.5 transition-colors"
+              className="text-xs bg-transparent border-b border-blue-500 text-zinc-700 dark:text-zinc-200 outline-none w-48 py-0.5 transition-colors"
             />
           ) : (
             <button
               onClick={startEditAlias}
-              className="text-xs text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 border-b border-dashed border-zinc-300 dark:border-zinc-700 py-0.5 transition-colors max-w-[200px] truncate text-left"
+              className="text-xs text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 border-b border-dashed border-zinc-400 dark:border-zinc-600 py-0.5 transition-colors max-w-[200px] truncate text-left"
               title={tr('detail.aliasPlaceholder')}
             >
               {item.alias || tr('detail.aliasPlaceholder')}
@@ -627,7 +700,7 @@ export default function DetailView({
           {item.tags.map((tag) => (
             <span
               key={tag}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-[10px] text-zinc-600 dark:text-zinc-400"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/80 text-[10px] text-zinc-700 dark:text-zinc-300"
             >
               {tag}
               <button
@@ -650,12 +723,12 @@ export default function DetailView({
                 if (e.key === 'Escape') { e.preventDefault(); setShowTagInput(false); setTagDraft('') }
               }}
               placeholder={tr('detail.tagPlaceholder')}
-              className="w-24 h-5 text-[10px] bg-transparent border-b border-blue-500 text-zinc-600 dark:text-zinc-400 outline-none"
+              className="w-24 h-5 text-[10px] bg-transparent border-b border-blue-500 text-zinc-600 dark:text-zinc-300 outline-none"
             />
           ) : (
             <button
               onClick={() => setShowTagInput(true)}
-              className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
+              className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/80 text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 transition-colors"
               title={tr('detail.addTag')}
             >
               <Plus className="w-3 h-3" />
@@ -665,19 +738,58 @@ export default function DetailView({
       )}
 
       {/* Main content */}
-      <div className={`flex-1 overflow-auto ${density === 'compact' ? 'p-3' : 'p-5'}`}>
+      <div className={`flex-1 overflow-auto border-t qp-divider ${density === 'compact' ? 'p-3' : 'p-5'}`}>
         {isImage && (ocrResult || ocrError) && (
           <OcrResultPanel
             value={ocrResult}
             busy={ocrBusy}
             error={ocrError}
             notice={ocrActionError}
+            indexed={Boolean(item.ocr_text && item.ocr_text.trim() === normalizeOcrText(ocrResult))}
             onChange={(value) => { setOcrResult(value); setOcrActionError(null) }}
             onCopy={() => { void copyOcrResult() }}
             onSave={saveOcrResult}
+            onSaveToIndex={onUpdateOcrText ? updateOcrIndex : undefined}
+            onSaveToFloral={onSaveToFloral ? async () => {
+              if (!canSaveOcrResult(ocrResult)) return
+              const content = normalizeOcrText(ocrResult)
+              await onSaveToFloral({ ...item, type: 'text', content, preview: content.slice(0, 100) }, 'new', content)
+            } : undefined}
             onRetry={() => { setOcrError(null); void runOcr() }}
             onClose={() => { setOcrResult(''); setOcrError(null); setOcrActionError(null) }}
           />
+        )}
+        {isImage && !ocrResult && !ocrError && item.ocr_text && (
+          <div
+            data-testid="indexed-ocr-banner"
+            className="mb-3 rounded-lg border border-emerald-200/80 dark:border-emerald-800/60 bg-emerald-50/70 dark:bg-emerald-950/30 px-3 py-2 flex items-start gap-2.5"
+          >
+            <ScanText className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 mt-0.5 flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="text-[11px] font-medium text-emerald-800 dark:text-emerald-300">
+                {tr('detail.ocrIndexed')}
+              </div>
+              <p className="text-xs text-zinc-700 dark:text-zinc-300 line-clamp-2 whitespace-pre-wrap break-words mt-0.5">
+                {item.ocr_text}
+              </p>
+            </div>
+            <div className="flex items-center gap-1 flex-shrink-0">
+              <button
+                type="button"
+                onClick={() => { void copySmartText(item.ocr_text || '', 'OCR 文字') }}
+                className="h-6 px-2 rounded bg-white/90 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-[11px] text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors"
+              >
+                {tr('detail.copy')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setOcrResult(item.ocr_text || '')}
+                className="h-6 px-2 rounded bg-white/90 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-[11px] text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors"
+              >
+                展开
+              </button>
+            </div>
+          </div>
         )}
         {isImage ? (
           imageContent || item.content ? (
@@ -686,7 +798,7 @@ export default function DetailView({
                 src={imageContent || item.content}
                 alt={item.preview}
                 onDoubleClick={openLightbox}
-                className="max-w-full max-h-full object-contain rounded-lg cursor-zoom-in"
+                className="max-w-full max-h-full object-contain rounded-lg cursor-zoom-in ring-1 ring-zinc-200 shadow-[0_2px_10px_-4px_rgba(15,23,42,0.18)] dark:ring-zinc-700/70 dark:shadow-[0_6px_20px_-6px_rgba(0,0,0,0.45)]"
                 style={{ imageRendering: 'auto' }}
                 title={tr('detail.dblClickZoom')}
               />
@@ -700,8 +812,8 @@ export default function DetailView({
             </div>
           )
         ) : isHtml ? (
-          // 富文本预览：sandbox 隔离渲染，防止脚本注入
-          <div className="h-full rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden bg-white dark:bg-zinc-900">
+          // 富文本预览：sandbox 隔离渲染，防止脚本注入；等待正文加载完成再挂载，并按文档 key 重建 iframe，规避 Chromium/Electron 改写 srcDoc 竞态导致空白
+          <div className="h-full rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden bg-white dark:bg-[#1a1e26]">
             {isSensitive && !showSensitive ? (
               <div className="h-full flex items-center justify-center">
                 <div className="text-center">
@@ -715,13 +827,16 @@ export default function DetailView({
                   </button>
                 </div>
               </div>
+            ) : !htmlPreviewReady ? (
+              <div data-testid="html-preview-loading" className="w-full h-full bg-white dark:bg-[#1a1e26]" />
             ) : (
               <iframe
+                key={htmlPreviewKey}
                 ref={htmlPreviewRef}
                 title="rich-text-preview"
                 sandbox="allow-scripts"
-                srcDoc={buildHtmlPreviewDoc(displayContent)}
-                className="w-full h-full bg-white dark:bg-zinc-900"
+                srcDoc={htmlPreviewDoc}
+                className="w-full h-full border-0 bg-white dark:bg-[#1a1e26]"
               />
             )}
           </div>
@@ -786,7 +901,7 @@ export default function DetailView({
                 selectionEnd: e.currentTarget.selectionEnd,
               })
             }}
-            className={`w-full h-full min-h-[200px] p-3 bg-zinc-50 dark:bg-zinc-900 border border-blue-500/50 rounded-lg text-sm text-zinc-800 dark:text-zinc-200 font-normal antialiased leading-7 resize-none outline-none focus:border-blue-500 transition-colors ${monoClass}`}
+            className={`w-full h-full min-h-[200px] p-3 bg-zinc-50 dark:bg-zinc-950/60 border border-blue-500/50 rounded-lg text-sm text-zinc-800 dark:text-zinc-100 font-normal antialiased leading-7 resize-none outline-none focus:border-blue-500 transition-colors ${monoClass}`}
             spellCheck={false}
           />
         ) : (
@@ -806,18 +921,156 @@ export default function DetailView({
                 </div>
               </div>
             )}
-            <pre
-              onDoubleClick={enterEditMode}
-              onContextMenu={(e) => {
-                if (!supportsTextContextMenu(item.type)) return
-                e.preventDefault()
-                setTextContextMenu({ x: e.clientX, y: e.clientY, selection: window.getSelection()?.toString() ?? '', editing: false, selectionStart: 0, selectionEnd: 0 })
-              }}
-              className={`text-sm text-zinc-800 dark:text-zinc-200 font-normal antialiased whitespace-pre-wrap break-words leading-7 select-text cursor-text hover:bg-zinc-50 dark:hover:bg-zinc-900/50 rounded-lg p-1 -m-1 transition-colors ${monoClass}`}
-              title={tr('detail.dblClickEdit')}
-            >
-              {displayContent}
-            </pre>
+
+            {/* Smart Inspector: Color swatch card */}
+            {smartInspection?.color && (
+              <div
+                data-testid="smart-color-card"
+                className="mb-3 rounded-xl border border-zinc-200 dark:border-zinc-700/80 bg-zinc-50/90 dark:bg-zinc-900/70 p-3 flex items-center gap-3.5"
+              >
+                <div
+                  className="w-12 h-12 rounded-lg border border-black/15 dark:border-white/15 shadow-inner flex-shrink-0 flex items-center justify-center"
+                  style={{ backgroundColor: smartInspection.color.cssColor }}
+                  title={smartInspection.color.hex}
+                >
+                  <Palette className={`w-4 h-4 ${smartInspection.color.isDark ? 'text-white/80' : 'text-zinc-900/70'}`} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">
+                    {tr('smart.color')}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      { label: 'HEX', val: smartInspection.color.hex },
+                      { label: 'RGB', val: smartInspection.color.rgb },
+                      { label: 'HSL', val: smartInspection.color.hsl },
+                    ].map(({ label, val }) => (
+                      <button
+                        key={label}
+                        type="button"
+                        onClick={() => { void copySmartText(val) }}
+                        className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-[var(--accent)] text-[11px] font-mono text-zinc-700 dark:text-zinc-200 transition-colors"
+                      >
+                        <span className="text-[10px] text-zinc-400 dark:text-zinc-500">{label}</span>
+                        <span>{val}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Smart Inspector: Timestamp card */}
+            {smartInspection?.timestamp && (
+              <div
+                data-testid="smart-timestamp-card"
+                className="mb-3 rounded-xl border border-zinc-200 dark:border-zinc-700/80 bg-zinc-50/90 dark:bg-zinc-900/70 p-3"
+              >
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <div className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+                    <Clock className="w-3.5 h-3.5 text-[var(--accent)]" />
+                    <span>{tr('smart.timestamp')}</span>
+                    <span className="px-1.5 py-0.5 rounded bg-zinc-200/70 dark:bg-zinc-800 text-[10px] text-zinc-600 dark:text-zinc-300">
+                      {smartInspection.timestamp.unit === 'ms' ? tr('smart.timestampUnitMs') : tr('smart.timestampUnitSec')}
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                    {smartInspection.timestamp.relative}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { void copySmartText(smartInspection.timestamp!.localFormatted) }}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-[var(--accent)] text-xs font-mono font-medium text-zinc-800 dark:text-zinc-100 transition-colors"
+                  >
+                    <span>{smartInspection.timestamp.localFormatted}</span>
+                    <Copy className="w-3 h-3 text-zinc-400" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { void copySmartText(smartInspection.timestamp!.isoUtc) }}
+                    className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-[var(--accent)] text-[11px] font-mono text-zinc-600 dark:text-zinc-300 transition-colors"
+                  >
+                    <span>{smartInspection.timestamp.isoUtc}</span>
+                    <Copy className="w-3 h-3 text-zinc-400" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Smart Inspector: JSON toolbar + collapsible tree */}
+            {smartInspection?.json && (
+              <div
+                data-testid="smart-json-bar"
+                className="mb-3 rounded-lg border border-zinc-200 dark:border-zinc-700/80 bg-zinc-50/90 dark:bg-zinc-900/70 px-3 py-2 flex flex-wrap items-center justify-between gap-2"
+              >
+                <div className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
+                  <Braces className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  <span className="font-medium">{tr('smart.json')}</span>
+                  <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                    {smartInspection.json.kind === 'array'
+                      ? tr('smart.jsonArray', { n: smartInspection.json.entryCount })
+                      : tr('smart.jsonObject', { n: smartInspection.json.entryCount })}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setJsonViewMode((m) => (m === 'tree' ? 'raw' : 'tree'))}
+                    className="h-6 px-2 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-[var(--accent)] text-[11px] text-zinc-700 dark:text-zinc-200 transition-colors"
+                  >
+                    {jsonViewMode === 'tree' ? tr('smart.jsonRawView') : tr('smart.jsonTreeView')}
+                  </button>
+                  {jsonViewMode === 'tree' && (
+                    <button
+                      type="button"
+                      onClick={() => setJsonExpandSignal((prev) => ({ expanded: !(prev?.expanded ?? true), version: (prev?.version ?? 0) + 1 }))}
+                      className="inline-flex items-center gap-1 h-6 px-2 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-[var(--accent)] text-[11px] text-zinc-700 dark:text-zinc-200 transition-colors"
+                    >
+                      <ChevronsUpDown className="w-3 h-3" />
+                      <span>{(jsonExpandSignal?.expanded ?? true) ? tr('smart.jsonCollapseAll') : tr('smart.jsonExpandAll')}</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => { void copySmartText(smartInspection.json!.formatted, tr('smart.jsonFormatCopy')) }}
+                    className="h-6 px-2 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-[var(--accent)] text-[11px] text-zinc-700 dark:text-zinc-200 transition-colors"
+                  >
+                    {tr('smart.jsonFormatCopy')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { void copySmartText(smartInspection.json!.minified, tr('smart.jsonMinifyCopy')) }}
+                    className="h-6 px-2 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:border-[var(--accent)] text-[11px] text-zinc-700 dark:text-zinc-200 transition-colors"
+                  >
+                    {tr('smart.jsonMinifyCopy')}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {smartInspection?.json && jsonViewMode === 'tree' ? (
+              <div onDoubleClick={enterEditMode} title={tr('detail.dblClickEdit')}>
+                <JsonTreeView
+                  data={smartInspection.json.parsed}
+                  expandAllSignal={jsonExpandSignal}
+                />
+              </div>
+            ) : (
+              <pre
+                onDoubleClick={enterEditMode}
+                onContextMenu={(e) => {
+                  if (!supportsTextContextMenu(item.type)) return
+                  e.preventDefault()
+                  setTextContextMenu({ x: e.clientX, y: e.clientY, selection: window.getSelection()?.toString() ?? '', editing: false, selectionStart: 0, selectionEnd: 0 })
+                }}
+                className={`text-sm text-zinc-800 dark:text-zinc-100 font-normal antialiased whitespace-pre-wrap break-words leading-7 select-text cursor-text hover:bg-zinc-50 dark:hover:bg-zinc-800/40 rounded-lg p-1 -m-1 transition-colors ${monoClass}`}
+                title={tr('detail.dblClickEdit')}
+              >
+                {displayContent}
+              </pre>
+            )}
           </div>
         )}
       </div>
@@ -835,7 +1088,7 @@ export default function DetailView({
       )}
 
       {/* Bottom action bar */}
-      <div className="flex-shrink-0 min-h-12 flex flex-wrap items-center justify-end gap-2 px-4 py-2 [&>button]:shrink-0 [&>button]:whitespace-nowrap">
+      <div className="flex-shrink-0 min-h-12 flex flex-wrap items-center justify-end gap-2 px-4 py-2 border-t qp-divider bg-zinc-50/80 dark:bg-zinc-950/35 [&>button]:shrink-0 [&>button]:whitespace-nowrap">
         {item.type === 'url' && (
           <button
             onClick={async () => {
@@ -844,7 +1097,7 @@ export default function DetailView({
                 onOpenUrl(content)
               } catch { onToast?.('读取链接失败，请重试') }
             }}
-            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
+            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/80 hover:bg-zinc-100 hover:border-zinc-300 dark:hover:bg-zinc-700 dark:hover:border-zinc-600 text-xs text-zinc-700 dark:text-zinc-200 transition-colors"
             title={tr('detail.openUrl')}
           >
             <ExternalLink className="w-3.5 h-3.5" />
@@ -855,7 +1108,7 @@ export default function DetailView({
         {(item.type === 'text' || item.type === 'url' || item.type === 'html') && plainText.length > 0 && plainText.length <= 2500 && (
           <button
             onClick={() => setQrOpen(true)}
-            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
+            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/80 hover:bg-zinc-100 hover:border-zinc-300 dark:hover:bg-zinc-700 dark:hover:border-zinc-600 text-xs text-zinc-700 dark:text-zinc-200 transition-colors"
             title={tr('detail.qr')}
           >
             <QrCode className="w-3.5 h-3.5" />
@@ -866,11 +1119,11 @@ export default function DetailView({
           <button
             onClick={startOcrSelection}
             disabled={ocrBusy}
-            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
+            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/80 hover:bg-zinc-100 hover:border-zinc-300 dark:hover:bg-zinc-700 dark:hover:border-zinc-600 disabled:opacity-50 text-xs text-zinc-700 dark:text-zinc-200 transition-colors"
             title={tr('detail.ocr')}
           >
             {ocrBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ScanText className="w-3.5 h-3.5" />}
-            {ocrBusy && ocrStage && <span className="text-[10px] text-zinc-400 dark:text-zinc-500">{ocrStage}</span>}
+            {ocrBusy && ocrStage && <span className="text-[10px] text-zinc-400 dark:text-zinc-400">{ocrStage}</span>}
             {!ocrBusy && <span>{tr('detail.ocr')}</span>}
           </button>
         )}
@@ -878,16 +1131,69 @@ export default function DetailView({
         {!isImage && plainText.length > 0 && (
           <button
             onClick={() => void saveAsFile()}
-            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
+            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/80 hover:bg-zinc-100 hover:border-zinc-300 dark:hover:bg-zinc-700 dark:hover:border-zinc-600 text-xs text-zinc-700 dark:text-zinc-200 transition-colors"
             title={tr('detail.saveAsFile')}
           >
             <FileDown className="w-3.5 h-3.5" />
           </button>
         )}
 
+        {onSaveToFloral && (
+          <div ref={floralMenuRef} className="relative">
+            <button
+              type="button"
+              disabled={savingToFloral}
+              onClick={() => setFloralMenuOpen((open) => !open)}
+              className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/80 hover:bg-zinc-100 hover:border-zinc-300 dark:hover:bg-zinc-700 dark:hover:border-zinc-600 disabled:opacity-50 text-xs text-zinc-700 dark:text-zinc-200 transition-colors"
+              title={tr('detail.saveToFloral')}
+            >
+              {savingToFloral ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <BookPlus className="w-3.5 h-3.5" />}
+              <span>{tr('detail.saveToFloral')}</span>
+            </button>
+            {floralMenuOpen && (
+              <div className="absolute right-0 bottom-full mb-1.5 z-40 min-w-[148px] py-1 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 shadow-lg text-xs text-zinc-700 dark:text-zinc-200">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setFloralMenuOpen(false)
+                    setSavingToFloral(true)
+                    try { await onSaveToFloral(item, 'new') } finally { setSavingToFloral(false) }
+                  }}
+                  className="w-full px-3 py-2 text-left hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors whitespace-nowrap"
+                >
+                  {tr('detail.saveToFloralNew')}
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setFloralMenuOpen(false)
+                    setSavingToFloral(true)
+                    try { await onSaveToFloral(item, 'append') } finally { setSavingToFloral(false) }
+                  }}
+                  className="w-full px-3 py-2 text-left hover:bg-zinc-100 dark:hover:bg-zinc-700 transition-colors whitespace-nowrap"
+                >
+                  {tr('detail.saveToFloralAppend')}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {isHtml && onCopyPlainText && (
+          <button
+            type="button"
+            onClick={() => onCopyPlainText(item)}
+            className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/80 hover:bg-zinc-100 hover:border-zinc-300 dark:hover:bg-zinc-700 dark:hover:border-zinc-600 text-xs text-zinc-700 dark:text-zinc-200 transition-colors"
+            title={tr('detail.copyPlainHint')}
+          >
+            <RemoveFormatting className="w-3.5 h-3.5" />
+            <span>{tr('detail.copyPlain')}</span>
+          </button>
+        )}
+
         <button
           onClick={() => onCopy(item)}
-          className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-xs text-zinc-600 dark:text-zinc-300 transition-colors"
+          className="flex items-center gap-1.5 h-7 px-3 rounded-md bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/80 hover:bg-zinc-100 hover:border-zinc-300 dark:hover:bg-zinc-700 dark:hover:border-zinc-600 text-xs text-zinc-700 dark:text-zinc-200 transition-colors"
         >
           <Copy className="w-3.5 h-3.5" />
           <span>{tr('detail.copy')}</span>
@@ -898,8 +1204,8 @@ export default function DetailView({
           onClick={() => onTogglePin(item.id)}
           className={`flex items-center gap-1.5 h-7 px-3 rounded-md text-xs transition-colors ${
             item.is_pinned
-              ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-900/50'
-              : 'bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 dark:text-zinc-400'
+              ? 'bg-amber-100 dark:bg-amber-900/35 border border-amber-300 dark:border-amber-500/40 text-amber-700 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-900/55'
+              : 'bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/80 hover:bg-zinc-100 hover:border-zinc-300 dark:hover:bg-zinc-700 dark:hover:border-zinc-600 text-zinc-700 dark:text-zinc-200'
           }`}
         >
           <Pin className={`w-3.5 h-3.5 ${item.is_pinned ? 'fill-current' : ''}`} />
@@ -912,8 +1218,8 @@ export default function DetailView({
             onClick={() => onToggleSensitive(item.id)}
             className={`flex items-center gap-1.5 h-7 px-3 rounded-md text-xs transition-colors ${
               item.is_sensitive
-                ? 'bg-rose-100 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400 hover:bg-rose-200 dark:hover:bg-rose-900/50'
-                : 'bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 dark:text-zinc-400'
+                ? 'bg-rose-100 dark:bg-rose-900/35 border border-rose-200 dark:border-rose-500/40 text-rose-600 dark:text-rose-300 hover:bg-rose-200 dark:hover:bg-rose-900/55'
+                : 'bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/80 hover:bg-zinc-100 hover:border-zinc-300 dark:hover:bg-zinc-700 dark:hover:border-zinc-600 text-zinc-700 dark:text-zinc-200'
             }`}
             title={item.is_sensitive ? tr('detail.unmarkSensitive') : tr('detail.markSensitive')}
           >
@@ -927,9 +1233,9 @@ export default function DetailView({
             onClick={() => setShowSensitive(!showSensitive)}
             className={`flex items-center gap-1.5 h-7 px-2 rounded-md text-xs transition-colors ${
               showSensitive
-                ? 'bg-rose-100 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400'
-                : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400'
-            } hover:bg-zinc-200 dark:hover:bg-zinc-700`}
+                ? 'bg-rose-100 dark:bg-rose-900/35 border border-rose-200 dark:border-rose-500/40 text-rose-600 dark:text-rose-300'
+                : 'bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/80 text-zinc-700 dark:text-zinc-200'
+            } hover:bg-zinc-100 dark:hover:bg-zinc-700`}
             title={showSensitive ? tr('detail.hideSensitive') : tr('detail.showSensitive')}
           >
             {showSensitive ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
@@ -940,8 +1246,8 @@ export default function DetailView({
           onClick={() => onDelete(item.id)}
           className={`flex items-center gap-1.5 h-7 px-3 rounded-md text-xs transition-colors ${
             confirmingDelete
-              ? 'bg-red-600 text-white hover:bg-red-700 shadow-sm'
-              : 'bg-zinc-100 dark:bg-zinc-800 hover:bg-red-100 dark:hover:bg-red-900/50 hover:text-red-600 dark:hover:text-red-400 text-zinc-500 dark:text-zinc-400'
+              ? 'bg-red-600 border border-red-600 text-white hover:bg-red-700 shadow-sm'
+              : 'bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/80 hover:bg-red-50 hover:border-red-200 dark:hover:bg-red-900/45 dark:hover:border-red-500/40 hover:text-red-600 dark:hover:text-red-300 text-zinc-700 dark:text-zinc-200'
           }`}
         >
           <Trash2 className="w-3.5 h-3.5" />

@@ -2,6 +2,8 @@ import chroma from "chroma-js";
 import type { CSSProperties, HTMLAttributes } from "react";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { splitTextWithLinks } from "../features/notes/linkUtils";
 import { DEFAULT_TILE_COLOR, normalizeTileColor, getTileTextColor } from "../features/settings/tileColor";
 import { MarkdownPreviewLazy as MarkdownPreview } from "../features/markdown/MarkdownPreviewLazy";
 
@@ -84,17 +86,24 @@ export function Tile({
 }: TileProps) {
   const { t } = useTranslation();
   const tileColor = normalizeTileColor(color);
-  const { borderColor, cornerColor, titleColor, contentColor, emptyColor } = useMemo(() => {
+  const { borderColor, cornerColor, titleColor, contentColor, emptyColor, linkColor } = useMemo(() => {
     const isLightBg = chroma(tileColor).luminance() > 0.18;
     const mixTarget = isLightBg ? "#1a1a18" : "#ffffff";
+    const textColor = getTileTextColor(tileColor);
+    const candidateLink = isLightBg ? "#1f6a4a" : "#7dd3fc";
     return {
       borderColor: chroma.mix(tileColor, mixTarget, 0.18).alpha(0.55).css(),
       cornerColor: chroma.mix(tileColor, mixTarget, 0.3).alpha(0.26).css(),
-      titleColor: getTileTextColor(tileColor),
-      contentColor: getTileTextColor(tileColor),
-      emptyColor: getTileTextColor(tileColor),
+      titleColor: textColor,
+      contentColor: textColor,
+      emptyColor: textColor,
+      linkColor: chroma.contrast(candidateLink, tileColor) >= 4.5 ? candidateLink : textColor,
     };
   }, [tileColor]);
+  const plainSegments = useMemo(
+    () => (renderMarkdown || !content ? [] : splitTextWithLinks(content)),
+    [content, renderMarkdown],
+  );
   const mergedStyle: CSSProperties = {
     width,
     backgroundColor: tileColor,
@@ -110,7 +119,7 @@ export function Tile({
       className={`app-surface-frame relative border overflow-hidden select-none shadow-[0_1px_8px_rgba(26,26,24,0.04)] hover:shadow-[0_6px_24px_rgba(26,26,24,0.07)] ${className}`}
       style={mergedStyle}
     >
-      <div data-tile-scroll="true" className="h-full overflow-y-auto overflow-x-hidden scrollbar-hidden">
+      <div data-tile-scroll="true" className="h-full overflow-y-auto overflow-x-hidden tile-scroll-area">
       <div data-tile-body="true" className="pl-4 pr-8 pt-6 pb-4 min-w-0" style={{ fontSize: `${fontSize}px`, overflowWrap: 'anywhere' }}>
         {title && (
           <div
@@ -135,7 +144,29 @@ export function Tile({
               className="leading-[1.8] whitespace-pre-wrap font-body"
               style={{ color: contentColor, fontSize: `${fontSize}px` }}
             >
-              {content}
+              {plainSegments.map((segment, index) =>
+                segment.type === "link" && segment.href ? (
+                  <a
+                    key={index}
+                    href={segment.href}
+                    title={segment.href}
+                    data-tile-link="true"
+                    className="electron-no-drag underline underline-offset-2 cursor-pointer hover:opacity-75 transition-opacity"
+                    style={{ color: linkColor }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onDoubleClick={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      void openUrl(segment.href!);
+                    }}
+                  >
+                    {segment.value}
+                  </a>
+                ) : (
+                  segment.value
+                ),
+              )}
             </div>
           )
         ) : (

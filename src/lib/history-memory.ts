@@ -50,6 +50,8 @@ export function applyClipboardChanges(current: ClipboardItem[], changes: Clipboa
       alias: existing?.alias ?? '',
       tags: existing?.tags ?? [],
       is_sensitive: data.isSensitive ?? existing?.is_sensitive ?? false,
+      ocr_text: existing?.ocr_text ?? '',
+      source_app: data.sourceApp || existing?.source_app || '',
     }
     updated.delete(data.id)
     updated.set(data.id, item)

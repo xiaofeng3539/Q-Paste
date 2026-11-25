@@ -24,6 +24,8 @@ interface SettingsProps {
   onDensityChange: (d: 'comfortable' | 'compact') => void
   useMonospace: boolean
   onMonospaceChange: (v: boolean) => void
+  directPaste: boolean
+  onDirectPasteChange: (v: boolean) => void
   autoHideOnCopy: boolean
   onAutoHideChange: (v: boolean) => void
   shortcuts: Record<ShortcutAction, string>
@@ -73,7 +75,7 @@ function FtSwitch({ checked, onChange }: { checked: boolean; onChange: (v: boole
   )
 }
 
-export default function Settings({ fileTransferRequest, theme, onThemeChange, language, onLanguageChange, accentColor, onAccentChange, listDensity, onDensityChange, useMonospace, onMonospaceChange, autoHideOnCopy, onAutoHideChange, shortcuts, onShortcutChange, onBack, onDataImported, onClearData, onToast }: SettingsProps) {
+export default function Settings({ fileTransferRequest, theme, onThemeChange, language, onLanguageChange, accentColor, onAccentChange, listDensity, onDensityChange, useMonospace, onMonospaceChange, directPaste, onDirectPasteChange, autoHideOnCopy, onAutoHideChange, shortcuts, onShortcutChange, onBack, onDataImported, onClearData, onToast }: SettingsProps) {
   const [activeMenu, setActiveMenu] = useState<MenuKey>(fileTransferRequest ? 'fileTransfer' : 'general')
   const menuItems = useMenuItems()
   const { alert, confirm } = useDialog()
@@ -589,7 +591,7 @@ export default function Settings({ fileTransferRequest, theme, onThemeChange, la
   }, [shortcutRecording, toggleShortcut])
 
   return (
-    <div className="h-full flex bg-zinc-50 dark:bg-zinc-950">
+    <div className="h-full flex qp-canvas">
       {/* Left — settings menu */}
       <div className="w-[200px] flex-shrink-0 flex flex-col">
         {/* Menu items */}
@@ -598,12 +600,12 @@ export default function Settings({ fileTransferRequest, theme, onThemeChange, la
             <button
               key={item.key}
               onClick={() => setActiveMenu(item.key)}
-              style={activeMenu === item.key ? { backgroundColor: 'color-mix(in srgb, var(--accent) 10%, transparent)' } : undefined}
+              style={activeMenu === item.key ? { backgroundColor: 'color-mix(in srgb, var(--accent) 12%, transparent)' } : undefined}
               className={cn(
                 'w-[calc(100%-16px)] mx-2 flex items-center gap-2.5 px-3 py-2 text-left text-[13px] rounded-lg transition-all',
                 activeMenu === item.key
                   ? 'text-[var(--accent)] font-medium'
-                  : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800/50',
+                  : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-300 hover:bg-white/70 dark:hover:bg-zinc-800/50',
               )}
             >
               {item.icon}
@@ -613,10 +615,10 @@ export default function Settings({ fileTransferRequest, theme, onThemeChange, la
         </div>
 
         {/* Bottom — back button (fixed) */}
-        <div className="flex-shrink-0 border-t border-zinc-200 dark:border-zinc-800 p-2">
+        <div className="flex-shrink-0 border-t border-[#d9dee5] dark:border-zinc-800 p-2">
           <button
             onClick={onBack}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-md text-[13px] text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-md text-[13px] text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200 hover:bg-white/70 dark:hover:bg-zinc-800 transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
             <span>{tr('settings.back')}</span>
@@ -626,7 +628,7 @@ export default function Settings({ fileTransferRequest, theme, onThemeChange, la
 
       {/* Right — settings content (floating card) */}
       <div className="flex-1 flex flex-col min-w-0 p-4 pt-8 pl-0">
-        <div ref={settingsContentRef} className="flex-1 overflow-y-auto bg-white dark:bg-zinc-900 rounded-2xl shadow-sm border border-zinc-200/60 dark:border-zinc-800/50 p-6">
+        <div ref={settingsContentRef} className="flex-1 overflow-y-auto qp-panel rounded-2xl p-6">
           {activeMenu === 'general' && (
             <div className="space-y-4">
               <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-200 dark:border-zinc-800 overflow-hidden">
@@ -677,6 +679,31 @@ export default function Settings({ fileTransferRequest, theme, onThemeChange, la
                       className={cn(
                         'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform duration-200',
                         minToTray ? 'translate-x-4' : 'translate-x-0'
+                      )}
+                    />
+                  </button>
+                </div>
+
+                {/* Direct paste into previous active window */}
+                <div className="flex items-center justify-between py-4 px-5 border-t border-zinc-200 dark:border-zinc-800">
+                  <div className="flex flex-col">
+                    <span className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200">{tr('general.directPaste')}</span>
+                    <span className="text-[12px] text-zinc-400 dark:text-zinc-500 mt-0.5">{tr('general.directPasteDesc')}</span>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={directPaste}
+                    onClick={() => onDirectPasteChange(!directPaste)}
+                    className={cn(
+                      'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200',
+                      directPaste ? 'bg-[var(--accent)]' : 'bg-zinc-300 dark:bg-zinc-600'
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform duration-200',
+                        directPaste ? 'translate-x-4' : 'translate-x-0'
                       )}
                     />
                   </button>

@@ -90,15 +90,15 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
   );
 
   return (
-    <aside className="w-[360px] h-full shrink-0 border-l border-paper-deep/30 bg-cloud/92 backdrop-blur-sm flex flex-col">
-      <div className="flex items-center justify-between h-11 px-4 border-b border-paper-deep/25">
-        <h2 className="text-[13px] font-display font-medium text-ink-soft">
+    <aside className="w-[360px] h-full shrink-0 border-l border-paper-deep/60 bg-cloud/96 backdrop-blur-sm flex flex-col">
+      <div className="flex items-center justify-between h-11 px-4 border-b border-paper-deep/50 bg-paper/50">
+        <h2 className="text-[13px] font-display font-semibold text-ink">
           {t("settings.title", { defaultValue: "应用设置" })}
         </h2>
         <button
           type="button"
           onClick={onClose}
-          className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-ghost hover:text-ink-soft hover:bg-paper-warm transition-colors cursor-pointer"
+          className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-faint hover:text-ink hover:bg-paper-warm transition-colors cursor-pointer"
           title={t("settings.closeTitle", { defaultValue: "关闭设置" })}
         >
           <svg
@@ -117,7 +117,7 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
 
       <div className="flex-1 overflow-y-auto scrollbar-hidden px-4 py-4 space-y-5">
         <section className="space-y-2">
-          <label className="block text-[11px] font-body text-ink-faint">
+          <label className="block text-[11px] font-body font-medium text-ink-faint">
             {t("settings.theme.label", { defaultValue: "主题" })}
           </label>
           <SlidingButtonGroup
@@ -132,7 +132,7 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
         </section>
 
         <section className="space-y-2">
-          <label className="block text-[11px] font-body text-ink-faint">
+          <label className="block text-[11px] font-body font-medium text-ink-faint">
             {t("settings.dataDir", { defaultValue: "数据目录" })}
           </label>
           <div className="flex gap-2">
@@ -140,12 +140,12 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
               type="text"
               value={config.dataDir}
               readOnly
-              className="min-w-0 flex-1 h-8 px-2.5 rounded-lg bg-paper-warm/70 border border-paper-deep/40 text-[11px] font-mono text-ink-faint truncate"
+              className="min-w-0 flex-1 h-8 px-2.5 rounded-lg bg-paper-warm/80 border border-paper-deep/60 text-[11px] font-mono text-ink-soft truncate"
             />
             <button
               type="button"
               onClick={onMigrateDataDir}
-              className="h-8 px-3 rounded-lg border border-paper-deep/45 text-[11px] text-ink-faint hover:text-bamboo hover:bg-bamboo-mist/50 transition-colors cursor-pointer"
+              className="h-8 px-3 rounded-lg bg-paper-warm/45 border border-paper-deep/65 text-[11px] font-medium text-ink-soft hover:text-bamboo hover:bg-bamboo-mist/70 hover:border-bamboo/40 transition-colors cursor-pointer"
             >
               {t("settings.selectFolder", { defaultValue: "选择文件夹" })}
             </button>
@@ -153,7 +153,7 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
         </section>
 
         <section className="space-y-2">
-          <label className="block text-[11px] font-body text-ink-faint">
+          <label className="block text-[11px] font-body font-medium text-ink-faint">
             {t("settings.locale.label", { defaultValue: "语言" })}
           </label>
           <SlidingButtonGroup
@@ -234,7 +234,7 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
             onChange={(checked) => setConfigValue("openAtCursor", checked)}
           />
           <div className="space-y-1.5">
-            <label className="block text-[11px] font-body text-ink-faint/70 px-0.5">
+            <label className="block text-[11px] font-body font-medium text-ink-faint px-0.5">
               {t("settings.quickNoteShortcut", { defaultValue: "快捷记录快捷键" })}
             </label>
             <ShortcutRecorder
@@ -243,7 +243,7 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
             />
           </div>
           <div className="space-y-1.5">
-            <label className="block text-[11px] font-body text-ink-faint/70 px-0.5">
+            <label className="block text-[11px] font-body font-medium text-ink-faint px-0.5">
               {t("settings.visibilityShortcut", { defaultValue: "显示/隐藏窗口快捷键" })}
             </label>
             <ShortcutRecorder
@@ -256,10 +256,10 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
         </section>
 
         <section className="space-y-2">
-          <label className="block text-[11px] font-body text-ink-faint">
+          <label className="block text-[11px] font-body font-medium text-ink-faint">
             {t("settings.fontSize.editor", { defaultValue: "编辑器字号" })}
           </label>
-          <div className="flex items-center gap-3 h-9 rounded-lg px-2.5 bg-paper-warm/45 border border-paper-deep/25">
+          <div className="flex items-center gap-3 h-9 rounded-lg px-2.5 bg-paper-warm/65 border border-paper-deep/50">
             <input
               type="range"
               min={8}
@@ -267,7 +267,7 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
               step={1}
               value={config.fontSize ?? 14}
               onChange={(event) => setConfigValue("fontSize", Number(event.target.value))}
-              className="flex-1 h-1 accent-bamboo cursor-pointer appearance-none bg-transparent [&::-webkit-slider-runnable-track]:h-[3px] [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-paper-deep/50 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-bamboo [&::-webkit-slider-thumb]:-mt-[4.5px] [&::-webkit-slider-thumb]:shadow-[0_1px_3px_rgba(0,0,0,0.15)]"
+              className="flex-1 h-1 accent-bamboo cursor-pointer appearance-none bg-transparent [&::-webkit-slider-runnable-track]:h-[3px] [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-paper-deep/80 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-bamboo [&::-webkit-slider-thumb]:-mt-[4.5px] [&::-webkit-slider-thumb]:shadow-[0_1px_3px_rgba(0,0,0,0.18)]"
             />
             <span className="text-[12px] font-mono text-ink-soft tabular-nums w-8 text-right">
               {config.fontSize ?? 14}px
@@ -276,10 +276,10 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
         </section>
 
         <section className="space-y-2">
-          <label className="block text-[11px] font-body text-ink-faint">
+          <label className="block text-[11px] font-body font-medium text-ink-faint">
             {t("settings.fontSize.surface", { defaultValue: "小窗/磁贴字号" })}
           </label>
-          <div className="flex items-center gap-3 h-9 rounded-lg px-2.5 bg-paper-warm/45 border border-paper-deep/25">
+          <div className="flex items-center gap-3 h-9 rounded-lg px-2.5 bg-paper-warm/65 border border-paper-deep/50">
             <input
               type="range"
               min={8}
@@ -287,7 +287,7 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
               step={1}
               value={config.surfaceFontSize ?? 14}
               onChange={(event) => setConfigValue("surfaceFontSize", Number(event.target.value))}
-              className="flex-1 h-1 accent-bamboo cursor-pointer appearance-none bg-transparent [&::-webkit-slider-runnable-track]:h-[3px] [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-paper-deep/50 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-bamboo [&::-webkit-slider-thumb]:-mt-[4.5px] [&::-webkit-slider-thumb]:shadow-[0_1px_3px_rgba(0,0,0,0.15)]"
+              className="flex-1 h-1 accent-bamboo cursor-pointer appearance-none bg-transparent [&::-webkit-slider-runnable-track]:h-[3px] [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-paper-deep/80 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-bamboo [&::-webkit-slider-thumb]:-mt-[4.5px] [&::-webkit-slider-thumb]:shadow-[0_1px_3px_rgba(0,0,0,0.18)]"
             />
             <span className="text-[12px] font-mono text-ink-soft tabular-nums w-8 text-right">
               {config.surfaceFontSize ?? 14}px
@@ -296,10 +296,10 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
         </section>
 
         <section className="space-y-2">
-          <label className="block text-[11px] font-body text-ink-faint">
-            {t("settings.tabIndentSize", { defaultValue: "Tab 缩进宽��" })}
+          <label className="block text-[11px] font-body font-medium text-ink-faint">
+            {t("settings.tabIndentSize", { defaultValue: "Tab 缩进宽度" })}
           </label>
-          <div className="flex items-center gap-3 h-9 rounded-lg px-2.5 bg-paper-warm/45 border border-paper-deep/25">
+          <div className="flex items-center gap-3 h-9 rounded-lg px-2.5 bg-paper-warm/65 border border-paper-deep/50">
             <input
               type="range"
               min={1}
@@ -307,7 +307,7 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
               step={1}
               value={config.tabIndentSize ?? 2}
               onChange={(event) => setConfigValue("tabIndentSize", Number(event.target.value))}
-              className="flex-1 h-1 accent-bamboo cursor-pointer appearance-none bg-transparent [&::-webkit-slider-runnable-track]:h-[3px] [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-paper-deep/50 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-bamboo [&::-webkit-slider-thumb]:-mt-[4.5px] [&::-webkit-slider-thumb]:shadow-[0_1px_3px_rgba(0,0,0,0.15)]"
+              className="flex-1 h-1 accent-bamboo cursor-pointer appearance-none bg-transparent [&::-webkit-slider-runnable-track]:h-[3px] [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-paper-deep/80 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-bamboo [&::-webkit-slider-thumb]:-mt-[4.5px] [&::-webkit-slider-thumb]:shadow-[0_1px_3px_rgba(0,0,0,0.18)]"
             />
             <span className="text-[12px] font-mono text-ink-soft tabular-nums w-10 text-right">
               {config.tabIndentSize ?? 2}
@@ -316,7 +316,7 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
         </section>
 
         <section className="space-y-2">
-          <label className="block text-[11px] font-body text-ink-faint">
+          <label className="block text-[11px] font-body font-medium text-ink-faint">
             {t("settings.tileColor.label", { defaultValue: "磁贴颜色" })}
           </label>
           <SlidingButtonGroup
@@ -330,7 +330,7 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
                 type="color"
                 value={normalizeTileColor(config.tileColor)}
                 onChange={(event) => setConfigValue("tileColor", event.target.value)}
-                className="w-10 h-8 rounded-lg border border-paper-deep/40 bg-paper-warm/70 cursor-pointer"
+                className="w-10 h-8 rounded-lg border border-paper-deep/60 bg-paper-warm/80 cursor-pointer"
               />
               <input
                 type="text"
@@ -338,12 +338,12 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
                 onChange={(event) => setConfigValue("tileColor", event.target.value)}
                 placeholder="#f6f3ec"
                 spellCheck={false}
-                className="min-w-0 flex-1 h-8 px-2.5 rounded-lg bg-paper-warm/70 border border-paper-deep/40 text-[12px] font-mono text-ink-soft outline-none"
+                className="min-w-0 flex-1 h-8 px-2.5 rounded-lg bg-paper-warm/80 border border-paper-deep/60 text-[12px] font-mono text-ink-soft outline-none"
               />
               <button
                 type="button"
                 onClick={() => setConfigValue("tileColor", DEFAULT_TILE_COLOR)}
-                className="h-8 px-2.5 rounded-lg border border-paper-deep/45 text-[11px] text-ink-faint hover:text-bamboo hover:bg-bamboo-mist/50 transition-colors cursor-pointer whitespace-nowrap"
+                className="h-8 px-2.5 rounded-lg bg-paper-warm/45 border border-paper-deep/65 text-[11px] font-medium text-ink-soft hover:text-bamboo hover:bg-bamboo-mist/70 transition-colors cursor-pointer whitespace-nowrap"
               >
                 {t("common.default", { defaultValue: "默认" })}
               </button>
@@ -352,7 +352,7 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
         </section>
 
         <section className="space-y-2">
-          <label className="block text-[11px] font-body text-ink-faint">
+          <label className="block text-[11px] font-body font-medium text-ink-faint">
             {t("settings.background.label", { defaultValue: "背景图片" })}
           </label>
           <div className="flex gap-2">
@@ -365,7 +365,7 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
                 t("settings.background.default", { defaultValue: "默认背景" })
               }
               readOnly
-              className="min-w-0 flex-1 h-8 px-2.5 rounded-lg bg-paper-warm/70 border border-paper-deep/40 text-[11px] font-mono text-ink-faint truncate"
+              className="min-w-0 flex-1 h-8 px-2.5 rounded-lg bg-paper-warm/80 border border-paper-deep/60 text-[11px] font-mono text-ink-soft truncate"
             />
             <button
               type="button"
@@ -380,7 +380,7 @@ export function SettingsPanel({ config, onChange, onSharedShortcutChange, onMigr
                   setConfigValue("backgroundImagePath", saved);
                 });
               }}
-              className="h-8 px-3 rounded-lg border border-paper-deep/45 text-[11px] text-ink-faint hover:text-bamboo hover:bg-bamboo-mist/50 transition-colors cursor-pointer"
+              className="h-8 px-3 rounded-lg bg-paper-warm/45 border border-paper-deep/65 text-[11px] font-medium text-ink-soft hover:text-bamboo hover:bg-bamboo-mist/70 transition-colors cursor-pointer"
             >
               {t("settings.background.choose", { defaultValue: "选择" })}
             </button>
@@ -493,7 +493,7 @@ interface ToggleRowProps {
 
 function ToggleRow({ label, checked, onChange }: ToggleRowProps) {
   return (
-    <label className="flex items-center justify-between h-9 rounded-lg px-2.5 bg-paper-warm/45 border border-paper-deep/25 cursor-pointer">
+    <label className="flex items-center justify-between h-9 rounded-lg px-2.5 bg-paper-warm/65 border border-paper-deep/50 hover:border-paper-deep/80 transition-colors cursor-pointer">
       <span className="text-[12px] text-ink-soft">{label}</span>
       <input
         type="checkbox"
@@ -503,11 +503,11 @@ function ToggleRow({ label, checked, onChange }: ToggleRowProps) {
       />
       <div
         className={`relative w-8 h-[18px] rounded-full transition-colors duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] ${
-          checked ? "bg-bamboo" : "bg-paper-deep/50"
+          checked ? "bg-bamboo" : "bg-paper-deep/85"
         }`}
       >
         <div
-          className={`absolute top-[2px] left-[2px] w-[14px] h-[14px] rounded-full bg-white shadow-[0_1px_2px_rgba(0,0,0,0.15)] transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+          className={`absolute top-[2px] left-[2px] w-[14px] h-[14px] rounded-full bg-[#fcfaf5] shadow-[0_1px_2px_rgba(0,0,0,0.2)] transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] ${
             checked ? "translate-x-[14px]" : "translate-x-0"
           }`}
         />
@@ -528,7 +528,7 @@ interface RangeRowProps {
 
 function RangeRow({ label, value, min, max, step, format, onChange }: RangeRowProps) {
   return (
-    <div className="flex items-center gap-3 h-9 rounded-lg px-2.5 bg-paper-warm/45 border border-paper-deep/25">
+    <div className="flex items-center gap-3 h-9 rounded-lg px-2.5 bg-paper-warm/65 border border-paper-deep/50">
       <span className="w-9 text-[11px] text-ink-faint">{label}</span>
       <input
         type="range"
@@ -537,7 +537,7 @@ function RangeRow({ label, value, min, max, step, format, onChange }: RangeRowPr
         step={step}
         value={value}
         onChange={(event) => onChange(Number(event.target.value))}
-        className="flex-1 h-1 accent-bamboo cursor-pointer appearance-none bg-transparent [&::-webkit-slider-runnable-track]:h-[3px] [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-paper-deep/50 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-bamboo [&::-webkit-slider-thumb]:-mt-[4.5px] [&::-webkit-slider-thumb]:shadow-[0_1px_3px_rgba(0,0,0,0.15)]"
+        className="flex-1 h-1 accent-bamboo cursor-pointer appearance-none bg-transparent [&::-webkit-slider-runnable-track]:h-[3px] [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-runnable-track]:bg-paper-deep/80 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-bamboo [&::-webkit-slider-thumb]:-mt-[4.5px] [&::-webkit-slider-thumb]:shadow-[0_1px_3px_rgba(0,0,0,0.18)]"
       />
       <span className="w-10 text-right text-[11px] font-mono text-ink-soft tabular-nums">
         {format(value)}
@@ -689,13 +689,13 @@ function ShortcutRecorder({ value, onChange, checkShortcut = checkGlobalShortcut
           onClick={() => recorder.startRecording()}
           className={`min-w-0 flex-1 h-8 px-2.5 rounded-lg border text-[12px] flex items-center gap-2 cursor-pointer transition-colors ${
             recorder.isRecording
-              ? "bg-bamboo-mist/40 border-bamboo"
-              : "bg-paper-warm/70 border-paper-deep/40 hover:border-paper-deep/60"
+              ? "bg-bamboo-mist/70 border-bamboo"
+              : "bg-paper-warm/80 border-paper-deep/60 hover:border-paper-deep"
           }`}
         >
           {recorder.isRecording ? (
             <>
-              <span className="flex-1 min-w-0 text-left text-bamboo truncate">
+              <span className="flex-1 min-w-0 text-left text-bamboo font-medium truncate">
                 {liveDisplay ||
                   t(allowClear ? "settings.shortcut.pressHint" : "settings.shortcut.pressSharedHint", {
                     defaultValue: allowClear ? "按下快捷键；按 Delete 清空。" : "按下新的快捷键；Esc 取消。",
@@ -709,12 +709,12 @@ function ShortcutRecorder({ value, onChange, checkShortcut = checkGlobalShortcut
             <>
               <span
                 className={`flex-1 min-w-0 text-left truncate ${
-                  value ? "text-ink-soft" : "text-ink-ghost"
+                  value ? "text-ink" : "text-ink-faint"
                 }`}
               >
                 {value || t("settings.shortcut.notSet", { defaultValue: "未设置" })}
               </span>
-              <span className="text-[10px] text-ink-ghost shrink-0">
+              <span className="text-[10px] text-ink-faint shrink-0">
                 {t("settings.shortcut.clickToRecord", { defaultValue: "点击录制" })}
               </span>
             </>
@@ -726,7 +726,7 @@ function ShortcutRecorder({ value, onChange, checkShortcut = checkGlobalShortcut
           onClick={clearShortcut}
           aria-label={t("settings.shortcut.clear", { defaultValue: "清除" })}
           title={t("settings.shortcut.clear", { defaultValue: "清除" })}
-          className="w-8 h-8 rounded-lg border border-paper-deep/45 text-[15px] leading-none text-ink-faint hover:text-red-400 hover:bg-paper-warm/70 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+          className="w-8 h-8 rounded-lg border border-paper-deep/60 bg-cloud text-[15px] leading-none text-ink-soft hover:text-red-500 hover:bg-paper-warm/80 disabled:opacity-45 disabled:cursor-not-allowed transition-colors cursor-pointer"
         >
           ×
         </button>}
@@ -734,7 +734,7 @@ function ShortcutRecorder({ value, onChange, checkShortcut = checkGlobalShortcut
           type="button"
           disabled={!value || isChecking || recorder.isRecording}
           onClick={() => void runShortcutCheck(value, false)}
-          className="h-8 px-3 rounded-lg border border-paper-deep/45 text-[11px] text-ink-faint hover:text-bamboo hover:bg-bamboo-mist/50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+          className="h-8 px-3 rounded-lg border border-paper-deep/60 bg-cloud text-[11px] font-medium text-ink-soft hover:text-bamboo hover:bg-bamboo-mist/70 hover:border-bamboo/35 disabled:opacity-45 disabled:cursor-not-allowed transition-colors cursor-pointer"
         >
           {isChecking
             ? t("settings.shortcut.checkingShort", { defaultValue: "检测中" })

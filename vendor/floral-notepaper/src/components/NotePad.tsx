@@ -10,8 +10,10 @@ import type { UpdateInstallPrepareRequest } from "../features/update/types";
 import { showToast } from "./Toast";
 import type { Note, NoteMetadata } from "../features/notes/types";
 import { countNoteChars, mergeNoteMetadata, metadataFromNote } from "../features/notes/noteUtils";
+import { extractUniqueLinks, findLinkAtOffset, formatLinkLabel } from "../features/notes/linkUtils";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   setCurrentWindowBounds,
   closeCurrentWindow,
@@ -508,6 +510,8 @@ export function NotePad({
   const handleSaveRef = useRef(handleSave);
   handleSaveRef.current = handleSave;
 
+  const lastDomWheelAtRef = useRef(0);
+
   useEffect(() => {
     const unlisten = listen<{ x: number; y: number } | null>('surface-native-double-click', (event) => {
       const point = event.payload;
@@ -516,6 +520,44 @@ export function NotePad({
     });
     return () => { void unlisten.then((stop) => stop()); };
   }, [surfaceMode, tileDoubleClickToEdit, switchSurfaceMode]);
+
+  useEffect(() => {
+    if (surfaceMode !== 'tile') return;
+    const container = surfaceRef.current;
+    const onDomWheel = () => {
+      lastDomWheelAtRef.current = performance.now();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLElement && event.target.closest('input,textarea,select')) return;
+      const scrollEl = surfaceRef.current?.querySelector<HTMLElement>('[data-tile-scroll="true"]');
+      if (!scrollEl) return;
+      let deltaY = 0;
+      if (event.key === 'ArrowDown') deltaY = 48;
+      else if (event.key === 'ArrowUp') deltaY = -48;
+      else if (event.key === 'PageDown') deltaY = Math.max(96, scrollEl.clientHeight - 40);
+      else if (event.key === 'PageUp') deltaY = -Math.max(96, scrollEl.clientHeight - 40);
+      else if (event.key === 'Home') { scrollEl.scrollTop = 0; event.preventDefault(); return; }
+      else if (event.key === 'End') { scrollEl.scrollTop = scrollEl.scrollHeight; event.preventDefault(); return; }
+      if (deltaY) {
+        event.preventDefault();
+        scrollEl.scrollTop += deltaY;
+      }
+    };
+    container?.addEventListener('wheel', onDomWheel, { passive: true, capture: true });
+    document.addEventListener('keydown', onKeyDown);
+    const unlisten = listen<{ deltaY?: number }>('surface-native-wheel', (event) => {
+      const deltaY = Number(event.payload?.deltaY ?? 0);
+      if (!deltaY) return;
+      if (performance.now() - lastDomWheelAtRef.current < 40) return;
+      const scrollEl = surfaceRef.current?.querySelector<HTMLElement>('[data-tile-scroll="true"]');
+      if (scrollEl) scrollEl.scrollTop += deltaY;
+    });
+    return () => {
+      container?.removeEventListener('wheel', onDomWheel, true);
+      document.removeEventListener('keydown', onKeyDown);
+      void unlisten.then((stop) => stop());
+    };
+  }, [surfaceMode]);
 
   const handleTileDoubleClick = useCallback(
     (event: MouseEvent<HTMLElement>) => {
@@ -671,6 +713,7 @@ export function NotePad({
 
   const isTile = surfaceMode === "tile";
   const tileTitle = title.trim();
+  const detectedLinks = useMemo(() => (isTile ? [] : extractUniqueLinks(content)), [content, isTile]);
   const enterClass = hasEnteredOnce.current ? "" : "animate-window-enter";
   const surfaceWrapperClassName = `w-full h-screen flex flex-col bg-transparent p-0 ${isExiting ? "animate-window-exit" : enterClass}`;
   const padSurfaceClassName =
@@ -825,6 +868,13 @@ export function NotePad({
                     setContent(event.target.value);
                     setStatus("dirty");
                   }}
+                  onClick={(event) => {
+                    if (!event.ctrlKey && !event.metaKey) return;
+                    const url = findLinkAtOffset(content, event.currentTarget.selectionStart);
+                    if (!url) return;
+                    event.preventDefault();
+                    void openUrl(url).catch((error) => showToast(getErrorMessage(error)));
+                  }}
                   onPaste={imagePasteHandler}
                   onDrop={imageDropHandler}
                   onDragOver={imageDragOverHandler}
@@ -844,6 +894,42 @@ export function NotePad({
                   className="w-full flex-1 min-h-0 pb-2 leading-relaxed text-ink-soft font-body placeholder:text-ink-ghost/50"
                   style={{ fontSize: `${surfaceFontSize}px`, tabSize: `var(--tab-indent-size, 2)` }}
                 />
+
+                {detectedLinks.length > 0 && (
+                  <div
+                    data-pad-link-bar="true"
+                    className="flex items-center gap-1.5 py-1.5 overflow-x-auto scrollbar-hidden shrink-0 border-t border-paper-deep/25"
+                  >
+                    {detectedLinks.map((url) => (
+                      <button
+                        key={url}
+                        type="button"
+                        title={url}
+                        onClick={() =>
+                          void openUrl(url).catch((error) => showToast(getErrorMessage(error)))
+                        }
+                        className="inline-flex items-center gap-1 max-w-[240px] px-2 py-0.5 rounded-md text-[11px] bg-bamboo/10 text-bamboo hover:bg-bamboo/20 transition-colors cursor-pointer shrink-0"
+                      >
+                        <svg
+                          width="11"
+                          height="11"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          className="shrink-0"
+                        >
+                          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                          <polyline points="15 3 21 3 21 9" />
+                          <line x1="10" y1="14" x2="21" y2="3" />
+                        </svg>
+                        <span className="truncate">{formatLinkLabel(url)}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
 
                 <div className="flex items-center justify-between mt-auto pt-2 border-t border-paper-deep/30 shrink-0">
                   <span className="text-[11px] text-ink-ghost font-mono tabular-nums truncate max-w-[170px]">

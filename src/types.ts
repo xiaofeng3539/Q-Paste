@@ -63,6 +63,10 @@ export interface ClipboardItem {
   sort_order?: number
   /** 金库列表自定义拖拽排序权重（值越大越靠前） */
   vault_sort_order?: number
+  /** 图片 OCR 识别后回写的可检索文字 */
+  ocr_text?: string
+  /** 剪贴板来源应用名称（如 Chrome / VS Code / 微信） */
+  source_app?: string
 }
 
 export interface UpdateMetaParams {
@@ -71,6 +75,7 @@ export interface UpdateMetaParams {
   alias?: string
   tags?: string
   isSensitive?: boolean
+  ocrText?: string
 }
 
 export interface ElectronAPI {
@@ -80,8 +85,9 @@ export interface ElectronAPI {
   getHistoryIds: () => Promise<number[]>
   searchLocalItems: (ids: number[], query: string) => Promise<number[]>
   getItemContent: (id: number) => Promise<string>
+  getItemThumbnail: (id: number) => Promise<string>
   getOcrConfig: () => Promise<{ langPath: string; workerPath: string; corePath: string }>
-  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean }) => Promise<{ id: number; updated: boolean }>
+  insertItem: (item: { type: string; content: string; preview: string; charCount: number; storageSize: number; createdAt: string; isSensitive?: boolean; sourceApp?: string }) => Promise<{ id: number; updated: boolean }>
   deleteItem: (id: number) => Promise<boolean>
   deleteItems: (ids: number[]) => Promise<boolean>
   forceClearData: (type: 'images' | 'all') => Promise<{ success: boolean; error?: string }>
@@ -96,6 +102,17 @@ export interface ElectronAPI {
   writeImage: (dataUrl: string) => Promise<boolean>
   writeHtml: (html: string) => Promise<boolean>
   writeFiles: (paths: string[]) => Promise<boolean>
+  pasteToPrevious: () => Promise<{ pasted: boolean }>
+  saveToFloral: (payload: {
+    mode: 'new' | 'append'
+    itemId?: number
+    type: string
+    title?: string
+    alias?: string
+    preview?: string
+    text?: string
+    files?: string[]
+  }) => Promise<{ success: boolean; noteId?: string; title?: string; created?: boolean; error?: string }>
   openUrl: (url: string) => Promise<boolean>
   openFile: (filePath: string) => Promise<boolean>
   onClipboardChanged: (callback: (data: ClipboardChangedData) => void) => () => void
@@ -175,6 +192,7 @@ export interface ClipboardChangedData {
   charCount?: number
   storageSize?: number
   createdAt: string
+  sourceApp?: string
   id?: number
   updated?: boolean
   isSensitive?: boolean

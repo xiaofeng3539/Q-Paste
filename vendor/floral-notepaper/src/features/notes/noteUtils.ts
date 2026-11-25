@@ -123,3 +123,12 @@ export function formatTime(value: string): string {
   if (Number.isNaN(date.getTime())) return "--:--";
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
+
+export const CATEGORY_TONE_COUNT = 6;
+
+export function getCategoryToneClass(namedCategoryIndex: number): string {
+  const safeIndex =
+    ((Math.trunc(namedCategoryIndex) % CATEGORY_TONE_COUNT) + CATEGORY_TONE_COUNT) %
+    CATEGORY_TONE_COUNT;
+  return `floral-cat-tone-${safeIndex}`;
+}
