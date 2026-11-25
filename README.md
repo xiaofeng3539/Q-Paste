@@ -2,7 +2,7 @@
 
 > 一款极简、高效的 Windows 桌面剪贴板管理工具，助你告别繁杂的复制粘贴。
 
-![Version](https://img.shields.io/badge/version-1.4.0-blue)
+![Version](https://img.shields.io/badge/version-1.4.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-windows-blue)
 
@@ -90,7 +90,7 @@ Q-Paste 静默运行于系统托盘，自动捕获你复制过的文本、链接
 
 前往本仓库右侧的 **Releases** 页面，下载最新版本的安装程序：
 
-- **文件名**：`Q-Paste.Setup.v1.4.0.exe`（Windows）
+- **文件名**：`Q-Paste.Setup.v1.4.1.exe`（Windows）
 - **安装**：下载后双击运行，按照向导完成安装即可
 - **升级**：已安装旧版本会通过内置自动更新收到新版本提示；花笺模式可在「关于 → 检查更新」手动检查
 

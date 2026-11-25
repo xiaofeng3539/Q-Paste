@@ -4,6 +4,7 @@ const path = require('node:path')
 const { createRequire } = require('node:module')
 const { describe, it } = require('node:test')
 const assert = require('node:assert/strict')
+const { version } = require('../package.json')
 
 const builder = createRequire(require.resolve('electron-builder'))
 const asar = createRequire(builder.resolve('app-builder-lib'))('@electron/asar')
@@ -12,7 +13,7 @@ const archive = path.join(output, 'win-unpacked/resources/app.asar')
 
 describe('完整安装包体积与资源', () => {
   it('Electron 45 安装包小于 130 MiB', () => {
-    assert(fs.statSync(path.join(output, 'Q-Paste.Setup.v1.4.0.exe')).size < 130 * 1024 * 1024)
+    assert(fs.statSync(path.join(output, `Q-Paste.Setup.v${version}.exe`)).size < 130 * 1024 * 1024)
   })
 
   it('包含两种模式页面、数据库线程和 Windows 剪贴板模块', () => {

@@ -1,6 +1,6 @@
 {
   "name": "q-paste",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Q-Paste - 跨平台剪贴板管理工具",
   "license": "MIT",
   "main": "dist-electron/main.js",
